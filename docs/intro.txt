@@ -1,0 +1,254 @@
+
+Because of our current runtime environment, and because of the RPC semantics, 
+this library is implemented as plain C, not C++.
+
+This library allows a program to build a graph (or subgraph), and then execute
+the graph multiple times on the DSP.  A graph preparation pass is required
+between graph construction and graph execution, which allows for the graph
+to be prepared for optimized execution.
+
+In order to aid in compatibility detection, the API:
+
+	int32_t hexagon_nn_version(int *version)
+
+will set the memory at *version to an API version, and return 0 on success.
+Failure of this function typically means that the hexagon_nn library could
+not be loaded for some reason.
+
+
+Before creating a graph, it is recommended to allow the environment on the
+DSP to configure some settings.  So before creating any new graphs, it is 
+recommended that you call:
+
+	int32_t hexagon_nn_config();
+
+While this function has no program effect, it may help performance or the
+ability to allocate large amounts of memory.
+
+It returns zero.
+
+A new graph can be initialized with:
+
+	nn_id hexagon_nn_init();
+
+This creates a new graph and returns an identifier to refer to the new graph.
+When a graph is created, it can not be executed, but it can be added to.  
+Multiple graphs can be created and can be kept "alive" in the DSP environment
+simultaneously.
+
+Once a graph is initialized, you can do three operations at any time until the
+graph is torn down.  These are:
+
+	void hexagon_nn_snpprint(nn_id id, char *buf, uint32_t length);
+
+This function pretty-prints the graph into the provided buffer.
+
+	void hexagon_nn_getlog(nn_id id, char *buf, uint32_t length);
+
+This function copies the log messages into the provided buffer, and resets the
+internal log buffer.
+
+	void hexagon_nn_set_debug_level(nn_id id, int level);
+
+This function will change the debug verbosity level for messages.
+
+After a graph is initialized, nodes can be added to it.
+
+
+
+
+It seems as though the sizes of the tensors are not necessarily known at the time
+we instantiate the ops, and so each node determines how much work to do based on 
+the sizes of the input tensors it observes at execute time.  I'm not sure
+that's a requirement, but I've mostly kept that ability in the strawman
+proposal below.  However I do require that a maximum size for output data is
+given to me so that I know how much to allocate.  If that's not important and 
+sizes are always fixed it might be a little easier to work with fixed sizes.
+
+
+First, we'll have an initialization function:
+
+	nn_id hexagon_nn_init();
+
+Which will prepare to begin definition of a new graph.
+
+The return value is an identifier that can refer to the graph.  This will be used
+to be able to have multiple graphs alive simultaneously.
+
+NN_ID_INVALID is returned for error.
+
+Once a graph is initialized, you can do two operations until the graph is torn down:
+
+The most useful is:
+
+	void hexagon_nn_snpprint(nn_id id, char *buf, uint32_t length);
+
+which pretty-prints the graph into the provided buffer.
+
+The next most useful is:
+
+	void hexagon_nn_set_debug_level(nn_id id, int level);
+
+Which will change the debug verbosity level for a graph.
+
+
+For connections between nodes, a single data type is supported. It contains:
+	* Four dimensions: batches, height, width, and depth.  Depth is most-major.
+	* A pointer to data
+
+Scalar values may be defined as BHWD=1,1,1,1. 
+
+Shapes may be defined by setting data to NULL.
+
+After a graph is initialized, nodes can be added to it.  Nodes are executed in
+the order they are added, so the creation order is important.  There are two
+functions to append nodes to the graph.
+
+Const nodes are added with:
+
+	int hexagon_nn_append_const_node(
+		nn_id id,
+		uint32_t node_id,
+		uint32_t batches,
+		uint32_t height,
+		uint32_t width,
+		uint32_t depth,
+		const char *data,
+		uint32_t data_length);
+
+Const nodes have a single output, and the output is always the
+batches/height/width/depth/data value provided.
+
+Other nodes are appended with:
+
+	typedef enum {
+		NN_PAD_NA,
+		NN_PAD_SAME,
+		NN_PAD_VALID,
+	} padding_type;
+
+	typedef struct {
+		uint32_t src_id;
+		uint32_t output_idx;
+	} hexagon_nn_input;
+
+	typedef struct {
+		uint32_t max_size;
+		uint32_t unused;
+	} hexagon_nn_output;
+
+	int hexagon_nn_append_node(
+		nn_id id,
+		uint32_t node_id,
+		uint32_t operation,
+		padding_type padding,
+		const hexagon_nn_input *inputs,
+		uint32_t n_inputs,
+		const hexagon_nn_output *outputs,
+		uint32_t n_outputs);
+
+Each node requires an identifier number to be able to refer to nodes.  The
+identifier is selected by the caller, but Node ID 0 and Node IDS > 0xF000_0000
+are reserved.
+
+Non-Const nodes may have zero or more inputs and zero or more outputs.  An
+input is described as a source node ID as well as an output index to refer to
+which one of several outputs a node may have.  An output is described with a
+maximum size.  The true size of an output can be computed dynamically, but the
+maximum amount of data storage required by the output must be defined by the
+caller.
+
+Operations can also have a padding option.  If padding does not apply, chose
+NN_PAD_NA.  For nodes that can have padding, the caller may choose SAME or
+VALID padding.  SAME padding means the output size should be roughly the SAME
+as the input, and VALID padding means that you should only use input values
+that are VALID, which results in a smaller output size for larger filter
+windows.
+
+All operations create memory to capture all the information; the data does not
+need to persist on the caller side.
+
+Nodes can not be added after the network has been prepared for execution.
+
+Returns 0 on success, nonzero otherwise.
+
+	int hexagon_nn_prepare(nn_id id);
+
+Prepares a network for execution.  This is required after all the nodes have been
+appended, but before execution.  This provides a hook where memory can be
+allocated, data can be rearranged, inputs and outputs can be linked up, 
+and things in the graph could be optimized. 
+
+Once a network has been prepared, it can no longer be appended to, but 
+it can be executed.
+
+Returns 0 on success, nonzero otherwise.
+
+	int hexagon_nn_execute(nn_id id, 
+		uint32_t batches_in, 
+		uint32_t height_in, 
+		uint32_t width_in, 
+		uint32_t depth_in, 
+		const void *data_in,
+		uint32_t data_in_len,
+		uint32_t *batches_out, 
+		uint32_t *height_out, 
+		uint32_t *width_out, 
+		uint32_t *depth_out, 
+		void *data_out,
+		uint32_t max_data_out_len,
+		uint32_t *data_len_out);
+
+Executes a network, with provided input data and returning output data.
+
+Execution will fail if the network has not been prepared.
+
+Input is provided to the INPUT node, and output is returned from the OUTPUT node.
+
+Returns 0 on success, nonzero otherwise.
+
+	int hexagon_nn_teardown(nn_id id);
+
+Tears down and frees a nn graph.  This can be done at any time after
+hexagon_nn_init(), and afterwords the nn_id id will be invalid.
+
+Returns 0 on success, nonzero otherwise.
+
+	struct perfinfo {
+		unsigned long node_id;
+		unsigned long executions;
+		unsigned long counter_lo;
+		unsigned long counter_hi;
+	};
+
+	int hexagon_nn_get_perfinfo(
+		nn_id id,
+		hexagon_nn_perfinfo *info_out,
+		uint32_t info_out_max_len,
+		uint32_t *n_items_returned);
+
+Gets performance info for the nodes.  It fills out the array of perf info
+structures.
+
+Returns 0 on success, nonzero otherwise.
+
+	int hexagon_nn_reset_perfinfo(
+		nn_id id,
+		uint32_t event);
+
+Resets the per-node performance counters, and changes the performance monitor
+unit event ID to the specified one.  Event ID 0 counts cycles, event ID 1 and 2 
+are defined by the op (and typically unused).  All other event IDs match the
+hardware PMU event ID.
+
+Returns 0.
+
+	hexagon_nn_last_execution_cycles(
+		nn_id id,
+		uint32_t *cycles_lo_out,
+		uint32_t *cycles_hi_out)
+
+Returns the total number of processor cycles during execution of
+the most recent hexagon_nn_execute() call.
+
+

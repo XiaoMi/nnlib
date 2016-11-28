@@ -1,0 +1,48 @@
+/* 
+ * You probably want to add nodes to the end,
+ * otherwise the interface becomes incompatible.
+ */
+DEF_OP(INPUT)
+DEF_OP(OUTPUT)
+DEF_OP(Nop)
+DEF_OP(Const)
+DEF_OP(Check)
+DEF_OP(Close_float32)
+DEF_OP(Close_quint8)
+DEF_OP(Close_q_quint8)
+DEF_OP(Close_int32)
+DEF_OP(Close_qint32)
+DEF_OP(PPrint_8)
+DEF_OP(PPrint_32)
+DEF_OP(PPrint_float)
+DEF_OP(PreFree)
+DEF_OP(Flatten)
+
+#ifndef DEF_OP_WREF
+#define DEF_OP_WREF(NAME) DEF_OP(NAME) DEF_OP(NAME##_ref)
+#define __SELF_DEF_OP_WREF
+#endif
+
+DEF_OP_WREF(QuantizedConv2d_8x8to32)
+DEF_OP_WREF(QuantizedMatMul_8x8to32)
+DEF_OP_WREF(QuantizeDownAndShrinkRange_32to8)
+DEF_OP_WREF(QuantizedRelu_8)
+DEF_OP_WREF(QuantizedReluX_8)
+DEF_OP_WREF(QuantizedMaxPool_8)
+DEF_OP_WREF(QuantizedAvgPool_8)
+DEF_OP_WREF(QuantizedConcat_8)
+DEF_OP_WREF(QuantizedBiasAdd_8p8to32)
+DEF_OP_WREF(Min_f)
+DEF_OP_WREF(Max_f)
+DEF_OP_WREF(Quantize)
+DEF_OP_WREF(Dequantize)
+DEF_OP_WREF(Supernode_8x8p8to8)
+
+DEF_OP(QuantizedFlatten)
+DEF_OP(Softmax_f)
+
+#ifdef __SELF_DEF_OP_WREF
+#undef __SELF_DEF_OP_WREF
+#undef DEF_OP_WREF
+#endif
+

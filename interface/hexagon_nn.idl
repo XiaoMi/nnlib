@@ -1,0 +1,125 @@
+
+
+/*
+ * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted (subject to the limitations in the
+ * disclaimer below) provided that the following conditions are met:
+ *
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *
+ *    * Redistributions in binary form must reproduce the above
+ *      copyright notice, this list of conditions and the following
+ *      disclaimer in the documentation and/or other materials provided
+ *      with the distribution.
+ *
+ *    * Neither the name of The Linux Foundation nor the names of its
+ *      contributors may be used to endorse or promote products derived
+ *      from this software without specific prior written permission.
+ *
+ * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
+ * GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
+ * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+ * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+ * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ */
+/*
+ * Now that that's out of the way, let's get to the good stuff.
+ * 
+ * This contains memory allocation routines
+ */
+
+#ifndef NN_GRAPH_IDL
+#define NN_GRAPH_IDL 1
+
+interface hexagon_nn {
+
+/* Data types used */
+
+struct input {
+	unsigned long src_id;
+	unsigned long output_idx;	// used if src_id not reserved
+};
+
+struct output {
+	unsigned long max_size;
+	unsigned long unused;		// Please place 0 here for now
+};
+
+struct perfinfo {
+	unsigned long node_id;
+	unsigned long executions;
+	unsigned long counter_lo;	/* IDL generates broken 64 bit types :-( */
+	unsigned long counter_hi;	/* IDL generates broken 64 bit types :-( */
+};
+
+typedef long nn_id;
+enum padding_type {
+	NN_PAD_NA,
+	NN_PAD_SAME,
+	NN_PAD_VALID
+};
+
+/* Actual functions in the interface */
+
+long init();
+long set_debug_level(in nn_id id, in long level);
+long snpprint(in nn_id id, inrout sequence<octet> buf);
+long getlog(in nn_id id, inrout sequence<octet> buf);
+long append_node(
+	in nn_id id,
+	in unsigned long node_id,
+	in unsigned long operation,
+	in padding_type padding,
+	in sequence<input> inputs,
+	in sequence<output> outputs);
+long append_const_node(
+	in nn_id id,
+	in unsigned long node_id,
+	in unsigned long batches,
+	in unsigned long height,
+	in unsigned long width,
+	in unsigned long depth,
+	in sequence<octet> data);
+long prepare(in nn_id id);
+long execute(in nn_id id, 
+	in unsigned long batches_in, 
+	in unsigned long height_in, 
+	in unsigned long width_in, 
+	in unsigned long depth_in, 
+	in sequence<octet> data_in, 
+	rout unsigned long batches_out, 
+	rout unsigned long height_out, 
+	rout unsigned long width_out, 
+	rout unsigned long depth_out, 
+	rout sequence<octet> data_out,
+	rout unsigned long data_len_out);
+long teardown(in nn_id id);
+long disable_dcvs();
+long config();
+long get_perfinfo(in nn_id id, rout sequence<perfinfo> info_out, rout long n_items);
+long reset_perfinfo(in nn_id id, in unsigned long event);
+long last_execution_cycles(in nn_id id, rout unsigned long cycles_lo, rout unsigned long cycles_hi);
+long version(rout long ver);
+
+/* The following are deprecated */
+
+long GetHexagonBinaryVersion(rout long ver); // deprecated name for version(rout long ver);
+long PrintLog(in sequence<octet> buf);
+
+}; /* interface hexagon_nn */
+
+
+#endif
+

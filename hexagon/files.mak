@@ -1,0 +1,61 @@
+HEXAGON_NN_C_SRCS := \
+hexagon/src/allocate.c \
+hexagon/src/execute.c \
+hexagon/src/interface.c \
+hexagon/src/log.c \
+hexagon/src/newnode.c \
+hexagon/src/pprint.c \
+hexagon/src/prepare.c \
+hexagon/src/tensor.c \
+hexagon/src/perfinfo.c \
+hexagon/src/graphops.c \
+hexagon/src/nn_os.c \
+hexagon/src/pad2d.c \
+hexagon/src/im2col_o.c \
+hexagon/ops/src/op_avgpool.c \
+hexagon/ops/src/op_biasadd.c \
+hexagon/ops/src/op_check.c \
+hexagon/ops/src/op_close.c \
+hexagon/ops/src/op_concat.c \
+hexagon/ops/src/op_const.c \
+hexagon/ops/src/op_conv2d.c \
+hexagon/ops/src/op_flatten.c \
+hexagon/ops/src/op_input.c \
+hexagon/ops/src/op_matmul.c \
+hexagon/ops/src/op_maxpool.c \
+hexagon/ops/src/op_minmax.c \
+hexagon/ops/src/op_softmax.c \
+hexagon/ops/src/op_nop.c \
+hexagon/ops/src/op_output.c \
+hexagon/ops/src/op_pprint.c \
+hexagon/ops/src/op_prefree.c \
+hexagon/ops/src/op_quantize.c \
+hexagon/ops/src/op_relu.c \
+hexagon/ops/src/op_requantize.c \
+hexagon/ops/src/op_supernode.c \
+hexagon/ops/src/optab.c \
+
+HEXAGON_NN_ASM_SRCS := \
+hexagon/asm_src/gemacca_h.S \
+hexagon/asm_src/gemaccb_h.S \
+hexagon/asm_src/l2pref.S \
+hexagon/asm_src/gemaddvvm_h.S \
+hexagon/asm_src/gemmacbbw_h.S \
+hexagon/asm_src/gemmpybbw_h.S \
+hexagon/asm_src/gemsuma_h.S \
+hexagon/asm_src/gemsumb_h.S \
+hexagon/asm_src/nothing.S \
+hexagon/asm_src/quantize_h.S \
+hexagon/asm_src/biasadd_relu_requant.S \
+hexagon/asm_src/vmemcpy_h.S \
+hexagon/asm_src/memconvert_hvx.S \
+hexagon/asm_src/avgpool_aligned_hvx.S \
+hexagon/asm_src/avgpool_nonaligned_hvx.S \
+hexagon/asm_src/maxpool_aligned_hvx.S \
+hexagon/asm_src/maxpool_nonaligned_hvx.S \
+hexagon/asm_src/gemvmpybbw_h.S \
+hexagon/asm_src/im2col33322_h.S \
+hexagon/asm_src/im2col7732_h.S \
+hexagon/asm_src/biasadd_relu_requant_nonalign_hvx.S \
+hexagon/asm_src/vmemset_h.S
+

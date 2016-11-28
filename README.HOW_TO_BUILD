@@ -1,0 +1,28 @@
+
+Here's how I'm able to build this.
+
+0) Download and install the Hexagon SDK 3.0
+
+1) Put this directory in Qualcomm/Hexagon_SDK/3.0/examples/common
+	(Yes, I know that's horrible.  I tried to fight the build system
+	unsuccessfully last week.  I'll work on fixing it.)
+
+2) Copy the "glue" directory from another example in examples/common to this directory.
+   for example: cp -r ../median3x3_v60/glue .
+
+3) make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv72_v60
+
+4) make tree VERBOSE=1 V=android_Release
+
+5) adb root ; adb remount
+
+6) adb push android_Release/ship/graph_app /data
+
+7) adb push hexagon_Release_dynamic_toolv72_v60/ship/libhexagon_nn_skel.so /system/vendor/lib/rfsa/adsp/
+
+8) adb reboot ; sleep 10; adb wait-for-device ; adb root ; adb remount     # (not sure if really necessary)
+
+9) adb shell /data/graph_app
+
+
+

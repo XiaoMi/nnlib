@@ -1,0 +1,12 @@
+
+Q: I get performance info for my nodes.  What happened to all the convolution,
+   and why is Relu taking so long?
+
+A: The framework optimizes the common idiom
+   QuantizedConv2D->Requantize->BiasAdd->Requantize->Relu into a single node.
+   The ID of this new node is the ID of the Relu node, since other nodes will be
+   using it as their source.  Since the interface only knows Node IDs, this is
+   reported in the output information as the Relu node.
+
+
+

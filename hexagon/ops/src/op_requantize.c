@@ -43,9 +43,6 @@
 #include <nn_graph.h>
 #include <string.h>
 #include <quantize.h>
-#ifdef __hexagon__
-#include <hexagon_standalone.h>
-#endif
 
 static int requantize_execute(struct nn_node *self, struct nn_graph *nn)
 {

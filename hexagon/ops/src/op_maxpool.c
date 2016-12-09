@@ -224,6 +224,7 @@ static int maxpool_execute(struct nn_node *self, struct nn_graph *nn)
 		.whoami = 1,
 	};
 	nn_sem_init(&worker_info.donesem,0);
+	nn_sem_init(&my_info.donesem,0);
 
 #ifdef __hexagon__
         //SIM_ACQUIRE_HVX;

@@ -61,6 +61,7 @@ static void *nn_os_worker(void *vinfo)
 	nn_sem_post(&info->sem);
 	while (1) {
 		work.raw = nn_pipe_recv(pipe);
+		//logmsg(nn,0,"nn_pipe_recv work.raw=%x", work.raw);
 		if (work.f == NULL) break;
 		work.f(nn,work.arg);
 	}
@@ -79,6 +80,7 @@ void nn_os_work_for_vector(struct nn_graph *nn, void (*f)(struct nn_graph *, voi
 	union workitem msg;
 	msg.f = f;
 	msg.arg = arg;
+	//logmsg(nn,0,"nn_pipe_send msg.raw=%x", msg.raw);
 	nn_pipe_send(nn->vec_work, msg.raw);
 }
 
@@ -91,12 +93,10 @@ void nn_os_work_for_scalar(struct nn_graph *nn, void (*f)(struct nn_graph *, voi
 	nn_pipe_send(nn->nonvec_work, msg.raw);
 }
 
-
-#ifdef USE_H2_NOT_QURT
-
+#if defined(USE_OS_H2)
 h2_vecaccess_state_t vecstate;
 // h2_mutex_t init_mutex;
-int vec_initted;
+int vec_initted = 0;
 
 int nn_os_vector_acquire()
 {
@@ -109,37 +109,16 @@ void nn_os_vector_release(int idx)
 	h2_vecaccess_release(&vecstate,idx);
 }
 
-int nn_os_workers_spawn(struct nn_graph *nn)
+void nn_os_vector_init()
 {
-	pthread_t vec,scal1,scal2;
-	pthread_attr_t attrs;
-	pthread_attr_init(&attrs);
-	pthread_attr_setstacksize(&attrs,8192);
-	struct tinfo info;
 	if (!vec_initted) {
 		vec_initted = 1;
 		h2_vecaccess_init(&vecstate,H2_VECACCESS_HVX_128);
 	}
-	nn->vec_work = h2_pipe_alloc(128);
-	nn->nonvec_work = h2_pipe_alloc(128);
-	nn_sem_init(&info.sem,0);
-	info.nn = nn;
-
-	/* Create vector */
-	info.pipe = nn->vec_work;
-	pthread_create(&vec,&attrs,nn_os_worker,&info);
-	nn_sem_wait(&info.sem);
-	/* create scalar */
-	info.pipe = nn->nonvec_work;
-	pthread_create(&scal1,&attrs,nn_os_worker,&info);
-	nn_sem_wait(&info.sem);
-	pthread_create(&scal2,&attrs,nn_os_worker,&info);
-	nn_sem_wait(&info.sem);
-	return 0;
+	
 }
 
-#else
-
+#elif defined(USE_OS_QURT)
 #include "dspCV_hvx.h"
 #include <qurt.h>
 
@@ -155,7 +134,7 @@ static void __attribute__((unused)) qurt_worker(void *p)
 
 int nn_os_vector_acquire()
 {
-        if (dspCV_hvx_lock(DSPCV_HVX_MODE_128B, 0) < 0) {
+		if (dspCV_hvx_lock(DSPCV_HVX_MODE_128B, 0) < 0) {
 		return 0;
 	}
 	return 0;
@@ -221,5 +200,52 @@ void nn_os_hvx_power_off(struct nn_graph *nn)
 	dspCV_hvx_power_off();
 }
 
+/* depending on config, get pcycles or PMU events */
+unsigned long long int nn_os_get_perfcount(struct nn_graph *nn) {
+	uint32_t lo;
+	uint32_t hi;
+	uint64_t ret;
+	if (nn->perf_event < NN_GRAPH_PERFEVENT_HWPMU) {
+		if (nn->perf_event == 0) return qurt_get_core_pcycles();
+	}
+	lo = qurt_pmu_get(QURT_PMUCNT0);
+	hi = qurt_pmu_get(QURT_PMUCNT1);
+	ret = hi;
+	ret <<= 32;
+	ret |= lo;
+	return ret;
+}
 #endif
 
+#if !defined(USE_OS_QURT)
+
+int nn_os_workers_spawn(struct nn_graph *nn)
+{
+	pthread_t vec,scal1,scal2;
+	pthread_attr_t attrs;
+	pthread_attr_init(&attrs);
+	pthread_attr_setstacksize(&attrs,8192);
+	struct tinfo info;
+
+	nn->vec_work = nn_pipe_alloc(nn, 128);
+	nn->nonvec_work = nn_pipe_alloc(nn, 128);
+	//logmsg(nn,0,"nn_pipe_alloc vec: elements=%d", nn->vec_work->elements);
+	//logmsg(nn,0,"nn_pipe_alloc sca: elements=%d", nn->nonvec_work->elements);
+	nn_sem_init(&info.sem,0);
+	info.nn = nn;
+
+	nn_os_vector_init();
+
+	/* Create vector */
+	info.pipe = nn->vec_work;
+	pthread_create(&vec,&attrs,nn_os_worker,&info);
+	nn_sem_wait(&info.sem);
+	/* create scalar */
+	info.pipe = nn->nonvec_work;
+	pthread_create(&scal1,&attrs,nn_os_worker,&info);
+	nn_sem_wait(&info.sem);
+	pthread_create(&scal2,&attrs,nn_os_worker,&info);
+	nn_sem_wait(&info.sem);
+	return 0;
+}
+#endif

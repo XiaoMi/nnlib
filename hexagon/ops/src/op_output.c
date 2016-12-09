@@ -47,6 +47,11 @@
 static int output_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"output execute. self=%p ",self);
+	if (nn->output_data->max_size < self->inputs[0]->data_size) {
+		return errlog(nn,"output too small: %d < %d",
+			nn->output_data->max_size,
+			self->inputs[0]->data_size);
+	}
 	nn->output_data->shape = self->inputs[0]->shape;
 	nn->output_data->data_size = self->inputs[0]->data_size; // FIXME: check vs. max size
 #if 0

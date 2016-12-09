@@ -45,9 +45,6 @@
 #include <stdlib.h>
 #include <quantize.h>
 
-#ifdef __hexagon__
-#include <hexagon_standalone.h>
-#endif
 #ifndef __hexagon__
 #include <malloc.h>
 #endif

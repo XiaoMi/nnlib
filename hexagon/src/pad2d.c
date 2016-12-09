@@ -148,3 +148,20 @@ void unpad2d(
     }
     return;
 }
+
+void unpad2d_bytes(
+    const uint8_t* input_data, int input_height, int input_width,  
+    uint8_t* output_data, int output_height, int output_width)
+{
+    int out_y ;
+
+    const uint8_t* ptr_in = input_data;
+    uint8_t* ptr_out = output_data;
+    for (out_y = 0; out_y < output_height; out_y++)
+    {
+        vmemcpy_asm(ptr_out, ptr_in, sizeof(uint8_t)*output_width);
+        ptr_out += output_width;
+        ptr_in += input_width;
+    }
+    return;
+}

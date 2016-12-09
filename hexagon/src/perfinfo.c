@@ -42,7 +42,8 @@
  * This contains the code to get/reset performance info
  */
 
-#ifndef __hexagon__
+//#ifndef __hexagon__
+#if !defined(USE_OS_QURT)
 static inline void config_event_hw(struct nn_graph *nn, uint32_t event) {}
 #else
 #include <qurt.h>

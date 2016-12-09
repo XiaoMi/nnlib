@@ -96,7 +96,7 @@ struct nn_node_ops nn_ops_for_PPrint_32 = {
 	.dtor = node_free_common,
 };
 
-struct nn_node_ops nn_ops_for_PPrint_float = {
+struct nn_node_ops nn_ops_for_PPrint_f = {
 	.execute = pprint_f_execute,
 	.check = pprint_check,
 	.ctor = node_alloc_common,

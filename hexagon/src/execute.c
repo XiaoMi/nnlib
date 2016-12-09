@@ -74,9 +74,9 @@ int do_execute(struct nn_graph *nn, const struct tensor *input, struct tensor *o
 	vecinfo = nn_os_vector_acquire();
 	for (i = 0; i < ITERS; i++) {
 	for (node = nn->head; node != NULL; node = node->next) {
-		perf_start = nn_os_get_cycles();
+		perf_start = nn_os_get_perfcount(nn);
 		if ((err = node->ops->execute(node,nn)) != 0) return err;
-		perf_stop = nn_os_get_cycles();
+		perf_stop = nn_os_get_perfcount(nn);
 		node->perfcounter += (perf_stop - perf_start);
 		node->executions += 1;
 	}

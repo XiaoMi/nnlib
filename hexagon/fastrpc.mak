@@ -9,7 +9,7 @@ include $(QURT_IMAGE_DIR)/qurt_libs.min
 
 include hexagon/files.mak
 
-CC_FLAGS += $(MHVX_DOUBLE_FLAG) -Ihexagon/include 
+CC_FLAGS += -DUSE_OS_QURT $(MHVX_DOUBLE_FLAG) -Ihexagon/include
 
 # Use -O0 temporarily when trying to debug C code.
 #_OPT = -O0

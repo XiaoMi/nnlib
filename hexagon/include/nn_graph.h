@@ -45,8 +45,8 @@
 #include <nn_graph_ops.h>
 #include <nn_graph_types.h>
 #include <nn_graph_if.h>
-#include <nn_graph_os.h>
 #include <nn_asm_ops.h>
+#include <nn_graph_os.h>
 
 struct nn_node_ops;
 struct freelist_node;
@@ -196,6 +196,11 @@ void im2col_co(
 
 
 
+static inline uint32_t nn_align_up(uint32_t align_amt, uint32_t val)
+{
+	uint32_t minusone = align_amt - 1;
+	return ((val + minusone) & (~minusone));
+}
 
 #define RESET_PMU() __asm__ __volatile__ (" r0 = #0x48 ; trap0(#0); \n" : : : "r0","r1","r2","r3","r4","r5","r6","r7","memory")
 #define DUMP_PMU() __asm__ __volatile__ (" r0 = #0x4a ; trap0(#0); \n" : : : "r0","r1","r2","r3","r4","r5","r6","r7","memory")

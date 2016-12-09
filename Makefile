@@ -1,8 +1,15 @@
 # You can change this line to be another graph setup file
 GRAPHINIT := test/graphinit_med.c
+#GRAPHINIT := test/graphinit_test.c
 
 # You can change this line to be image data
 TESTDATA := test/zeros_299x299.c
+
+ifeq (,$(V))
+
+include hexagon/nonfastrpc.mak
+
+else
 
 include glue/defines.min
 
@@ -15,3 +22,4 @@ endif
 
 #always last
 include $(RULES_MIN)
+endif

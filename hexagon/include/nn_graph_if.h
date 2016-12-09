@@ -69,9 +69,10 @@ struct perfinfo {
 	};
 };
 
+int hexagon_nn_version(int *ver);
 nn_id_t hexagon_nn_init();
-int hexagon_nn_snpprint(nn_id_t id, char *buf, uint32_t length);
-int hexagon_nn_getlog(nn_id_t id, char *buf, uint32_t length);
+int hexagon_nn_snpprint(nn_id_t id, unsigned char *buf, uint32_t length);
+int hexagon_nn_getlog(nn_id_t id, unsigned char *buf, uint32_t length);
 int hexagon_nn_set_debug_level(nn_id_t id, int level);
 
 int hexagon_nn_append_node(
@@ -115,6 +116,10 @@ int hexagon_nn_get_perfinfo(nn_id_t id,
 	struct perfinfo *info_out, 
 	unsigned int info_out_len,
 	unsigned int *n_items_out);
+
+int hexagon_nn_op_name_to_id(const char *name, unsigned int *id);
+int hexagon_nn_op_id_to_name(const unsigned int id, char *name, int name_len);
+int hexagon_nn_set_powersave_level(unsigned int level);
 
 
 

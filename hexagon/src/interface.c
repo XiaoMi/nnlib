@@ -49,7 +49,7 @@
 #include <malloc.h>
 #endif
 
-#ifndef H2_H
+#if defined(USE_OS_QURT) // should be only for QURT
 #include "HAP_farf.h"
 #include "HAP_power.h"
 #include "HAP_mem.h"
@@ -90,24 +90,24 @@ nn_id_t hexagon_nn_init()
 	return nn_graph_to_id(graph);
 }
 
-int hexagon_nn_getlog(nn_id_t id, char *buf, uint32_t length)
+int hexagon_nn_getlog(nn_id_t id, unsigned char *buf, uint32_t length)
 {
 	struct nn_graph *graph;
-	strncat(buf,"id not found\n",length);
+	strncpy((char *)buf,"id not found\n",length);
 	if ((graph = nn_id_to_graph(id)) == NULL) return -1;
 	buf[length-1] = '\0';
-	strncat(buf,graph->logbuf,length-1);
+	strncpy((char *)buf,graph->logbuf,length-1);
 	graph->logbuf_pos = 0;
 	graph->logbuf[graph->logbuf_pos] = '\0';
 	return 0;
 }
 
-int hexagon_nn_snpprint(nn_id_t id, char *buf, uint32_t length)
+int hexagon_nn_snpprint(nn_id_t id, unsigned char *buf, uint32_t length)
 {
 	struct nn_graph *graph;
-	strncat(buf,"id not found\n",length);
+	strncat((char *)buf,"id not found\n",length);
 	if ((graph = nn_id_to_graph(id)) == NULL) return -1;
-	do_snpprint(graph,buf,length);
+	do_snpprint(graph,(char *)buf,length);
 	return 0;
 }
 
@@ -261,7 +261,7 @@ int hexagon_nn_reset_perfinfo(nn_id_t id, uint32_t event)
 
 int hexagon_nn_version(int *ver)
 {
-	*ver = 3;
+	*ver = 90;
 	return 0;
 }
 
@@ -283,12 +283,33 @@ int hexagon_nn_GetHexagonBinaryVersion(int *ver)
 	return hexagon_nn_version(ver);
 }
 
-int hexagon_nn_PrintLog(const uint8_t data_in, uint32_t data_in_len)
+int hexagon_nn_PrintLog(const uint8_t data_in, unsigned int data_in_len)
 {
 	return 0;
 }
 
-#ifndef H2_H
+int hexagon_nn_op_name_to_id(const char *name, unsigned int *id)
+{
+	int i;
+	for (i = 0; i < NN_OPS_MAX; i++) {
+		if (0==strcmp(name,hexagon_nn_op_names[i])) {
+			*id = i;
+			return 0;
+		}
+	}
+	return -1;
+}
+
+int hexagon_nn_op_id_to_name(const unsigned int id, char *name, int name_len)
+{
+	if (id >= NN_OPS_MAX) return -1;
+	const char *opname = hexagon_nn_op_names[id];
+	if ((strlen(opname)+1) > name_len) return -1;
+	strcpy(name,opname);
+	return 0;
+}
+
+#if defined(USE_OS_QURT) // should be only for QURT
 int hexagon_nn_disable_dcvs()
 {
     HAP_power_request_t request;
@@ -298,12 +319,19 @@ int hexagon_nn_disable_dcvs()
     return HAP_power_set(NULL, &request);
 }
 
+int hexagon_nn_set_powersave_level(unsigned int level)
+{
+	if (level == 0) return hexagon_nn_disable_dcvs();
+	return 0;
+}
+
 int hexagon_nn_config()
 {
 	HAP_mem_set_grow_size(0x1000000, MAX_UINT64);
 	return 0;
 }
 #else
+int hexagon_nn_set_powersave_level(unsigned int level) { return 0; }
 int hexagon_nn_disable_dcvs() { return 0; }
 int hexagon_nn_config() { return 0; }
 

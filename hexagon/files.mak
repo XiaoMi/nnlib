@@ -10,6 +10,7 @@ hexagon/src/tensor.c \
 hexagon/src/perfinfo.c \
 hexagon/src/graphops.c \
 hexagon/src/nn_os.c \
+hexagon/src/nn_pipe_portable.c \
 hexagon/src/pad2d.c \
 hexagon/src/im2col_o.c \
 hexagon/ops/src/op_avgpool.c \
@@ -33,6 +34,19 @@ hexagon/ops/src/op_quantize.c \
 hexagon/ops/src/op_relu.c \
 hexagon/ops/src/op_requantize.c \
 hexagon/ops/src/op_supernode.c \
+hexagon/ops/src/op_avgpool_f.c \
+hexagon/ops/src/op_biasadd_f.c \
+hexagon/ops/src/op_concat_f.c \
+hexagon/ops/src/op_conv2d_f.c \
+hexagon/ops/src/op_matmul_f.c \
+hexagon/ops/src/op_maxpool_f.c \
+hexagon/ops/src/op_relu_f.c \
+hexagon/ops/src/op_lrn.c \
+hexagon/ops/src/op_lrn_f.c \
+hexagon/ops/src/op_variable.c \
+hexagon/ops/src/op_reshape.c \
+hexagon/ops/src/op_tanh_f.c \
+hexagon/ops/src/op_sigmoid_f.c \
 hexagon/ops/src/optab.c \
 
 HEXAGON_NN_ASM_SRCS := \
@@ -57,5 +71,17 @@ hexagon/asm_src/gemvmpybbw_h.S \
 hexagon/asm_src/im2col33322_h.S \
 hexagon/asm_src/im2col7732_h.S \
 hexagon/asm_src/biasadd_relu_requant_nonalign_hvx.S \
-hexagon/asm_src/vmemset_h.S
+hexagon/asm_src/vmemset_h.S \
+hexagon/asm_src/gvmacca_h.S \
+hexagon/asm_src/gvmaccb_h.S \
+hexagon/asm_src/gvmaddvvm_h.S \
+hexagon/asm_src/gvmmacbbw_h.S \
+hexagon/asm_src/gvmmpybbw_h.S \
+hexagon/asm_src/gvmsuma_h.S \
+hexagon/asm_src/gvmsumb_h.S \
+hexagon/asm_src/gvconvsum2dbbw_h.S \
+hexagon/asm_src/gvconv2dbbw_h.S \
+hexagon/asm_src/gvconvsum2dbbb_h.S \
+hexagon/asm_src/gvconv2dbbb_h.S
+
 

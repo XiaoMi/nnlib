@@ -39,6 +39,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 #include <math.h>
 #include <stdint.h>
 #include "funcs.h"
@@ -67,7 +68,7 @@ void fastrpc_setup()
 		{BUS_USAGE_PERCENT, 50},
 	};
 	if (DCVS_DISABLE) {
-		retVal = hexagon_nn_disable_dcvs();
+		retVal = hexagon_nn_set_powersave_level(0);
 		if (retVal) printf("Failed to disable DSP DCVS: %x!\n",retVal);
 	}
 	retVal = dspCV_initQ6_with_attributes(attrib,
@@ -94,9 +95,10 @@ unsigned long long GetTime(void)
 
 static inline void fastrpc_setup() {}
 static inline void fastrpc_teardown() {}
-static inline unsigned long long GetTime() {}
+static inline unsigned long long GetTime() { return 0ULL; }
 
 #endif
+
 
 int main(int argc, char *argv[])
 {
@@ -106,25 +108,25 @@ int main(int argc, char *argv[])
 	unsigned long long int start_time;
 	int APP_LOOPS = 1;
 
+
 	fastrpc_setup();
 	hexagon_nn_config();
 
 	graph_id = graph_setup();
 
-	for (i = 0; i < APP_LOOPS; i++) {
-		start_time = GetTime();
-		graph_execute(graph_id);
-		usecs += GetTime() - start_time;
-	}
-	printf("%lld usecs for %d iterations (%lld / iter)\n",
-		usecs,APP_LOOPS,usecs/APP_LOOPS);
+		for (i = 0; i < APP_LOOPS; i++) {
+			start_time = GetTime();
+			graph_execute(graph_id);
+			usecs += GetTime() - start_time;
+		}
+		printf("%lld usecs for %d iterations (%lld / iter)\n",
+			usecs,APP_LOOPS,usecs/APP_LOOPS);
 
-	graph_perfdump(graph_id);
+		graph_perfdump(graph_id);
 
-	if ((argc == 2) && (strcmp(argv[1],"pmu")==0)) {
-		graph_get_all_perf(graph_id);
-	}
-
+		if ((argc == 2) && (strcmp(argv[1],"pmu")==0)) {
+			graph_get_all_perf(graph_id);
+		}
 	graph_teardown(graph_id);
 	fastrpc_teardown();
 }

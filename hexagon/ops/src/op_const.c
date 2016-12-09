@@ -45,7 +45,6 @@
 
 static int const_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	logmsg(nn,2,"const execute. self=%p ",self);
 	/* Nothing to do! */
 	return 0;
 }

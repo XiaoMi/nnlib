@@ -102,6 +102,20 @@ void gemsumb_asm(const uint8_t * y, int * ysum, int K, int);
 void gemmpybbw_asm(const uint8_t * x, const uint8_t * y, int * z_asm, int N, int M, int K);
 void gemaddvvm_asm(const int * x0, const int * y0, int * z0, int N, int M, int * minmax, int reset);
 
+void gvconv2dbbw_asm(const uint8_t * x, const uint8_t * y, int * z, int in_width, int out_width, int zstride, int istride,
+                     int filt_width, int filt_height, int out_height, int * ptr_xsum, int * ptr_ysum, int * ptr_max);
+void gvconvsum2dbbw_asm(const uint8_t * x, const uint8_t * y, int * z, int in_width, int out_width, int zstride, int istride,
+                     int filt_width, int filt_height, int out_height, int * ptr_xsum, int * ptr_ysum, int * ptr_max,
+                     int in_offset, int zsum);
+
+void gvconv2dbbb_asm(const uint8_t * x, const uint8_t * y, uint8_t * z, int in_width, int out_width, 
+                     int zstride, int istride, int filt_width, int filt_height, int out_height, int * ptr_xsum,
+                     int * ptr_ysum, int * ptr_max, int * biasbuf, int relu_scale);
+void gvconvsum2dbbb_asm(const uint8_t * x, const uint8_t * y, uint8_t * z, int in_width, int out_width, int zstride, int istride,
+                     int filt_width, int filt_height, int out_height, int * ptr_xsum, int * ptr_ysum, int * ptr_max,
+                     int in_offset, int zsum, int * biasbuf, int relu_scale);
+
+
 void gemvmpybbw_asm(
 	const uint8_t * x,
 	int x_offset,
@@ -167,6 +181,9 @@ void im2col_cn(
 void unpad2d(const int* input_data, int input_height, int input_width,
             int* output_data, int output_height, int output_width);
 
+void unpad2d_bytes(const uint8_t* input_data, int input_height, int input_width,
+                       uint8_t * output_data, int output_height, int output_width);
+
 
 void gemm_co(const uint8_t * a, int a_offset, const uint8_t * b, int b_offset, int * c,
              int N, int M, int K, int * suma, int * sumb) ;
@@ -182,6 +199,12 @@ void im2col_slice_co(
   uint8_t* im2col_buffer, int filter_height, int filter_width, int stride,
   int output_height, int output_width, int filter_left_offset, int filter_top_offset, int patch_start, int num_patches);
 
+void fast_im2col_co(
+  const uint8_t* in_data, int in_height, int in_width, int in_depth, int in_offset,
+  uint8_t* im2col_buf, int filt_height, int filt_width, int stride,
+  int start_line, int num_lines, int out_width, int pad_left, int pad_top, int skip_unpad_k);
+
+
 static inline void l2pref(void *p, uint32_t height, uint32_t width, uint32_t stride)
 {
 	uint64_t control = Q6_P_combine_RR(stride,Q6_R_combine_RlRl(width,height));
@@ -193,5 +216,63 @@ static inline void l2fetch(void *p, uint32_t stride, uint32_t width, uint32_t he
 {
 	return l2pref(p,height,width,stride);
 }
+
+void gvmsumimw_asm(
+	const uint8_t * x, 
+	int *xsum, 
+	int o_width, 
+	int skip, 
+	int stride, 
+	int filt_width, 
+	int o_height, 
+	int y_offset, 
+	int z_offset);
+void gvmaccimw_asm(
+	const uint8_t * x, 
+	int *xsum, 
+	int o_width, 
+	int skip, 
+	int stride, 
+	int filt_width, 
+	int o_height, 
+	int y_offset);
+void gvmmpybbw_asm(
+	const uint8_t * x, 
+	const uint8_t * y, 
+	int * z_asm, 
+	int, 
+	int, 
+	int, 
+	int, 
+	int, 
+	int);
+void gvmmacbbw_asm(
+	const uint8_t * x,
+	const uint8_t * y,
+	int * z_asm,
+	int, 
+	int, 
+	int, 
+	int, 
+	int, 
+	int);
+void gvmsumb_asm(
+	const uint8_t * y,
+	int * ysum,
+	int K,
+	int offset);
+void gvmaccb_asm(
+	const uint8_t * y,
+	int * ysum,
+	int K,
+	int offset);
+void gvmaddvvm_asm(
+	int * x0,
+	int * y0,
+	int * z0,
+	int N,
+	int M,
+	int * minmax,
+	int reset);
 
 #endif

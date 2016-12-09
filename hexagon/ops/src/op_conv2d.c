@@ -423,7 +423,6 @@ static int conv2d_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 #ifdef __hexagon__
-#include <hexagon_standalone.h>
 
 #define VPAD 8
 #define HPAD 16

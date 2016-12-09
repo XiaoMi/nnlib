@@ -38,50 +38,19 @@
 /*
  */
 
-#ifdef USE_H2_NOT_QURT
-
-#include <h2.h>
-
-struct nn_graph;
-typedef h2_pipe_t nn_pipe_t;
-typedef h2_sem_t nn_sem_t;
-static inline void nn_sem_init(nn_sem_t *sem, int val) { h2_sem_init_val(sem,val); }
-static inline void nn_sem_post(nn_sem_t *sem) { h2_sem_up(sem); }
-static inline void nn_sem_wait(nn_sem_t *sem) { h2_sem_down(sem); }
-static inline void nn_pipe_send(nn_pipe_t *pipe, unsigned long long int val) { h2_pipe_send(pipe,val); }
-static inline unsigned long long int nn_pipe_recv(nn_pipe_t *pipe) { return h2_pipe_recv(pipe); }
-int nn_os_vector_acquire();
-void nn_os_vector_release(int idx);
-int nn_os_workers_spawn(struct nn_graph *nn);
-void nn_os_workers_kill(struct nn_graph *nn);
-void nn_os_work_for_vector(struct nn_graph *nn, void (*f)(struct nn_graph *, void *),void *arg);
-void nn_os_work_for_scalar(struct nn_graph *nn, void (*f)(struct nn_graph *, void *),void *arg);
-static inline void nn_os_hvx_power_on(struct nn_graph *nn) {};
-static inline void nn_os_hvx_power_off(struct nn_graph *nn) {};
-static inline uint64_t nn_os_get_cycles() { return h2_get_core_pcycles(); }
-
+#if defined(USE_OS_LINUX)
+#include "nn_graph_os_linux.h"
+#elif defined(USE_OS_H2)
+#include "nn_graph_os_h2.h"
+#elif defined(USE_OS_QURT)
+#include "nn_graph_os_qurt.h"
 #else
+#error please define a USE_OS or be smarter about how we figure out our OS
+#endif
 
-#include <qurt.h>
-
-struct nn_graph;
-typedef qurt_pipe_t nn_pipe_t;
-typedef qurt_sem_t nn_sem_t;
-static inline void nn_sem_init(nn_sem_t *sem, int val) { qurt_sem_init_val(sem,val); }
-static inline void nn_sem_post(nn_sem_t *sem) { qurt_sem_up(sem); }
-static inline void nn_sem_wait(nn_sem_t *sem) { qurt_sem_down(sem); }
-static inline void nn_pipe_send(nn_pipe_t *pipe, unsigned long long int val) { qurt_pipe_send(pipe,val); }
-static inline unsigned long long int nn_pipe_recv(nn_pipe_t *pipe) { return qurt_pipe_receive(pipe); }
-int nn_os_vector_acquire();
-void nn_os_vector_release(int idx);
 int nn_os_workers_spawn(struct nn_graph *nn);
 void nn_os_workers_kill(struct nn_graph *nn);
 void nn_os_work_for_vector(struct nn_graph *nn, void (*f)(struct nn_graph *, void *),void *arg);
 void nn_os_work_for_scalar(struct nn_graph *nn, void (*f)(struct nn_graph *, void *),void *arg);
-void nn_os_hvx_power_on(struct nn_graph *nn);
-void nn_os_hvx_power_off(struct nn_graph *nn);
-static inline uint64_t nn_os_get_cycles() { return qurt_get_core_pcycles(); }
 
-#endif
-
-#endif
+#endif // NN_GRAPH_OS_H

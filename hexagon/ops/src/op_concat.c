@@ -228,6 +228,7 @@ static int concat_execute(struct nn_node *self, struct nn_graph *nn)
 	worker_info.whoami = 1;
 
 	nn_sem_init(&worker_info.donesem,0);
+	nn_sem_init(&my_info.donesem,0);
 
 	nn_os_work_for_vector(nn,concat_execute_slice,&worker_info);
 	//concat_execute_slice(nn,&worker_info);

@@ -72,11 +72,30 @@ enum padding_type {
 };
 
 /* Actual functions in the interface */
+/* Returns 0 on success, nonzero on error unless otherwise noted */
+/* 
+ * EJP: version should always be first here, because the order here affects the FastRPC RPC internals.
+ * If version is first we should always be able to tell version changes.
+ */
+/* Get the version of the library */
+long version(rout long ver);
 
+/* Configure the hardware and software environment.  Should be called once before doing anything */
+long config();
+
+/* Initialize a new graph, returns a new nn_id or -1 on error */
 long init();
+
+/* Set debug verbosity.  Default is 0, higher values are more verbose */
 long set_debug_level(in nn_id id, in long level);
+
+/* Pretty print the graph.  */
 long snpprint(in nn_id id, inrout sequence<octet> buf);
+
+/* Print the log into the buffer */
 long getlog(in nn_id id, inrout sequence<octet> buf);
+
+/* Append a node to the graph.  Nodes are executed in the appended order. */
 long append_node(
 	in nn_id id,
 	in unsigned long node_id,
@@ -84,6 +103,11 @@ long append_node(
 	in padding_type padding,
 	in sequence<input> inputs,
 	in sequence<output> outputs);
+
+/* 
+ * Append a const node into the graph.  The data is copied locally during this
+ * call, the caller does not need it to persist.
+ */
 long append_const_node(
 	in nn_id id,
 	in unsigned long node_id,
@@ -92,7 +116,12 @@ long append_const_node(
 	in unsigned long width,
 	in unsigned long depth,
 	in sequence<octet> data);
+
+/*
+ * Prepare a graph for execution.  Must be done before attempting to execute the graph.
+ */
 long prepare(in nn_id id);
+/* Execute the graph with a single input and a single output. */
 long execute(in nn_id id, 
 	in unsigned long batches_in, 
 	in unsigned long height_in, 
@@ -105,16 +134,31 @@ long execute(in nn_id id,
 	rout unsigned long depth_out, 
 	rout sequence<octet> data_out,
 	rout unsigned long data_len_out);
+
+/* Tear down a graph, destroying it and freeing resources.  */
 long teardown(in nn_id id);
-long disable_dcvs();
-long config();
-long get_perfinfo(in nn_id id, rout sequence<perfinfo> info_out, rout long n_items);
+
+/* Set power saving level.  0 means as fast as possible. */
+long set_powersave_level(in unsigned long level);
+
+/* Get performance information */
+long get_perfinfo(in nn_id id, rout sequence<perfinfo> info_out, rout unsigned long n_items);
+/* Reset performance information, and select a new event. */
 long reset_perfinfo(in nn_id id, in unsigned long event);
+/* Total cycles for the last execution */
 long last_execution_cycles(in nn_id id, rout unsigned long cycles_lo, rout unsigned long cycles_hi);
-long version(rout long ver);
+/* Given a name, return the op ID */
+long op_name_to_id(in string name, rout unsigned long node_id);
+/* Given an ID, return the op name */
+long op_id_to_name(in unsigned long node_id, rout string name);
 
-/* The following are deprecated */
 
+
+/* The following are **** deprecated **** please remove... */
+
+/* Equivalent to set_powersave_level(0); */
+long disable_dcvs();
+/* Equivalent to version(); */
 long GetHexagonBinaryVersion(rout long ver); // deprecated name for version(rout long ver);
 long PrintLog(in sequence<octet> buf);
 

@@ -44,16 +44,20 @@
 
 #define OUTPUT_ELEMENTS 1024
 #define BATCHES 1
-//#define HEIGHT 224
-#define HEIGHT 299
+#ifdef SNPE_TEST
+	#define HEIGHT 224
+#else
+	#define HEIGHT 299
+#endif
 #define WIDTH HEIGHT
 #define DEPTH 3
 
 #ifdef H2_H
 #define clock_gettime clock_gettime_haha
-static inline clock_gettime_haha(int x, struct timespec *t)
+static inline int clock_gettime_haha(int x, struct timespec *t)
 {
 	t->tv_sec = t->tv_nsec = 0;
+	return 0;
 }
 #endif
 
@@ -96,9 +100,9 @@ uint32_t graph_setup()
 	print_graph(id);
 	printf("Init graph done.");
 	if ((err = hexagon_nn_prepare(id)) != 0) {
-		printf("Prepare returned 0x%x\n",err);
+		printf("Prepare %x returned 0x%x\n",(unsigned int)id,(unsigned int)err);
 	} else {
-		printf("Prepare success!\n");
+		printf("Prepare %x success!\n",(unsigned int)id);
 	}
 	print_log(id);
 	return id;
@@ -119,6 +123,7 @@ uint32_t find_max_idx(const float *data, uint32_t entries)
 	return maxidx;
 }
 
+#define OPBUFSIZE 32
 void graph_execute(uint32_t id)
 {
 	uint32_t out_batches, out_height, out_width, out_depth;
@@ -128,17 +133,35 @@ void graph_execute(uint32_t id)
 	struct timespec end;
 	unsigned int secs;
 	unsigned int nsecs;
+	unsigned int nop_id;
+	int version;
+	char buf[OPBUFSIZE];
 	int idx;
 	double msecs;
-	printf("Preparing to execute...\n");
+	//printf("executing bad id: %d\n",hexagon_nn_execute(0,0,0,0,0,NULL,0,NULL,NULL,NULL,NULL,NULL,0,NULL));
+	if (hexagon_nn_version(&version) != 0) {
+		printf("oops: version failed?");
+		return;
+	}
+	if (hexagon_nn_op_name_to_id("Nop",&nop_id) != 0) {
+		printf("oops: nop name failed?");
+		return;
+	}
+	if (hexagon_nn_op_id_to_name(nop_id,buf,OPBUFSIZE) != 0) {
+		printf("oops: nop id failed?");
+		return;
+	}
+	printf("version=%x nop_id=%x nop_name=<<%s>>\n",version,nop_id,buf);
+	
+	printf("Preparing to execute id=%x...\n",(unsigned int)id);
 	clock_gettime(CLOCK_REALTIME,&start);
 	if ((err = hexagon_nn_execute(id,
 		BATCHES,
 		HEIGHT,
 		WIDTH,
 		DEPTH,
-		//(uint8_t *)test_int_data,
-		(uint8_t *)test_float_data,
+		(uint8_t *)test_int_data,
+		//(uint8_t *)test_float_data,
 		HEIGHT*WIDTH*DEPTH,
 		&out_batches,
 		&out_height,
@@ -147,18 +170,38 @@ void graph_execute(uint32_t id)
 		(uint8_t *)output_vals,
 		sizeof(output_vals),
 		&out_data_size)) != 0) {
+		clock_gettime(CLOCK_REALTIME,&end);
 		printf("execute got err: %d\n",err);
 	} else {
 		clock_gettime(CLOCK_REALTIME,&end);
 		printf("%dx%dx%dx%d, size=%d\n",
-			out_batches,
-			out_height,
-			out_width,
-			out_depth,
-			out_data_size);
+			(int)out_batches,
+			(int)out_height,
+			(int)out_width,
+			(int)out_depth,
+			(int)out_data_size);
 		idx = find_max_idx( output_vals,
 			out_batches*out_height*out_width*out_depth);
-		printf("max idx: %d / %f\n", idx,output_vals[idx]);
+		printf("max idx: %d / %f\n", (int)idx,output_vals[idx]);
+		if (idx == 169) {
+			puts("Index 169, I think that's a");
+puts("######     #    #     # ######     #");
+puts("#     #   # #   ##    # #     #   # #");
+puts("#     #  #   #  # #   # #     #  #   #");
+puts("######  #     # #  #  # #     # #     #");
+puts("#       ####### #   # # #     # #######");
+puts("#       #     # #    ## #     # #     #");
+puts("#       #     # #     # ######  #     #");
+		} else {
+			puts("Index != 169, That's not a panda, which is");
+puts("#     # #     # ######  #######    #    ######     #    ######  #       #######");
+puts("#     # ##    # #     # #         # #   #     #   # #   #     # #       #");
+puts("#     # # #   # #     # #        #   #  #     #  #   #  #     # #       #");
+puts("#     # #  #  # ######  #####   #     # ######  #     # ######  #       #####");
+puts("#     # #   # # #     # #       ####### #   #   ####### #     # #       #");
+puts("#     # #    ## #     # #       #     # #    #  #     # #     # #       #");
+puts(" #####  #     # ######  ####### #     # #     # #     # ######  ####### #######");
+		}
 	}
 	secs = end.tv_sec - start.tv_sec;
 	if (end.tv_nsec < start.tv_nsec) {
@@ -203,7 +246,7 @@ void graph_perfdump(uint32_t id)
 	unsigned long long int total_cycles = 0;
 	unsigned long long int cum_cycles = 0;
 	unsigned long long int counter = 0;
-	int n_nodes;
+	unsigned int n_nodes;
 	int i;
 	printf("Perf dump follows:\n");
 	if (hexagon_nn_get_perfinfo(id,info,MAX_NODES,&n_nodes) != 0) {
@@ -220,10 +263,10 @@ void graph_perfdump(uint32_t id)
 		counter = get_counter(info[i]);
 		cum_cycles += counter;
 		printf("node,0x%x,%s,%s,executions,%d,cycles,%lld,%f %%,cum_cycles,%lld,%f %%\n",
-			info[i].node_id,
+			(int)info[i].node_id,
 			info_id2name(info[i].node_id),
 			info_id2opname(info[i].node_id),
-			info[i].executions,
+			(int)info[i].executions,
 			counter,
 			100*((double)counter)/total_cycles,
 			cum_cycles,
@@ -495,7 +538,7 @@ const char *event_names[] = {
 
 int graph_get_all_perf(uint32_t id)
 {
-	int32_t n_nodes;
+	unsigned int n_nodes;
 	uint64_t *counters;
 	hexagon_nn_perfinfo info[MAX_NODES];
 	printf("Getting all performance counter information\n");

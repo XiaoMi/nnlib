@@ -45,45 +45,19 @@
 
 static int nop_execute(struct nn_node *self, struct nn_graph *nn)
 {
+	int i;
 	logmsg(nn,2,"nop execute. self=%p ",self);
-	/* These checks for initial bringup, probably not necessary after
-	 * framework is going pretty well, since we will have separate checks
-	 */
-	if (self->inputs == NULL) {
-		return errlog(nn,"nop: fatal: NULL inputs");
-	}
-	if (self->outputs == NULL) {
-		return errlog(nn,"nop: fatal: NULL outputs");
-	}
-	if (self->inputs[0] == NULL) {
-		return errlog(nn,"nop: fatal: NULL input 0");
-	}
-	if (self->outputs[0] == NULL) {
-		return errlog(nn,"nop: fatal: NULL output 0");
-	}
 	/* Copy input tensor to output */
-	self->outputs[0]->shape = self->inputs[0]->shape;
-	self->outputs[0]->data_size = self->inputs[0]->data_size; // FIXME: check vs. max size
-	memcpy(self->outputs[0]->data,self->inputs[0]->data,self->inputs[0]->data_size);
-	logmsg(nn,2,"copied tensor %d bytes of data",self->inputs[0]->data_size);
+	for (i = 0; i < self->n_outputs; i++) {
+		tensor_copy(self->outputs[i],self->inputs[i]);
+	}
 	return 0;
 }
 
 static int nop_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking nop node %p",self);
-	if (self->inputs == NULL) {
-		return errlog(nn,"nop: fatal: NULL inputs");
-	}
-	if (self->outputs == NULL) {
-		return errlog(nn,"nop: fatal: NULL outputs");
-	}
-	if (self->inputs[0] == NULL) {
-		return errlog(nn,"nop: fatal: NULL input 0");
-	}
-	if (self->outputs[0] == NULL) {
-		return errlog(nn,"nop: fatal: NULL output 0");
-	}
+	if (self->n_inputs != self->n_outputs) return errlog(nn,"inputs != outputs");
 	logmsg(nn,2,"nop node %p check OK",self);
 	return 0;
 }

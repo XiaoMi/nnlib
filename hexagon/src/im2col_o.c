@@ -54,7 +54,7 @@
 /*  REVISION HISTORY:                                                   */
 /*  =================                                                   */
 /*                                                                      */
-/*  Author              Date           Comments                         */
+
 /*  -------------------------------------------------------------       */
 /*  DJH                 08/16/16       created                          */
 /*======================================================================*/
@@ -653,4 +653,40 @@ void im2col_slice_co(
     return;
 }
 
-#endif
+//new virtual im2col, only pads single stream, oriented around lines instead of patches
+void fast_im2col_co(
+  const uint8_t* in_data, int in_height, int in_width, int in_depth, int in_offset,
+  uint8_t* im2col_buf, int filt_height, int filt_width, int stride,
+  int start_line, int num_lines, int out_width, int pad_left, int pad_top, int skip_unpad_k)
+{
+    int out_y, in_y, in_x, j, pad_right ;
+    pad_right = ((in_depth + 15) &  ~15) - in_depth;
+    for (out_y = start_line; out_y <= (start_line+num_lines + filt_height-1); out_y++)
+    {
+      in_y = (out_y * stride) - pad_top;
+
+      if(skip_unpad_k)
+        for(j=0; j < stride && in_y <= in_height + pad_top; j++, in_y++) {
+          if(in_y < 0 || in_y >= in_height) {
+            vmemset_asm(im2col_buf, in_offset, in_depth*(in_width+pad_left));
+            im2col_buf += in_depth*(in_width+pad_left);
+          } else {
+            vmemset_asm(im2col_buf, in_offset, in_depth*pad_left);
+            im2col_buf += in_depth*pad_left;
+            vmemcpy_asm(im2col_buf, in_data+in_y*in_width*in_depth, in_width*in_depth);
+            im2col_buf += in_depth*in_width;
+          }
+        }
+      else
+        //special case for filts = 1 but depth not multiple of 16
+        for(j=0, in_x=0; j < out_width; j++, in_x+=in_depth) {
+            vmemcpy_asm(im2col_buf, in_data+in_y*in_width*in_depth+in_x, in_depth);
+            im2col_buf += in_depth;
+            vmemset_asm(im2col_buf, in_offset, pad_right);
+            im2col_buf += pad_right;
+        }
+    }//out_y
+    return;
+}
+
+#endif //hexagon

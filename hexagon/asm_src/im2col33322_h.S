@@ -44,6 +44,8 @@
       void im2col33322_hvx(uchar  * in, uchar * im2col_data, 
                           int x_offset, uchar * delta_tables,
                           startoutrow, numoutrows); 
+
+      each output row contains 149 packed elements, 32bytes each
  ===============================================================================*/
 #define ptrIn     r0
 #define ptrOut    r1
@@ -252,13 +254,10 @@ im2col33322_hvx:
 .L_break:
        {
          line_count = add(line_count, #1)
-         p3 = cmp.eq(line_count,#148)
        } {
-         if(p3) vmemu(optr) = vxoffset
          p0 = cmp.eq(line_count,numorows)
          if(!p0.new) jump:t .L_lines
        }
-         if(p3) vmemu(optr+#1) = vxoffset
 /* ============================================================================ */
        {
          r17:16 = memd(sp+#0)

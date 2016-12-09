@@ -216,7 +216,7 @@ static int close_check_q(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-struct nn_node_ops nn_ops_for_Close_float32 = {
+struct nn_node_ops nn_ops_for_Close_f = {
 	.execute = close_execute_f,
 	.check = close_check,
 	.ctor = node_alloc_common,

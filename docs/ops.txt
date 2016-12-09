@@ -1,0 +1,280 @@
+
+Theory of execution:
+
+* All inputs and outputs are "tensors".  Tensors have data and a shape.  The
+  shape is 4-D, with lower dimensionality being represented with the size "1"
+  in that dimension.  The dimensions are sometimes named "batches", "height",
+  "width", and "depth".
+
+* A scalar value is represented by a tensor of shape 1,1,1,1
+
+* Sometimes only the shape of a tensor is used.  For example, the stride for
+  convolution or filter size for pooling are represented by Tensors, although
+  the data of the tensor is ignored and only the shape is used.
+
+
+INPUT:
+	No input
+	1 output
+	Input data from hexagon_nn_execute()
+
+OUTPUT:
+	1 input
+	No outputs
+	output data for hexagon_nn_execute()
+
+Nop:
+	N inputs
+	N outputs
+	copies input to output
+
+Const:
+	No input
+	1 output
+	Node for constant data
+
+Check:
+	2 inputs
+	No output
+	Checks that input 0 == input 1
+
+Close_f:
+Close_quint8:
+Close_int32:
+Close_qint32:
+	2 inputs
+	No output
+	Checks that input 0 is close to input 1 
+
+Close_q_quint8:
+	6 inputs: DUT,DUT_min,DUT_max,REF,REF_min,REF_max
+	No output
+	Dequantizes elements of DUT and REF and checks that they are close
+
+PPrint_8:
+PPrint_32:
+PPrint_f:
+	1 input
+	No output
+	Pretty-prints a tensor
+
+Flatten:
+	1 input
+	No output
+	Flattens into a 1D Tensor. DEPRECATED, changing to "reshape"
+
+QuantizedFlatten:
+	3 inputs:
+		0: Input data (quint8)
+		1: Input min
+		2: Input max
+	3 outputs:
+		0: Output data (quint8)
+		1: Output min
+		2: Output max
+	No output
+	Flattens into a 1D Tensor. DEPRECATED, changing to "reshape"
+
+QuantizedConv2d_8x8to32:
+	7 inputs:
+		0: Input data (quint8)
+		1: Filter data (quint8)
+		2: Input min
+		3: Input max
+		4: Filter min
+		5: Filter max
+		6: Stride shape
+	3 outputs:
+		0: Output data (qint32)
+		1: Output max
+		2: Output min
+	Also requires SAME or VALID padding
+	Quantized Convolution
+
+QuantizedMatMul_8x8to32:
+	6 inputs:
+		0: A data (quint8)
+		1: B data (quint8)
+		2: A min
+		3: A max
+		4: B min
+		5: B max
+	3 outputs:
+		0: Output data (qint32)
+		1: Output max
+		2: Output min
+	Matrix Multiply.  2D matrix in W and D dimensions.
+
+QuantizedBiasAdd_8p8to32:
+	6 inputs:
+		0: Input data (quint8)
+		1: Bias data (quint8)
+		2: Input min
+		3: Input max
+		4: Bias min
+		5: Bias max
+	3 outputs:
+		0: Output data (qint32)
+		1: Output max
+		2: Output min
+	Add bias values.
+
+QuantizedRelu_8:
+	3 inputs:
+		0: Input data (quint8)
+		1: Input min
+		2: Input max
+	3 outputs:
+		0: Output data
+		1: Output min
+		2: Output max
+	For each element x: result is max(x,0)
+
+QuantizedReluX_8:
+	4 inputs:
+		0: Input data (quint8)
+		1: Input min
+		2: Input max
+		3: X (floating point value)
+	3 outputs:
+		0: Output data
+		1: Output min
+		2: Output max
+	For each element x: result is min(max(x,0),X)
+
+QuantizeDownAndShrinkRange_32to8:
+	3 inputs:
+		0: Input data (qint32)
+		1: Input min
+		2: Input max
+	3 outputs:
+		0: Output data (quint8)
+		1: Output min
+		2: Output max
+	Calculate the maximum value and requantize the data into 8 bit
+
+QuantizedMaxPool_8:
+QuantizedAvgPool_8:
+	5 inputs:
+		0: input data (quint8)
+		1: input min
+		2: input max
+		3: window shape
+		4: stride shape
+	3 outputs:
+		0: Output data (quint8)
+		1: Output min
+		2: Output max
+	Max and Average Pooling operations
+
+QuantizedConcat_8:
+	3N+1 inputs:
+		0: Dimension tensor.  Currently only depthwise concatenation (3) is supported.
+		1-N: Input data tensors (quint8)
+		N+1-2N: minima
+		2N+1-3N: maxima
+	3 outputs:
+		0: Output data (quint8)
+		1: Output min
+		2: Output max
+	Concatenate tensors.  Currently we only support along the depth dimension.  
+	This requantizes values.  In the future we will remove the requantization work if 
+	all the minima/maxima are the same (or require that will be true?).
+
+Quantize:
+	3 inputs:
+		0: Input data (float)
+		1: Input min
+		2: Input max
+	3 outputs:
+		0: Output data (quint8)
+		1: Output min
+		2: Output max
+	Quantize floating point data to quantized type
+
+Dequantize:
+	3 inputs:
+		0: Output data (quint8)
+		1: Output min
+		2: Output max
+	1 output:
+		0: Output data (float)
+	Dequantize back to floating point
+
+Min_f:
+Max_f:
+	1 input:
+		0: input data (float)
+	1 output:
+		0: output data (float)
+	Reduces to the minimum or maximum value of a tensor.
+	FIXME: this should change to give indices to reduce on rather than always reducing to a scalar
+
+Softmax_f:
+	1 input:
+		0: input data (float)
+	1 output:
+		1: output data (float)
+	Softmax operator, renormalize data exponentially.
+	Currently only supports 1D data.  Should be easy to allow any depthwise.
+
+LRN_f:
+	5 inputs:
+		0: input data (float)
+		1: window shape
+		2: bias value
+		3: alpha value
+		4: beta value
+	1 output:
+		0: output data (float)
+	Local Response Normalization.
+	The window shape determines the area to normalize in.  
+	* A "radius" of 5 and "depthwise" computation would be a window shape of 1,1,1,11.
+	* A "radius" of 4 and "spatial" computation would be a window shape 1,9,9,1
+	The computation is input/((bias+alpha*sum_of_squares_of_window)**beta)
+	Bias values of 1.0 are common.
+	Small alpha values are common (especially since this operator isn't that useful)
+	Beta values of 1 and 0.5 are common, but any value is allowed.
+
+Tanh_f:
+	1 input:
+		0: input data (float)
+	1 output:
+		0: output data (float)
+	The tanh(x) function.
+
+Sigmoid_f:
+	1 input:
+		0: input data (float)
+	1 output:
+		0: output data (float)
+	The function (1.0 + tanh(x))/2
+
+Variable:
+	N inputs (optional):
+		N: Value to initialize the Variable with during graph preparation
+	N outputs:
+		N: Current value of the Variable
+
+	The output is a reference to the variable data, it is not copied.  In
+	order to change a Variable, an Assign node should write the Output
+	tensor.  Note that this will change the value for subsequent users of
+	the Variable during graph execution.
+
+	This op supports a variable number of outputs, which is convienient for
+	supporting both normal single-tensor interfaces, as well as ones that
+	require auxiliary values (such as the Quantized representation).
+
+Assign:
+	2N inputs:
+		2N: Variable output. *** NOTE THIS IS WRITTEN BY THIS OPERATION ***
+		2N+1: Value to write to Variable
+	0-N outputs: (optional)
+		N: Value written to variable.  
+
+	NOTE: The output may or may not be a reference to the variable; do not
+	depend on this value persisting across other Assign nodes to the same
+	Variable.
+
+	A single Assign node may write any number of Variables.
+

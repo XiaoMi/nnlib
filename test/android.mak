@@ -7,10 +7,6 @@ graph_app_QAICIDLS += interface/hexagon_nn \
 COMPILE_GRAPHINIT := $(GRAPHINIT:.c=)
 
 
-INCDIRS += ../../../libs/common/adspmsgd/ship/android_Release interface
-LIBDIRS += ../../../libs/common/adspmsgd/ship/android_Release
-
-
 graph_app_C_SRCS += \
 test/graph_app \
 test/graphmain \

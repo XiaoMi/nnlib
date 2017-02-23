@@ -61,14 +61,8 @@
 #ifdef __hexagon__
 #include <hexagon_protos.h>
 
-#ifdef HEXAGON_V66
-#define GVCONV_ASM gvconv2dbbb_v66_asm
-#define GVCONVSUM_ASM(BUF,FILT,OUT,W,OW,OD,WD,FW,FH,NL,IMSUM,FSUM,MAXBUF,U0,U1,BIASBUF,RLEV) \
-	GVCONV_ASM(BUF,FILT,OUT,W,OW,OD,WD,FW,FH,NL,IMSUM,FSUM,MAXBUF,BIASBUF,RLEV)
-#else
 #define GVCONV_ASM gvconv2dbbb_asm
 #define GVCONVSUM_ASM gvconvsum2dbbb_asm
-#endif
 
 struct tdata {
 	struct nn_node *self;

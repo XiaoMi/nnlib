@@ -114,9 +114,6 @@ void gvconv2dbbb_asm(const uint8_t * x, const uint8_t * y, uint8_t * z, int in_w
 void gvconvsum2dbbb_asm(const uint8_t * x, const uint8_t * y, uint8_t * z, int in_width, int out_width, int zstride, int istride,
                      int filt_width, int filt_height, int out_height, int * ptr_xsum, int * ptr_ysum, int * ptr_max,
                      int in_offset, int zsum, int * biasbuf, int relu_scale);
-void gvconv2dbbb_v66_asm(const uint8_t * x, const uint8_t * y, uint8_t * z, int in_width, int out_width, 
-                     int zstride, int istride, int filt_width, int filt_height, int out_height, int * ptr_xsum,
-                     int * ptr_ysum, int * ptr_max, int * biasbuf, int relu_scale);
 
 
 void gemvmpybbw_asm(

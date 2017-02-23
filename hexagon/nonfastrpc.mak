@@ -1,7 +1,7 @@
 # This is a -*- Makefile -*-
 
-ifdef V66
-Q6VERSION ?= v66
+ifdef V62
+Q6VERSION ?= v62
 else
 Q6VERSION ?= v60
 endif
@@ -19,12 +19,6 @@ BOOTER := $(Q6_RTOS_INSTALL)/bin/booter
 LDFLAGS := -m$(Q6VERSION) -Wl,--defsym=HEAP_SIZE=0x40000000 -Wl,--section-start=.start=0x01000000 $(LDPATH) -moslib=h2 
 endif
 
-
-ifdef V66
-CFLAGS += -DHEXAGON_V66=1
-HEXAGON_NN_ASM_SRCS += hexagon/asm_src/gvconv2dbbb_h_v66.S
-SIM_OPTIONS += --core V66G_1024
-endif
 
 TEST_C_SRCS = test/graph_app.c \
 test/graphmain.c \
@@ -69,12 +63,12 @@ $(TESTNAME): $(C_OBJS) $(ASM_OBJS)
 	$(CC) $(ASFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(C_OBJS) $(ASM_OBJS) $(TESTNAME) pa_dump.core.* stats_dump.iss.* pmu_stats.txt gmon-*.out test/panda_299.dat
+	rm -f $(C_OBJS) $(ASM_OBJS) $(TESTNAME) pa_dump.core.* stats_dump.iss.* pmu_stats.txt gmon-*.out test/keyboard_299.dat
 
-TESTFILE = test/panda_299.dat
+TESTFILE = test/keyboard_299.dat
 
-test/panda_299.dat: test/panda_299x299.jpg
-	python scripts/imagedump.py test/panda_299x299.jpg test/panda_299.dat
+test/keyboard_299.dat: test/keyboard_299x299.jpg
+	python scripts/imagedump.py test/keyboard_299x299.jpg test/keyboard_299.dat
 
 sim: $(TESTNAME) $(TESTFILE)
 	archsim --magic_angel --quiet --profile $(SIM_OPTIONS) $(BOOTER) $(TESTNAME) $(RUN_OPTIONS) $(TESTFILE)
@@ -82,7 +76,7 @@ sim: $(TESTNAME) $(TESTFILE)
 profile:
 	hexagon-gprof $(TESTNAME) gmon* | tee gprof.txt
 
-include unittest/unittest.mak
+#include unittest/unittest.mak
 
 checkin_test: unit_test_sim
 

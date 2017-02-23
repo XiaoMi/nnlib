@@ -1,0 +1,12 @@
+DEF_OPTION(height,int,0,"Height of the input data. 0 == autodetect-square")
+DEF_OPTION(width,int,0,"Width of the input data. 0 == autodetect-square")
+DEF_OPTION(depth,int,3,"Depth of the input data")
+DEF_OPTION(iters,int,1,"Number of times to run each input")
+DEF_OPTION(perfdump,int,0,"Generate performance dump")
+DEF_OPTION(pmu,int,0,"Get Performance Monitor Unit information")
+DEF_OPTION(elementsize,int,1,"Element Size (uint8==1,float==4)")
+DEF_OPTION(layer_reorder,string,NULL,"Reorder depth layers. (\"210\" changes RGB to BGR)")
+DEF_OPTION(pprint_floats,int,0,"Pretty-Print output as floats")
+DEF_OPTION(pprint_imagenet,int,1,"Pretty-print output, getting top 5 values and use imagenet categories")
+DEF_OPTION(debug,int,0,"Debug verbosity level. Higher numbers get more verbosity.")
+

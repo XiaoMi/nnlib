@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -36,6 +36,7 @@
 #include <nn_graph.h>
 #include <string.h>
 #include <math.h>
+#include <nn_broadcast.h>
 
 /*
  * 
@@ -44,23 +45,33 @@
  * This contains min and max (floating) ops
  */
 
-
+#if 0
 static inline int minmax_execute(struct nn_node *self, struct nn_graph *nn, float (*f)(float,float))
 {
-	int i;
 	const struct tensor *in_tensor = self->inputs[0];
+	//const struct tensor *reduction_tensor = self->inputs[1];
 	struct tensor *out_tensor = self->outputs[0];
-	int n_elements = in_tensor->shape.depth;
+	int32_t batches = in_tensor->shape.batches;
+	int32_t height = in_tensor->shape.height;
+	int32_t width = in_tensor->shape.width;
+	int out_elements = batches;
+	int depth = in_tensor->shape.depth;
 	const float *data = in_tensor->data;
+	float *out = out_tensor->data;
 	float minmax = data[0];
+	int i;
+	int j;
+	size_t bytes = out_elements * sizeof(float);
 	logmsg(nn,2,"min/max execute. self=%p ",self);
-	if (in_tensor->shape.batches != 1) return errlog(nn,"want 1D");
-	if (in_tensor->shape.width != 1) return errlog(nn,"want 1D");
-	if (in_tensor->shape.height != 1) return errlog(nn,"want 1D");
-	for (i = 0; i < n_elements; i++) {
-		minmax = f(minmax,data[i]);
+	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
+	for (j = 0; j < out_elements; j++) {
+		minmax = *data;
+		for (i = 0; i < height*width*depth; i++) {
+			minmax = f(minmax,*data++);
+		}
+		*out++ = minmax;
 	}
-	tensor_set_shape(out_tensor,1,1,1,1);
+	tensor_set_shape(out_tensor,batches,1,1,1);
 	out_tensor->data_size = sizeof(float);
 	tensor_set_float(out_tensor,0,minmax);
 	return 0;
@@ -75,6 +86,31 @@ static int max_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	return minmax_execute(self,nn,fmaxf);
 }
+#else
+
+#include <nn_reduction.h>
+
+static int min_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	return nn_reduction_float(self,nn,fminf,INFINITY);
+}
+
+static int max_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	return nn_reduction_float(self,nn,fmaxf,-INFINITY);
+}
+
+#endif
+
+static int minimum_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	return broadcast_elementwise_execute_f(self,nn,fminf);
+}
+
+static int maximum_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	return broadcast_elementwise_execute_f(self,nn,fmaxf);
+}
 
 static int minmax_check(struct nn_node *self, struct nn_graph *nn)
 {
@@ -83,7 +119,7 @@ static int minmax_check(struct nn_node *self, struct nn_graph *nn)
 	if (self->outputs == NULL) return errlog(nn,"NULL outputs");
 	if (self->inputs[0] == NULL) return errlog(nn,"NULL input 0");
 	if (self->outputs[0] == NULL) return errlog(nn,"NULL output 0");
-	if (self->n_inputs > 2) return errlog(nn,"wrong # inputs");
+	if (self->n_inputs > 3) return errlog(nn,"wrong # inputs");
 	if (self->n_outputs != 1) return errlog(nn,"wrong # inputs");
 	logmsg(nn,2,"min/max node %p check OK",self);
 	return 0;
@@ -117,3 +153,17 @@ struct nn_node_ops nn_ops_for_Max_f_ref = {
 	.dtor = node_free_common,
 };
 
+
+struct nn_node_ops nn_ops_for_Minimum_f = {
+	.execute = minimum_execute,
+	.check = minmax_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};
+
+struct nn_node_ops nn_ops_for_Maximum_f = {
+	.execute = maximum_execute,
+	.check = minmax_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};

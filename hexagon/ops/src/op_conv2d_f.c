@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -46,22 +46,22 @@ static int conv2d_f_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	const struct tensor *stride_tensor = self->inputs[2];
 	struct tensor *out_tensor = self->outputs[0];
 
-	uint32_t in_batches = in_tensor->shape.batches;
-	uint32_t in_width = in_tensor->shape.width;
-	uint32_t in_height = in_tensor->shape.height;
-	uint32_t in_depth = in_tensor->shape.depth;
+	int32_t in_batches = in_tensor->shape.batches;
+	int32_t in_width = in_tensor->shape.width;
+	int32_t in_height = in_tensor->shape.height;
+	int32_t in_depth = in_tensor->shape.depth;
 
-	uint32_t filt_batches = filt_tensor->shape.byidx[0];
-	uint32_t filt_height = filt_tensor->shape.byidx[3];
-	uint32_t filt_width = filt_tensor->shape.byidx[2];
-	uint32_t filt_depth = filt_tensor->shape.byidx[1];
+	int32_t filt_batches = filt_tensor->shape.filt_batches;
+	int32_t filt_height = filt_tensor->shape.filt_height;
+	int32_t filt_width = filt_tensor->shape.filt_width;
+	int32_t filt_depth = filt_tensor->shape.filt_depth;
 
-	uint32_t stride_width = stride_tensor->shape.width;
-	uint32_t stride_height = stride_tensor->shape.height;
-	uint32_t out_batches = in_batches;
-	uint32_t out_width = nn_pad_compute_outsize(in_width,filt_width,stride_width,self->padding);
-	uint32_t out_height = nn_pad_compute_outsize(in_height,filt_height,stride_height,self->padding);
-	uint32_t out_depth = filt_batches;
+	int32_t stride_width = stride_tensor->shape.width;
+	int32_t stride_height = stride_tensor->shape.height;
+	int32_t out_batches = in_batches;
+	int32_t out_width = nn_pad_compute_outsize(in_width,filt_width,stride_width,self->padding);
+	int32_t out_height = nn_pad_compute_outsize(in_height,filt_height,stride_height,self->padding);
+	int32_t out_depth = filt_batches;
 
 	int32_t adj_x = ((out_width-1) * stride_width + filt_width - in_width) / 2;
 	int32_t adj_y = ((out_height-1) * stride_height + filt_height - in_height) / 2;

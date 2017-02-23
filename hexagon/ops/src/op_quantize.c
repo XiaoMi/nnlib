@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -36,6 +36,7 @@
 #include <nn_graph.h>
 #include <string.h>
 #include <math.h>
+#include <quantize.h>
 
 
 /*
@@ -53,9 +54,12 @@ static int quantize_execute(struct nn_node *self, struct nn_graph *nn)
 	struct tensor *out_tensor = self->outputs[0];
 	struct tensor *out_min_tensor = self->outputs[1];
 	struct tensor *out_max_tensor = self->outputs[2];
-	float minval = tensor_get_float(min_tensor,0);
-	float maxval = tensor_get_float(max_tensor,0);
-	float recip_stepsize = 255.0f/(maxval-minval);
+	float min_in = tensor_get_float(min_tensor,0);
+	float max_in = tensor_get_float(max_tensor,0);
+	float recip_stepsize;
+	float min_out;
+	float max_out;
+	float stepsize;
 	float batches = in_tensor->shape.batches;
 	float height = in_tensor->shape.height;
 	float width = in_tensor->shape.width;
@@ -70,10 +74,14 @@ static int quantize_execute(struct nn_node *self, struct nn_graph *nn)
 	if (out_tensor->max_size < out_bytes) return errlog(nn,"out too small");
 	tensor_set_shape(out_tensor,batches,height,width,depth);
 	out_tensor->data_size = out_bytes;
+	quantize_adjust_range(
+		&min_out,&max_out,
+		&stepsize,&recip_stepsize,
+		min_in,max_in);
 
 	for (i = 0; i < batches*height*width*depth; i++) {
 		inval = in[i];
-		ival = roundf((inval - minval)*recip_stepsize);
+		ival = roundf((inval - min_out)*recip_stepsize);
 		if (ival < 0) ival = 0;
 		if (ival > 255) ival = 255;
 		out[i] = ival;
@@ -81,8 +89,8 @@ static int quantize_execute(struct nn_node *self, struct nn_graph *nn)
 
 	tensor_set_shape(out_min_tensor,1,1,1,1);
 	tensor_set_shape(out_max_tensor,1,1,1,1);
-	tensor_set_float(out_min_tensor,0,minval);
-	tensor_set_float(out_max_tensor,0,maxval);
+	tensor_set_float(out_min_tensor,0,min_out);
+	tensor_set_float(out_max_tensor,0,max_out);
 	out_min_tensor->data_size = sizeof(float);
 	out_max_tensor->data_size = sizeof(float);
 	return 0;
@@ -96,7 +104,8 @@ static int dequantize_execute(struct nn_node *self, struct nn_graph *nn)
 	struct tensor *out_tensor = self->outputs[0];
 	float minval = tensor_get_float(min_tensor,0);
 	float maxval = tensor_get_float(max_tensor,0);
-	float stepsize = (maxval-minval)/255.0f;
+	float range = fmaxf(0.0001f,maxval-minval);
+	float stepsize = range/255.0f;
 	float batches = in_tensor->shape.batches;
 	float height = in_tensor->shape.height;
 	float width = in_tensor->shape.width;
@@ -111,6 +120,34 @@ static int dequantize_execute(struct nn_node *self, struct nn_graph *nn)
 	out_tensor->data_size = out_bytes;
 	for (i = 0; i < batches*height*width*depth; i++) {
 		out[i] = (in[i] * stepsize) + minval;
+	}
+	return 0;
+}
+
+static int dequantize_i32_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	const struct tensor *in_tensor = self->inputs[0];
+	const struct tensor *min_tensor = self->inputs[1];
+	const struct tensor *max_tensor = self->inputs[2];
+	struct tensor *out_tensor = self->outputs[0];
+	float minval = tensor_get_float(min_tensor,0);
+	float maxval = tensor_get_float(max_tensor,0);
+	float range = fmaxf(0.0001f,maxval-minval);
+	float stepsize = range/0x1.0p32f;
+	float batches = in_tensor->shape.batches;
+	float height = in_tensor->shape.height;
+	float width = in_tensor->shape.width;
+	float depth = in_tensor->shape.depth;
+	const int32_t *in = in_tensor->data;
+	float *out = out_tensor->data;
+	int out_bytes = batches*height*width*depth*sizeof(float);
+	int i;
+	logmsg(nn,2,"dequantize 32 execute.");
+	if (out_tensor->max_size < out_bytes) return errlog(nn,"out too small");
+	tensor_set_shape(out_tensor,batches,height,width,depth);
+	out_tensor->data_size = out_bytes;
+	for (i = 0; i < batches*height*width*depth; i++) {
+		out[i] = (in[i] * stepsize);
 	}
 	return 0;
 }
@@ -157,6 +194,13 @@ struct nn_node_ops nn_ops_for_Dequantize = {
 
 struct nn_node_ops nn_ops_for_Dequantize_ref = {
 	.execute = dequantize_execute,
+	.check = dequantize_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};
+
+struct nn_node_ops nn_ops_for_Dequantize_qint32_f = {
+	.execute = dequantize_i32_execute,
 	.check = dequantize_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,

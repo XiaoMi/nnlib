@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -179,6 +179,116 @@ static inline int check_all_outputs(
 	return 0;
 }
 
+int check_same_inputs(struct nn_graph *nn, struct nn_node *a, struct nn_node *b, int n_inputs)
+{
+	int i;
+	if (a->n_inputs < n_inputs) return -1;
+	if (b->n_inputs < n_inputs) return -1;
+	for (i = 0; i < n_inputs; i++) {
+		if (a->input_refs[i].src_id != b->input_refs[i].src_id) return -1;
+		if (a->input_refs[i].output_idx != b->input_refs[i].output_idx) return -1;
+	}
+	return 0;
+}
+
+/*
+ * EJP: we really need a new syntax here for pattern matching graph parts 
+ */
+#define DO_DTOR(NODE,NN) NODE->ops->dtor(NODE,NN)
+
+static void try_fuse_requantization_range(struct nn_graph *nn, struct nn_node **requant_range_node_p)
+{
+	struct nn_node *requant_range_node = *requant_range_node_p;
+	struct nn_node *requantize_node;
+	struct nn_node *new_node;
+	struct output new_outputs[3];
+	int i;
+	op_type operation = OP_QuantizeDownAndShrinkRange_32to8;
+	/* Make sure the start node is the right kind */
+	if (requant_range_node->node_type != OP_RequantizationRange_32) return;
+	logmsg(nn,9,"found requantizationrange");
+	/* Make sure the consumer is a requantization node and there's only one of them */
+	if ((requantize_node = find_first_consumer(nn,requant_range_node,0)) == requant_range_node) return;
+	if (check_all_outputs(nn,requant_range_node,requantize_node) != 0) return;
+	if (requantize_node->node_type != OP_Requantize_32to8) return;
+	/* Make sure the inputs are pointing to the right place */
+	if (check_same_inputs(nn,requant_range_node,requantize_node,3) != 0) return;
+	logmsg(nn,9,"Found matching requantize");
+	/* Just to make sure we're not cheating, we will create a new op and dtor the old ones */
+	for (i = 0; i < 3; i++) {
+		new_outputs[i].max_size = requantize_node->outputs[i]->max_size;
+		new_outputs[i].unused = 0;
+	}
+	if ((new_node = optab[operation]->ctor(
+		nn,
+		requantize_node->node_id,
+		operation,
+		requantize_node->padding,
+		requant_range_node->n_inputs,
+		3,
+		requant_range_node->input_refs,
+		new_outputs)) == NULL) return;
+	*requant_range_node_p = new_node;
+	new_node->next = requantize_node->next;
+	DO_DTOR(requant_range_node,nn);
+	DO_DTOR(requantize_node,nn);
+	logmsg(nn,3,"Changed to autorequantize node id=%x (was requantize ID)",new_node->node_id);
+}
+
+/* Turn Requantize with const max value followed by Relu into the same Requantize followed by ReluX */
+/* EJP: FIXME: could support Requantize->ReluX where we take the min of the two max values */
+static void try_make_reluX(struct nn_graph *nn, struct nn_node **requant_node_p)
+{
+	struct nn_node *requantize_node = *requant_node_p;
+	struct nn_node *relu_node;
+	struct nn_node *max_node;
+	struct nn_node *new_node;
+	struct input new_inputs[4];
+	struct output new_outputs[3];
+	uint32_t max_node_id;
+	int i;
+	op_type operation = OP_QuantizedReluX_8;
+	if (requantize_node->node_type != OP_Requantize_32to8) return;
+	/* Find range max node */
+	if (requantize_node->input_refs[4].output_idx != 0) return;
+	max_node_id = requantize_node->input_refs[4].src_id;
+	if ((max_node = find_node(nn,max_node_id)) == NULL) return;
+	/* Make sure range max is const */
+	if (max_node->node_type != OP_Const) return;
+	/* Make sure consumer is relu and there's only one of them */
+	if ((relu_node = find_first_consumer(nn,requantize_node,0)) == requantize_node) return;
+	if (check_all_outputs(nn,requantize_node,relu_node) != 0) return;
+	if (relu_node->node_type != OP_QuantizedRelu_8) return;
+	logmsg(nn,9,"found matching relu");
+	/* Create inputs and outputs */
+	for (i = 0; i < 3; i++) {
+		new_outputs[i].max_size = relu_node->outputs[i]->max_size;
+		new_outputs[i].unused = 0;
+		new_inputs[i] = relu_node->input_refs[i];
+	}
+	new_inputs[3] = requantize_node->input_refs[4];
+	if ((new_node = optab[operation]->ctor(
+		nn,
+		relu_node->node_id,
+		operation,
+		requantize_node->padding,
+		4,
+		3,
+		new_inputs,
+		new_outputs)) == NULL) return;
+	requantize_node->next = new_node;
+	new_node->next = relu_node->next;
+	DO_DTOR(relu_node,nn);
+	logmsg(nn,3,"Changed requantize w/ const max --> Relu to --> ReluX");
+}
+
+static inline int is_requantize_op(const struct nn_node *node)
+{
+	if (node->node_type == OP_QuantizeDownAndShrinkRange_32to8) return 1;
+	if (node->node_type == OP_Requantize_32to8) return 1;
+	return 0;
+}
+
 static void try_make_supernode(struct nn_graph *nn, struct nn_node **conv_node_p)
 {
 	struct nn_node *conv_node = *conv_node_p;
@@ -201,7 +311,7 @@ static void try_make_supernode(struct nn_graph *nn, struct nn_node **conv_node_p
 	/* Do all the ouptuts go to a single consumer? */
 	if (check_all_outputs(nn,conv_node,qdown0_node) != 0) return;
 	/* Is it the right type? */
-	if (qdown0_node->node_type != OP_QuantizeDownAndShrinkRange_32to8) return;
+	if (!is_requantize_op(qdown0_node)) return;
 	logmsg(nn,9,"found qdown0\n");
 	/* Now repeat for QuantizedBiasAdd */
 	if ((biasadd_node = find_first_consumer(nn,qdown0_node,0)) == qdown0_node) return;
@@ -211,7 +321,7 @@ static void try_make_supernode(struct nn_graph *nn, struct nn_node **conv_node_p
 	/* And repeat for QuantizeDown #1 */
 	if ((qdown1_node = find_first_consumer(nn,biasadd_node,0)) == biasadd_node) return;
 	if (check_all_outputs(nn,biasadd_node,qdown1_node) != 0) return;
-	if (qdown1_node->node_type != OP_QuantizeDownAndShrinkRange_32to8) return;
+	if (!is_requantize_op(qdown0_node)) return;
 	logmsg(nn,9,"found qdown1\n");
 	/* Now repeat for Relu */
 	if ((relu_node = find_first_consumer(nn,qdown1_node,0)) == qdown1_node) return;
@@ -256,23 +366,37 @@ static void try_make_supernode(struct nn_graph *nn, struct nn_node **conv_node_p
 	/* Clean up the old not needed nodes */
 	*conv_node_p = supernode;
 	supernode->next = relu_node->next;
-#define DO_DTOR(NODE,NN) NODE->ops->dtor(NODE,NN)
 	DO_DTOR(conv_node,nn);
 	DO_DTOR(qdown0_node,nn);
 	DO_DTOR(biasadd_node,nn);
 	DO_DTOR(qdown1_node,nn);
 	DO_DTOR(relu_node,nn);
-#undef DO_DTOR
 	logmsg(nn,3,"Created supernode id=%x (was relu ID)",supernode->node_id);
+}
+#undef DO_DTOR
+
+static inline int graph_iterator(struct nn_graph *nn, void (*f)(struct nn_graph *nn, struct nn_node **trynode))
+{
+	struct nn_node **root;
+	for (root = &nn->head; *root != NULL; root = &((*root)->next)) {
+		f(nn,root);
+	}
+	return 0;
+}
+
+static int make_autorequantize(struct nn_graph *nn)
+{
+	return graph_iterator(nn,try_fuse_requantization_range);
 }
 
 static int make_supernodes(struct nn_graph *nn)
 {
-	struct nn_node **root;
-	for (root = &nn->head; *root != NULL; root = &((*root)->next)) {
-		try_make_supernode(nn,root);
-	}
-	return 0;
+	return graph_iterator(nn,try_make_supernode);
+}
+
+static int make_reluX_nodes(struct nn_graph *nn)
+{
+	return graph_iterator(nn,try_make_reluX);
 }
 
 /* static */ int try_pad_bad_supernodes(struct nn_graph *nn, struct nn_node **src_node_p)
@@ -343,6 +467,8 @@ static int pad_bad_supernodes(struct nn_graph *nn)
 static int optimize(struct nn_graph *nn)
 {
 	int err;
+	if ((err = make_autorequantize(nn)) != 0) return err;
+	if ((err = make_reluX_nodes(nn)) != 0) return err;
 	if ((err = make_supernodes(nn)) != 0) return err;
 	if ((err = pad_bad_supernodes(nn)) != 0) return err;
 	return 0;

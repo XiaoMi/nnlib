@@ -15,11 +15,11 @@ Theory of execution:
 
 INPUT:
 	No input
-	1 output
+	N outputs
 	Input data from hexagon_nn_execute()
 
 OUTPUT:
-	1 input
+	N inputs
 	No outputs
 	output data for hexagon_nn_execute()
 

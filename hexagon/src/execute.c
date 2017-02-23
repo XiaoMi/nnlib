@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -44,46 +44,39 @@
 #define ITERS 1
 //#define ITERS (50*120)
 
-static void __attribute__((unused)) worker_acquire(struct nn_graph *nn, void *vptr)
-{
-	int *ptr = vptr;
-	*ptr = nn_os_vector_acquire();
-}
-
-static void __attribute__((unused)) worker_release(struct nn_graph *nn, void *vptr)
-{
-	int *ptr = vptr;
-	nn_os_vector_release(*ptr);
-}
-
-int do_execute(struct nn_graph *nn, const struct tensor *input, struct tensor *output)
+int do_execute(struct nn_graph *nn,
+	const struct tensor *inputs,
+	uint32_t n_inputs,
+	struct tensor *outputs,
+	uint32_t n_outputs)
 {
 	struct nn_node *node;
 	int err;
 	uint64_t perf_start;
 	uint64_t perf_stop;
-	int vecinfo;
-	int worker_vecinfo;
+	uint64_t pcycle_start;
+	uint64_t pcycle_stop;
 	int i;
-	nn->input_data = input;
-	nn->output_data = output;
+	nn->inputs = inputs;
+	nn->n_inputs = n_inputs;
+	nn->outputs = outputs;
+	nn->n_outputs = n_outputs;
 	nn_os_hvx_power_on(nn);
-	nn->input_data = input;
-	nn->output_data = output;
-	nn_os_work_for_vector(nn,worker_acquire,&worker_vecinfo);
-	vecinfo = nn_os_vector_acquire();
+	nn_os_vector_workers_acquire(nn);
+	pcycle_start = nn_os_get_cycles(nn);
 	for (i = 0; i < ITERS; i++) {
 	for (node = nn->head; node != NULL; node = node->next) {
 		perf_start = nn_os_get_perfcount(nn);
-		if ((err = node->ops->execute(node,nn)) != 0) return err;
+		if ((err = node->ops->execute(node,nn)) != 0) break;
 		perf_stop = nn_os_get_perfcount(nn);
 		node->perfcounter += (perf_stop - perf_start);
 		node->executions += 1;
 	}
 	}
-	nn_os_work_for_vector(nn,worker_release,&worker_vecinfo);
-	nn_os_vector_release(vecinfo);
+	pcycle_stop = nn_os_get_cycles(nn);
+	nn->execution_total_cycles = pcycle_stop - pcycle_start;
+	nn_os_vector_workers_release(nn);
 	nn_os_hvx_power_off(nn);
-	return 0;
+	return err;
 }
 

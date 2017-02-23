@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -57,6 +57,14 @@
 #include <qurt.h>
 #endif
 
+static inline void fast_strncpy(char *dst, const char *src, int len)
+{
+	//int real_len = strnlen(src,len);
+	int real_len = strlen(src)+1;
+	if (real_len > len) real_len = len;
+	memcpy(dst,src,real_len);
+}
+
 static inline struct nn_graph *nn_id_to_graph(nn_id_t id) {
 	return (struct nn_graph *)(id);
 }
@@ -93,10 +101,10 @@ nn_id_t hexagon_nn_init()
 int hexagon_nn_getlog(nn_id_t id, unsigned char *buf, uint32_t length)
 {
 	struct nn_graph *graph;
-	strncpy((char *)buf,"id not found\n",length);
+	fast_strncpy((char *)buf,"id not found\n",length);
 	if ((graph = nn_id_to_graph(id)) == NULL) return -1;
 	buf[length-1] = '\0';
-	strncpy((char *)buf,graph->logbuf,length-1);
+	fast_strncpy((char *)buf,graph->logbuf,length-1);
 	graph->logbuf_pos = 0;
 	graph->logbuf[graph->logbuf_pos] = '\0';
 	return 0;
@@ -185,6 +193,32 @@ int hexagon_nn_append_const_node(
 		data_len);
 }
 
+int hexagon_nn_execute_new(
+	nn_id_t id,
+	const hexagon_nn_tensordef *inputs,
+	uint32_t n_inputs,
+	hexagon_nn_tensordef *outputs,
+	uint32_t n_outputs)
+{
+	struct nn_graph *graph;
+	const struct tensor *ins;
+	struct tensor *outs;
+	/* 
+	 * hexagon_nn_tensordef should be compatible with struct tensor for
+	 * input and output nodes
+	 */
+	ins = (const struct tensor *)inputs;
+	outs = (struct tensor *)outputs;
+	if ((graph = nn_id_to_graph(id)) == NULL) {
+		return errlog(NULL,"nn id %x not found",id);
+	}
+	if (graph->state != NN_GRAPH_PREPARED) {
+		return errlog(graph,"graph not prepared");
+	}
+	logmsg(graph,2,"in hexagon_nn_execute_new, %d in %d out",n_inputs,n_outputs);
+	return do_execute(graph,ins,n_inputs,outs,n_outputs);
+}
+
 int hexagon_nn_execute(
 	nn_id_t id,
 	uint32_t batches_in,
@@ -209,14 +243,15 @@ int hexagon_nn_execute(
 	in.data_size = in.max_size = data_len_in;
 	in.data = (uint8_t *)data_in;
 	out.data = data_out;
-	out.max_size = data_out_max;
+	/* Put max size in data_size for output tensor to match RPC layout */
+	out.data_size = out.max_size = data_out_max;
 	if ((graph = nn_id_to_graph(id)) == NULL) {
 		return errlog(NULL,"nn id %x not found",id);
 	}
 	if (graph->state != NN_GRAPH_PREPARED) {
 		return errlog(graph,"graph not prepared");
 	}
-	ret = do_execute(graph,&in,&out);
+	ret = do_execute(graph,&in,1,&out,1);
 	*batches_out = out.shape.batches;
 	*height_out = out.shape.height;
 	*width_out = out.shape.width;

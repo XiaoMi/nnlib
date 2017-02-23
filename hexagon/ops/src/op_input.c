@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -34,6 +34,7 @@
  *
  */
 #include <nn_graph.h>
+#include <nn_asm_ops.h>
 #include <string.h>
 
 /*
@@ -46,25 +47,34 @@
 static int input_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"output execute. self=%p ",self);
+	int i;
+	struct tensor *out;
+	const struct tensor *in;
 	/* Copy input tensor to output */
-	if (!nn->input_data) return errlog(nn,"oops, NULL input");
-	self->outputs[0]->shape = nn->input_data->shape;
-	self->outputs[0]->data_size = nn->input_data->data_size; // FIXME: check vs. max size
-	memcpy(self->outputs[0]->data,nn->input_data->data,nn->input_data->data_size);
-	logmsg(nn,2,"copied tensor %d bytes of data",nn->input_data->data_size);
+	if (nn->n_inputs != self->n_outputs) return errlog(nn,"oops, input #");
+	for (i = 0; i < self->n_outputs; i++) {
+		out = self->outputs[i];
+		in = &nn->inputs[i];
+		/* Warning! Inputs come in as max_size not data_size! */
+		if (out->max_size < in->max_size) return errlog(nn,"out too small");
+		out->shape = in->shape;
+		out->data_size = in->max_size;
+		vmemcpy_asm(out->data,in->data,in->max_size);
+	}
+	logmsg(nn,2,"input %d tensors",nn->n_inputs);
 	return 0;
 }
 
 static int input_check(struct nn_node *self, struct nn_graph *nn)
 {
-	logmsg(nn,2,"Checking nop node %p",self);
-	if (self->outputs == NULL) {
-		return errlog(nn,0,"input: fatal: NULL output");
+	logmsg(nn,2,"Checking input node %p",self);
+	int i;
+	for (i = 0; i < self->n_outputs; i++) {
+		if (self->outputs[i] == NULL) {
+			return errlog(nn,0,"input: fatal: NULL output");
+		}
 	}
-	if (self->outputs[0] == NULL) {
-		return errlog(nn,0,"input: fatal: NULL output 0");
-	}
-	logmsg(nn,2,"nop node %p check OK",self);
+	logmsg(nn,2,"input node %p check OK",self);
 	return 0;
 }
 

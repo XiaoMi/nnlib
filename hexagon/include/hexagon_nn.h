@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -40,6 +40,17 @@
 typedef struct input hexagon_nn_input;
 typedef struct output hexagon_nn_output;
 typedef struct perfinfo hexagon_nn_perfinfo;
+
+struct almost_a_tensor {
+	unsigned int batches;
+	unsigned int height;
+	unsigned int width;
+	unsigned int depth;
+	unsigned char *data;
+	int dataLen;		/* For input and output */
+	unsigned int data_valid_len; /* for output only */
+	unsigned int unused;
+};
 
 static inline int hexagon_nn_config() { return 0; }
 

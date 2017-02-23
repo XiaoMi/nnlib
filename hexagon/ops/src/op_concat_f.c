@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -104,9 +104,8 @@ static int concat_check(struct nn_node *self, struct nn_graph *nn)
 {
 	int i;
 	logmsg(nn,2,"Checking concat node %p",self);
-	if ((self->n_inputs - 1) % 3) return errlog(nn,"input triplets please");
 	if (self->n_inputs < 4) return errlog(nn,"at least 1 input");
-	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
+	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
 	for (i = 0; i < self->n_inputs; i++) {
 		if (self->inputs[i] == NULL) return errlog(nn,"NULL input");
 	}

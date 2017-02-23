@@ -1,7 +1,5 @@
-
-
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -68,18 +66,23 @@ typedef long nn_id;
 enum padding_type {
 	NN_PAD_NA,
 	NN_PAD_SAME,
-	NN_PAD_VALID
+	NN_PAD_VALID,
+	NN_PAD_MIRROR_REFLECT,
+	NN_PAD_MIRROR_SYMMETRIC
+};
+
+struct tensordef {
+	unsigned long batches;		/* Batches */
+	unsigned long height;		/* Height */
+	unsigned long width;		/* Width */
+	unsigned long depth;		/* Depth */
+	sequence<octet> data;		/* Data + DataLen */
+	unsigned long data_valid_len;	/* Return location for valid data out */
+	unsigned long unused;		/* Unused */
 };
 
 /* Actual functions in the interface */
 /* Returns 0 on success, nonzero on error unless otherwise noted */
-/* 
- * EJP: version should always be first here, because the order here affects the FastRPC RPC internals.
- * If version is first we should always be able to tell version changes.
- */
-/* Get the version of the library */
-long version(rout long ver);
-
 /* Configure the hardware and software environment.  Should be called once before doing anything */
 long config();
 
@@ -147,20 +150,25 @@ long get_perfinfo(in nn_id id, rout sequence<perfinfo> info_out, rout unsigned l
 long reset_perfinfo(in nn_id id, in unsigned long event);
 /* Total cycles for the last execution */
 long last_execution_cycles(in nn_id id, rout unsigned long cycles_lo, rout unsigned long cycles_hi);
+/* Get the version of the library */
+long version(rout long ver);
 /* Given a name, return the op ID */
 long op_name_to_id(in string name, rout unsigned long node_id);
 /* Given an ID, return the op name */
 long op_id_to_name(in unsigned long node_id, rout string name);
 
-
-
-/* The following are **** deprecated **** please remove... */
+/* The following are deprecated */
 
 /* Equivalent to set_powersave_level(0); */
 long disable_dcvs();
 /* Equivalent to version(); */
 long GetHexagonBinaryVersion(rout long ver); // deprecated name for version(rout long ver);
 long PrintLog(in sequence<octet> buf);
+
+/* Enable specifying multiple inputs and outputs */
+long execute_new(in nn_id id,
+	in sequence<tensordef> inputs,
+	rout sequence<tensordef> outputs);
 
 }; /* interface hexagon_nn */
 

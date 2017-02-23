@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -52,10 +52,11 @@ static int reshape_execute(struct nn_node *self, struct nn_graph *nn)
 	uint32_t w = self->inputs[0]->shape.width;
 	uint32_t d = self->inputs[0]->shape.depth;
 	uint32_t elements = b*h*w*d;
-	int32_t newb = in_shape->shape.batches;
-	int32_t newh = in_shape->shape.height;
-	int32_t neww = in_shape->shape.width;
-	int32_t newd = in_shape->shape.depth;
+	int32_t new_rank = in_shape->shape.depth;
+	int32_t newb = (new_rank < 4) ? 1 : tensor_get_int32(in_shape,new_rank-4);
+	int32_t newh = (new_rank < 3) ? 1 : tensor_get_int32(in_shape,new_rank-3);
+	int32_t neww = (new_rank < 2) ? 1 : tensor_get_int32(in_shape,new_rank-2);
+	int32_t newd = (new_rank < 1) ? 1 : tensor_get_int32(in_shape,new_rank-1);
 	int32_t new_elements = newb*newh*neww*newd;
 	int32_t num_negs = (newb < 0) + (newh < 0) + (neww < 0) + (newd < 0);
 	int32_t unknown_dim;
@@ -76,13 +77,20 @@ static int reshape_execute(struct nn_node *self, struct nn_graph *nn)
 	vmemcpy_asm(out_tensor->data,in_tensor->data,in_tensor->data_size);
 	/* Handle quantized version */
 	if (self->n_outputs == 3) {
-		if (tensor_copy(self->outputs[1],self->outputs[2]) != 0) {
+		if (tensor_copy(self->outputs[1],self->inputs[2]) != 0) {
 			return errlog(nn,"bad extra copy");
 		}
-		if (tensor_copy(self->outputs[2],self->outputs[3]) != 0) {
+		if (tensor_copy(self->outputs[2],self->inputs[3]) != 0) {
 			return errlog(nn,"bad extra copy");
 		}
 	}
+	logmsg(nn,2,"qreshape %dx%dx%dx%x (%dx%dx%dx%d) --> %dx%dx%dx%d",
+		b,h,w,d,
+		in_shape->shape.batches,
+		in_shape->shape.height,
+		in_shape->shape.width,
+		in_shape->shape.depth,
+		newb,newh,neww,newd);
 	return 0;
 }
 

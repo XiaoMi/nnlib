@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -70,18 +70,58 @@ static inline int close_execute(struct nn_node *self, struct nn_graph *nn,
 	return 0;
 }
 
-static inline int check_fvals(struct nn_graph *nn, void *av, void *bv, uint32_t size)
+static int close_execute_f(struct nn_node *self, struct nn_graph *nn)
 {
-	float *a = av;
-	float *b = bv;
-	int count = size/sizeof(float);
+
+	const struct tensor *dut = self->inputs[0];
+	const struct tensor *ref = self->inputs[1];
+	const struct tensor *eps;
+	float *a = dut->data;
+	float *b = ref->data;
+	float fudge;
+	int count = ref->data_size/sizeof(float);
 	int i;
+	float ref_max = 0.0f;
+	float ref_min = 0.0f;
+	float range;
+	float epsilon;
+	float cur_diff;
+	float max_diff = 0.0f;
+	int max_diff_idx = 0;
+	if (self->n_inputs > 2) {
+		eps = self->inputs[2];
+		fudge = tensor_get_float(eps,0);
+	} else {
+		fudge = FUDGE_FACTOR;
+	}
+	logmsg(nn,2,"close check_fvals execute. self=%p ",self);
+
+	/* Copy input tensor to output */
+	CHECK(shape.batches);
+	CHECK(shape.height);
+	CHECK(shape.width);
+	CHECK(shape.depth);
+	CHECK(data_size);
+
 	for (i = 0; i < count; i++) {
-		if (fabsf((a[i] - b[i]) / b[i]) > FUDGE_FACTOR) {
-			logmsg(nn,1,"i: %d/%d a[i]: %a b[i]: %a",i,count,a[i],b[i]);
-			return 1;
+		ref_max = fmaxf(b[i],ref_max);
+		ref_min = fminf(b[i],ref_min);
+		cur_diff = fabsf(a[i] - b[i]);
+		if (cur_diff > max_diff) {
+			max_diff = cur_diff;
+			max_diff_idx = i;
 		}
 	}
+	range = ref_max - ref_min;
+	epsilon = range*fudge;
+
+	if (max_diff > epsilon) {
+		i = max_diff_idx;
+		return errlog(nn,"data not close. Worst offender: i: %d/%d a[i]: %a %f b[i]: %a %f max_diff=%f range=%f epsilon=%f",
+			max_diff_idx,count,a[i],a[i],b[i],b[i],
+			max_diff,range,epsilon);
+	}
+	logmsg(nn,2,"close node %p OK",self);
 	return 0;
 }
 
@@ -100,7 +140,7 @@ static inline int check_i32vals(struct nn_graph *nn, void *av, void *bv, uint32_
 	}
 	for (i = 0; i < count; i++) {
 		if (fabsf(((float)(a[i]) - (float)(b[i])) / (float)(max)) > FUDGE_FACTOR) {
-			logmsg(nn,1,"i: %d/%d a[i]: %08x b[i]: %08x",i,count,a[i],b[i]);
+			logmsg(nn,0,"i: %d/%d a[i]: %08x b[i]: %08x",i,count,a[i],b[i]);
 			return 1;
 		}
 	}
@@ -119,7 +159,7 @@ static inline int check_u8vals(struct nn_graph *nn, void *av, void *bv, uint32_t
 	}
 	for (i = 0; i < count; i++) {
 		if (fabsf(((float)(a[i]) - (float)(b[i])) / (float)(max)) > FUDGE_FACTOR) {
-			logmsg(nn,1,"i: %d/%d a[i]: %08x b[i]: %08x",i,count,a[i],b[i]);
+			logmsg(nn,0,"i: %d/%d a[i]: %08x b[i]: %08x",i,count,a[i],b[i]);
 			return 1;
 		}
 	}
@@ -129,12 +169,6 @@ static inline int check_u8vals(struct nn_graph *nn, void *av, void *bv, uint32_t
 static inline int __attribute__((unused)) check_novals(struct nn_graph *nn, void *av, void *bv, uint32_t size) 
 {
 	return 0;
-}
-
-static int close_execute_f(struct nn_node *self, struct nn_graph *nn)
-{
-	return close_execute(self,nn,check_fvals);
-	//return close_execute(self,nn,check_novals);
 }
 
 static int close_execute_i32(struct nn_node *self, struct nn_graph *nn)
@@ -207,6 +241,16 @@ static int close_check(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
+static int close_check_f(struct nn_node *self, struct nn_graph *nn)
+{
+	logmsg(nn,2,"Checking close node %p",self);
+	if (self->n_inputs < 2) return errlog(nn,"check: wrong # inputs");
+	if (self->n_inputs > 3) return errlog(nn,"check: wrong # inputs");
+	if (self->n_outputs != 0) return errlog(nn,"check: wrong # outputs");
+	logmsg(nn,2,"close node %p check OK",self);
+	return 0;
+}
+
 static int close_check_q(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking close q node %p",self);
@@ -218,7 +262,7 @@ static int close_check_q(struct nn_node *self, struct nn_graph *nn)
 
 struct nn_node_ops nn_ops_for_Close_f = {
 	.execute = close_execute_f,
-	.check = close_check,
+	.check = close_check_f,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
 };

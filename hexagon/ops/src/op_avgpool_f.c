@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -35,9 +35,8 @@
 
 
 #include <nn_graph.h>
-
-
-
+#include <string.h>
+#include <math.h>
 
 static int avgpool_execute(struct nn_node *self, struct nn_graph *nn)
 {
@@ -105,13 +104,13 @@ static int avgpool_execute(struct nn_node *self, struct nn_graph *nn)
 	      /* foreach out z */
 	      for (out_z = 0; out_z < out_depth; out_z++) {
 	        float sum = 0.0f;
-		uint32_t count = 0;
+		float count = 0;
 		in_z = out_z;
 	        /* foreach window y */
 	        for (in_y = start_y; in_y < end_y; in_y++) {
 	          /* foreach window x */
 	          for (in_x = start_x; in_x < end_x; in_x++) {
-	            uint32_t data = in[in_z 
+	            float data = in[in_z
 	                      + in_depth * (in_x 
 	                        + in_width * ( in_y 
 	                          + in_height * (batch)))];
@@ -123,6 +122,7 @@ static int avgpool_execute(struct nn_node *self, struct nn_graph *nn)
 	            + out_depth * (out_x
 	              + out_width * (out_y
 	                + out_height * (batch)))] = sum / count;
+		//printf("avgpool_f[%ld,%ld,%ld]=%f\n", out_depth,out_width,out_height, sum / count);
 	      }
 	    }
 	  }
@@ -136,9 +136,20 @@ static int avgpool_execute(struct nn_node *self, struct nn_graph *nn)
 
 static int avgpool_check(struct nn_node *self, struct nn_graph *nn)
 {
+	int i;
 	logmsg(nn,2,"Checking avgpool node %p",self);
 	if (self->n_inputs != 3) return errlog(nn,"avgpool wrong # inputs");
 	if (self->n_outputs != 1) return errlog(nn,"avgpool wrong # outs");
+	for (i = 0; i < self->n_inputs; i++) {
+		if (self->inputs[i] == NULL) {
+			return errlog(nn,"avgpool NULL input %d",i);
+		}
+	}
+	for (i = 0; i < self->n_outputs; i++) {
+		if (self->outputs[i] == NULL) {
+			return errlog(nn,"avgpool NULL output %d",i);
+		}
+	}
 	logmsg(nn,2,"avgpool node %p check OK",self);
 	return 0;
 }

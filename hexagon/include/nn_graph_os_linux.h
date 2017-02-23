@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -70,6 +70,7 @@ static inline void nn_os_vector_release(int idx){};
 static inline void nn_os_vector_init() {};
 static inline void nn_os_hvx_power_on(struct nn_graph *nn) {};
 static inline void nn_os_hvx_power_off(struct nn_graph *nn) {};
+#if 0
 static inline uint64_t nn_os_get_cycles(struct nn_graph *nn)
 {
 	struct timespec ts;
@@ -77,11 +78,30 @@ static inline uint64_t nn_os_get_cycles(struct nn_graph *nn)
 
 	return ts.tv_nsec;
 }
+#endif
+static inline uint64_t nn_os_get_cycles(struct nn_graph *nn)
+{
+	uint64_t ret;
+    asm volatile ( " %0 = c15:14 // READ UPCYCLES \n" : "=r"(ret));
+    return ret;
+}
+
 static inline uint64_t nn_os_get_perfcount(struct nn_graph *nn) { return nn_os_get_cycles(nn); }
 
 int nn_os_workers_spawn(struct nn_graph *nn);
 void nn_os_workers_kill(struct nn_graph *nn);
 void nn_os_work_for_vector(struct nn_graph *nn, void (*f)(struct nn_graph *, void *),void *arg);
 void nn_os_work_for_scalar(struct nn_graph *nn, void (*f)(struct nn_graph *, void *),void *arg);
+
+static inline uint64_t nn_os_get_usecs(struct nn_graph *nn)
+{
+	uint64_t ret;
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME,&ts);
+	ret = tv.tv_sec;
+	ret *= 1000*1000*1000;
+	ret += tv.tv_nsec;
+	return ret;
+}
 
 #endif // NN_GRAPH_OS_H

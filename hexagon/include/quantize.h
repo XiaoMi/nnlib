@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -48,7 +48,8 @@
 static inline uint8_t quantize_uint8(float val, float minval, float maxval)
 {
 	/* We want 0.0 -- 255.0 to resize to 0..255 */
-	float resize_amt = 255/(maxval-minval);
+	float range = fmaxf(0.0001f,maxval-minval);
+	float resize_amt = 255.0f/range;
 	float value_f = (val - minval) * resize_amt;
 	int32_t value_i = roundf(value_f);
 	uint8_t ret = (value_i < 0) ? 0 : ((value_i > 255) ? 255 : value_i);
@@ -58,11 +59,39 @@ static inline uint8_t quantize_uint8(float val, float minval, float maxval)
 static inline int32_t quantize_uint(float val, float minval, float maxval)
 {
 	/* We want 0.0 -- 255.0 to resize to 0..255 */
-	float resize_amt = 255/(maxval-minval);
+	float range = fmaxf(0.0001f,maxval-minval);
+	float resize_amt = 255.0f/range;
 	float value_f = (val - minval) * resize_amt;
 	int32_t value_i = roundf(value_f);
 	int32_t ret = (value_i < 0) ? 0 : value_i;
 	return ret;
+}
+
+static inline int32_t quantize_int(float val, float minval, float maxval)
+{
+	/* We want 0.0 -- 255.0 to resize to 0..255 */
+	float range = fmaxf(0.0001f,maxval-minval);
+	float resize_amt = 255.0f/(range);
+	float value_f = (val - minval) * resize_amt;
+	int32_t value_i = roundf(value_f);
+	return value_i;
+}
+
+static inline void quantize_adjust_range(float *out_min, float *out_max, float *out_stepsize, float *out_recip_stepsize, float in_min, float in_max)
+{
+	float minval = fminf(0.0f,in_min);
+	float maxval = in_max;
+	float range = fmaxf(0.0001f,maxval-minval);
+	float stepsize = range/254.0f;
+	float recip_stepsize = 254.0f/range;
+	// round quantized_zero up so min_out <= minval
+	int quantized_zero = ((0.0f - minval) * recip_stepsize) + 0.999;
+	float newmin = -quantized_zero * stepsize;
+	float newmax = 255.0f * stepsize + newmin;
+	*out_min = newmin;
+	*out_max = newmax;
+	*out_stepsize = stepsize;
+	*out_recip_stepsize = recip_stepsize;
 }
 
 #endif

@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -48,6 +48,9 @@
 #include <nn_asm_ops.h>
 #include <nn_graph_os.h>
 
+#define likely(cond)	(__builtin_expect(!!(cond), 1))
+#define unlikely(cond)	(__builtin_expect(!!(cond), 0))
+
 struct nn_node_ops;
 struct freelist_node;
 
@@ -78,6 +81,7 @@ enum {
 	NN_GRAPH_PERFEVENT_USER0 = 1,
 	NN_GRAPH_PERFEVENT_USER1 = 2,
 	NN_GRAPH_PERFEVENT_HWPMU = 3,
+	NN_GRAPH_PERFEVENT_UTIME = 5,
 };
 
 struct nn_graph {
@@ -86,8 +90,10 @@ struct nn_graph {
 	size_t scratch_size;		// size of scratch
 	nn_id_t id;			// ID of this nn
 	unsigned int debug_level;	// Debug level of this NN
-	const struct tensor *input_data;
-	struct tensor *output_data;
+	const struct tensor *inputs;
+	struct tensor *outputs;
+	uint32_t n_inputs;
+	uint32_t n_outputs;
 	enum nn_graph_state state;
 	struct freelist_node *root;	// root of internal free list
 	void *bulk;			// bulk memory pointer
@@ -127,8 +133,10 @@ extern struct nn_node_ops *optab[];
 
 int do_execute(
 	struct nn_graph *nn,
-	const struct tensor *input,
-	struct tensor *output);
+	const struct tensor *inputs,
+	uint32_t n_inputs,
+	struct tensor *outputs,
+	uint32_t n_outputs);
 int do_append_node(
 	struct nn_graph *nn,
 	uint32_t node_id,
@@ -202,11 +210,21 @@ static inline uint32_t nn_align_up(uint32_t align_amt, uint32_t val)
 	return ((val + minusone) & (~minusone));
 }
 
+#ifdef H2_H
+
 #define RESET_PMU() __asm__ __volatile__ (" r0 = #0x48 ; trap0(#0); \n" : : : "r0","r1","r2","r3","r4","r5","r6","r7","memory")
 #define DUMP_PMU() __asm__ __volatile__ (" r0 = #0x4a ; trap0(#0); \n" : : : "r0","r1","r2","r3","r4","r5","r6","r7","memory")
-
 #define DISABLE_PMU() __asm__ __volatile__ (" r0 = #0x42 ; trap0(#0); \n" : : : "r0","r1","r2","r3","r4","r5","r6","r7","memory")
 #define ENABLE_PMU() __asm__ __volatile__ (" r0 = #0x41 ; trap0(#0); \n" : : : "r0","r1","r2","r3","r4","r5","r6","r7","memory")
+
+#else
+
+#define RESET_PMU() /* NOTHING */
+#define DUMP_PMU() /* NOTHING */
+#define DISABLE_PMU() /* NOTHING */
+#define ENABLE_PMU() /* NOTHING */
+
+#endif
 
 #include <nn_graph_log.h>
 #include <nn_graph_padding.h>

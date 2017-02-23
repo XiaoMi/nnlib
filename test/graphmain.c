@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -39,8 +39,12 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <hexagon_nn.h>
+//#define DEBUG_TEST_NEW_EXECUTE
+#ifdef DEBUG_TEST_NEW_EXECUTE
+#include <nn_graph.h>
+#endif // DEBUG_TEST_NEW_EXECUTE
 #include <time.h>
-#include "funcs.h"
+#include "graph_app.h"
 
 #define OUTPUT_ELEMENTS 1024
 #define BATCHES 1
@@ -66,36 +70,63 @@ extern uint8_t test_int_data[];
 extern float test_float_data[];
 
 
-#define DEBUG_LEVEL 0
-
 extern void init_graph(uint32_t id);
 
 #define PRINT_BUFSIZE (2*1024*1024)
 
-static inline void print_log(uint32_t id)
+void print_log(uint32_t id)
 {
+#ifndef NO_VERBOSE
 	unsigned char *buf;
+	unsigned char *p;
 	if ((buf = malloc(PRINT_BUFSIZE)) == NULL) return;
 	hexagon_nn_getlog(id,buf,PRINT_BUFSIZE);
-	puts((char *)buf);
+	for (p = buf; *p != 0; p++) putc(*p,stdout);
 	free(buf);
+#endif
 }
 
-static inline void print_graph(uint32_t id)
+void print_graph(uint32_t id)
 {
 	unsigned char *buf;
+	unsigned char *p;
 	if ((buf = malloc(PRINT_BUFSIZE)) == NULL) return;
 	hexagon_nn_snpprint(id,buf,PRINT_BUFSIZE);
-	puts((char *)buf);
+	for (p = buf; *p != 0; p++) putc(*p,stdout);
 	free(buf);
 }
 
-uint32_t graph_setup()
+#ifdef DEBUG_TEST_NEW_EXECUTE
+static inline void tensordef_shape_set(hexagon_nn_tensordef * dst,
+	unsigned int batches, unsigned int height, unsigned int width, unsigned int depth, int dataLen)
+{
+	dst->batches = batches;
+	dst->height = height;
+	dst->width = width;
+	dst->depth = depth;
+	dst->dataLen = dataLen;
+}
+static inline void tensordef_dataptr_set(hexagon_nn_tensordef * dst, unsigned char * dataPtr)
+{
+	dst->data = dataPtr;
+}
+static inline void tensordef_shape_get(const hexagon_nn_tensordef * src,
+	unsigned int * batches, unsigned int * height, unsigned int * width, unsigned int * depth, int * dataLen)
+{
+	*batches = src->batches;
+	*height = src->height;
+	*width = src->width;
+	*depth = src->depth;
+	*dataLen = src->dataLen;
+}
+#endif
+
+uint32_t graph_setup(int debug_level)
 {
 	uint32_t id;
 	int err;
 	id = hexagon_nn_init();
-	hexagon_nn_set_debug_level(id,DEBUG_LEVEL);
+	hexagon_nn_set_debug_level(id,debug_level);
 	init_graph(id);
 	print_graph(id);
 	printf("Init graph done.");
@@ -123,8 +154,77 @@ uint32_t find_max_idx(const float *data, uint32_t entries)
 	return maxidx;
 }
 
+int graph_execute(
+	uint32_t id, 
+	void *output, 
+	uint32_t *output_size_ptr,
+	const void *input,
+	int elementsize,
+	int depth,
+	int width,
+	int height,
+	float *msecs_out,
+	unsigned long long int *pcycles_out)
+{
+	uint32_t out_batches, out_height, out_width, out_depth;
+	uint32_t out_data_size;
+	/* EJP: for the short term, we'll verify HWD here and check instead of the graph failing */
+	struct timespec start;
+	struct timespec end;
+	unsigned int secs;
+	unsigned int nsecs;
+	unsigned long long int pcycles;
+	unsigned int cycleslo;
+	unsigned int cycleshi;
+	float msecs;
+	int err;
+	uint32_t output_size = *output_size_ptr;
+	clock_gettime(CLOCK_REALTIME,&start);
+	if ((err = hexagon_nn_execute(id,
+		1,
+		height,
+		width,
+		depth,
+		(const uint8_t *)input,
+		depth*width*height*elementsize,
+		&out_batches,
+		&out_height,
+		&out_width,
+		&out_depth,
+		(uint8_t *)output,
+		output_size,
+		&out_data_size)) != 0) {
+		clock_gettime(CLOCK_REALTIME,&end);
+		printf("execute got err: %d\n",err);
+		print_log(id);
+		return err;
+	} else {
+		clock_gettime(CLOCK_REALTIME,&end);
+	}
+	print_log(id);
+	secs = end.tv_sec - start.tv_sec;
+	if (end.tv_nsec < start.tv_nsec) {
+		secs -= 1;
+		nsecs = 1000*1000*1000 + end.tv_nsec - start.tv_nsec;
+	} else {
+		nsecs = end.tv_nsec - start.tv_nsec;
+	}
+	hexagon_nn_last_execution_cycles(id,&cycleslo,&cycleshi);
+	pcycles = cycleshi;
+	pcycles <<= 32;
+	pcycles |= cycleslo;
+	msecs = 1000.0f*secs;
+	msecs += nsecs/1.0e6f;
+	printf("elapsed time: %f msecs\n",msecs);
+	if (msecs_out) *msecs_out = msecs;
+	if (pcycles_out) *pcycles_out = pcycles;
+	*output_size_ptr = out_data_size;
+	return 0;
+}
+
+#if 0
 #define OPBUFSIZE 32
-void graph_execute(uint32_t id)
+unsigned long long graph_execute(uint32_t id)
 {
 	uint32_t out_batches, out_height, out_width, out_depth;
 	uint32_t out_data_size;
@@ -136,33 +236,60 @@ void graph_execute(uint32_t id)
 	unsigned int nop_id;
 	int version;
 	char buf[OPBUFSIZE];
-	int idx;
+	int idx[5], i;
 	double msecs;
+	unsigned long long pcycles = 0;
+
 	//printf("executing bad id: %d\n",hexagon_nn_execute(0,0,0,0,0,NULL,0,NULL,NULL,NULL,NULL,NULL,0,NULL));
 	if (hexagon_nn_version(&version) != 0) {
 		printf("oops: version failed?");
-		return;
+		return 0;
 	}
 	if (hexagon_nn_op_name_to_id("Nop",&nop_id) != 0) {
 		printf("oops: nop name failed?");
-		return;
+		return 0;
 	}
 	if (hexagon_nn_op_id_to_name(nop_id,buf,OPBUFSIZE) != 0) {
 		printf("oops: nop id failed?");
-		return;
+		return 0;
 	}
 	printf("version=%x nop_id=%x nop_name=<<%s>>\n",version,nop_id,buf);
 	
 	printf("Preparing to execute id=%x...\n",(unsigned int)id);
 	clock_gettime(CLOCK_REALTIME,&start);
+#ifdef H2_H
+	RESET_PMU();
+	pcycles = h2_get_core_pcycles();
+#endif
+#ifdef DEBUG_TEST_NEW_EXECUTE
+	hexagon_nn_tensordef in_tensordef;
+	hexagon_nn_tensordef out_tensordef;
+	uint32_t n_inputs;
+	uint32_t n_outputs;
+	n_inputs = 1;
+	n_outputs = 1;
+	tensordef_shape_set(&in_tensordef, BATCHES, HEIGHT, WIDTH, DEPTH, HEIGHT*WIDTH*DEPTH*sizeof(uint8_t));
+	tensordef_dataptr_set(&in_tensordef, (uint8_t *)test_int_data);
+	tensordef_dataptr_set(&out_tensordef, (uint8_t *)output_vals);
+	if ((err = hexagon_nn_execute_new(id,
+		&in_tensordef,
+		n_inputs,
+		&out_tensordef,
+		n_outputs)) != 0) {
+		clock_gettime(CLOCK_REALTIME,&end);
+		printf("execute got err: %d\n",err);
+	} else {
+		tensordef_shape_get(&out_tensordef, (unsigned int *)&out_batches, (unsigned int *)&out_height, (unsigned int *)&out_width, (unsigned int *)&out_depth, (int *)&out_data_size);
+#else
 	if ((err = hexagon_nn_execute(id,
 		BATCHES,
 		HEIGHT,
 		WIDTH,
 		DEPTH,
 		(uint8_t *)test_int_data,
+		HEIGHT*WIDTH*DEPTH*sizeof(uint8_t),
 		//(uint8_t *)test_float_data,
-		HEIGHT*WIDTH*DEPTH,
+		//HEIGHT*WIDTH*DEPTH*sizeof(float),
 		&out_batches,
 		&out_height,
 		&out_width,
@@ -173,6 +300,10 @@ void graph_execute(uint32_t id)
 		clock_gettime(CLOCK_REALTIME,&end);
 		printf("execute got err: %d\n",err);
 	} else {
+#endif
+#ifdef H2_H
+		pcycles = h2_get_core_pcycles() - pcycles;
+#endif
 		clock_gettime(CLOCK_REALTIME,&end);
 		printf("%dx%dx%dx%d, size=%d\n",
 			(int)out_batches,
@@ -180,10 +311,16 @@ void graph_execute(uint32_t id)
 			(int)out_width,
 			(int)out_depth,
 			(int)out_data_size);
-		idx = find_max_idx( output_vals,
-			out_batches*out_height*out_width*out_depth);
-		printf("max idx: %d / %f\n", (int)idx,output_vals[idx]);
-		if (idx == 169) {
+
+		// Top 5 indices and output_vals
+		for(i=0;i<5;i++)
+		{
+			idx[i] = find_max_idx( output_vals,
+				out_batches*out_height*out_width*out_depth);
+			printf("max idx%d: %4d / %f\n", i, (int)idx[i],output_vals[idx[i]]);
+			output_vals[idx[i]] = 0;
+		}
+		if (idx[0] == 169) {
 			puts("Index 169, I think that's a");
 puts("######     #    #     # ######     #");
 puts("#     #   # #   ##    # #     #   # #");
@@ -214,7 +351,10 @@ puts(" #####  #     # ######  ####### #     # #     # #     # ######  ####### ##
 	msecs += nsecs/1.0e6;
 	printf("elapsed time: %f msecs\n",msecs);
 	print_log(id);
+
+	return pcycles;
 }
+#endif
 
 #define MAX_NODES 2048
 
@@ -237,7 +377,6 @@ int cycle_sorter(const void *va, const void *vb)
 	if (acount > bcount) return 1;
 	return 0;
 }
-int graph_get_all_perf(uint32_t id);
 
 //void graph_perfdump(uint32_t id, const char *(*id2name)(uint32_t node_id))
 void graph_perfdump(uint32_t id)
@@ -536,24 +675,59 @@ const char *event_names[] = {
 	"COPROC_L2_LOAD_2NDARY_MISS",
 };
 
-int graph_get_all_perf(uint32_t id)
+#define MAX_PERF_OUTPUT_SIZE 4096
+
+int graph_get_all_perf(uint32_t id,
+	int elementsize,
+	int depth,
+	int width,
+	int height)
 {
 	unsigned int n_nodes;
+	uint32_t out_b, out_h,out_w,out_d,out_data_size;
 	uint64_t *counters;
+	void *input;
+	void *output;
 	hexagon_nn_perfinfo info[MAX_NODES];
-	printf("Getting all performance counter information\n");
 	int i,j;
+	int err;
+	printf("Getting all performance counter information\n");
+	if ((input = calloc(1,height*width*depth*elementsize)) == NULL) {
+		printf("malloc fail\n");
+		return -1;
+	}
 	if ((counters = malloc(N_EVENTS*MAX_NODES*sizeof(uint64_t))) == NULL) {
+		printf("malloc fail\n");
+		return -1;
+	}
+	if ((output = malloc(MAX_PERF_OUTPUT_SIZE)) == NULL) {
 		printf("malloc fail\n");
 		return -1;
 	}
 	for (i = 0; i < N_EVENTS; i++) {
 		hexagon_nn_reset_perfinfo(id,i);
 		printf("executing for event 0x%02x...\n",i);
-		graph_execute(id);
+		if ((err=hexagon_nn_execute(id,
+			1,
+			height,
+			width,
+			depth,
+			input,
+			depth*width*height*elementsize,
+			&out_b,
+			&out_h,
+			&out_w,
+			&out_d,
+			output,
+			MAX_PERF_OUTPUT_SIZE,
+			&out_data_size)) != 0) {
+			printf("execute err %d\n",err);
+			exit(1);
+		}
+		print_log(id);
 		if (hexagon_nn_get_perfinfo(id,info,MAX_NODES,&n_nodes) != 0) {
 			printf("perf info failure\n");
-			return -1;
+			exit(1);
 		}
 		for (j = 0; j < n_nodes; j++) {
 			counters[i*MAX_NODES+j] = get_counter(info[j]);
@@ -573,6 +747,8 @@ int graph_get_all_perf(uint32_t id)
 		}
 		printf("\n");
 	}
+	free(output);
+	free(input);
 	free(counters);
 	return 0;
 }

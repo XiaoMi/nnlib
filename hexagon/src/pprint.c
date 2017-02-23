@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -41,14 +41,19 @@
 #define PRINTF_APPEND(BUF,N,LEN,FMT,...) \
  do { LEN = snprintf(BUF,N,FMT,__VA_ARGS__); N -= LEN; BUF += LEN; if (N == 0) return; } while (0)
 
+#ifndef NO_VERBOSE
 static const char *padding_names[] = {
 	"WHATEVER",
 	"SAME",
 	"VALID",
+	"MIRROR_REFLECT",
+	"MIRROR_SYMMETRIC",
 };
+#endif
 
 void do_snpprint(struct nn_graph *nn, char *buf, uint32_t n)
 {
+#ifndef NO_VERBOSE
 	int len;
 	struct nn_node *node;
 	unsigned int node_count = 0;
@@ -79,6 +84,7 @@ void do_snpprint(struct nn_graph *nn, char *buf, uint32_t n)
 		node_count += 1;
 	}
 	PRINTF_APPEND(buf,n,len,"%d nodes total.\n",node_count);
+#endif
 }
 
 #if STANDALONE_DEBUG

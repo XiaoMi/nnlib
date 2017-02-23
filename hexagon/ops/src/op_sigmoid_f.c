@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -58,10 +58,10 @@ static int sigmoid_execute(struct nn_node *self, struct nn_graph *nn)
 	out_tensor->data_size = bytes;
 
 	for (i = 0; i < elements; i++) {
-		out_data[i] = (1.0f+tanhf(in_data[i])) * 0.5f;
+		out_data[i] = (1.0f+tanhf(in_data[i] * 0.5f)) * 0.5f;
 	}
 
-	logmsg(nn,2,"tanh %p done",self);
+	logmsg(nn,2,"sigmoid %p done",self);
 	return 0;
 }
 

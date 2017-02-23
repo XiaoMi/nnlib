@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -46,51 +46,32 @@
 
 static int output_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	logmsg(nn,2,"output execute. self=%p ",self);
-	if (nn->output_data->max_size < self->inputs[0]->data_size) {
-		return errlog(nn,"output too small: %d < %d",
-			nn->output_data->max_size,
-			self->inputs[0]->data_size);
-	}
-	nn->output_data->shape = self->inputs[0]->shape;
-	nn->output_data->data_size = self->inputs[0]->data_size; // FIXME: check vs. max size
-#if 0
-	/* Do softmax so we don't have to monkey with the graph */
-	const struct tensor *in_tensor = self->inputs[0];
-	//struct tensor *out_tensor = self->outputs[0];
-	const float *data = in_tensor->data;
-	float *out = nn->output_data->data;
-	float maxval = data[0];
-	float sum = 0.0f;
-	float sum_recip;
-	int n_elements = in_tensor->shape.depth;
 	int i;
-	for (i = 0; i < n_elements; i++) {
-		if (data[i] > maxval) maxval = data[i];
+	struct tensor *out;
+	const struct tensor *in;
+	logmsg(nn,2,"output execute. self=%p ",self);
+	if (nn->n_outputs != self->n_inputs) return errlog(nn,"bad # outputs");
+	for (i = 0; i < nn->n_outputs; i++) {
+		in = self->inputs[i];
+		out = &nn->outputs[i];
+		if (out->max_size < in->data_size) {
+			return errlog(nn,"output %d too small",i);
+		}
+		out->shape = in->shape;
+		out->data_size = in->data_size;
+		memcpy(out->data,in->data,in->data_size);
 	}
-	for (i = 0; i < n_elements; i++) {
-		sum += (out[i] = expf(data[i] - maxval));
-	}
-	sum_recip = 1.0f/sum;
-	for (i = 0; i < n_elements; i++) {
-		out[i] *= sum_recip;
-	}
-#else
-	memcpy(nn->output_data->data,self->inputs[0]->data,self->inputs[0]->data_size);
-#endif
 	/* Copy input tensor to output */
-	logmsg(nn,2,"copied tensor %d bytes of data",self->inputs[0]->data_size);
+	logmsg(nn,2,"copied %d tensors",self->n_inputs);
 	return 0;
 }
 
 static int output_check(struct nn_node *self, struct nn_graph *nn)
 {
+	int i;
 	logmsg(nn,2,"Checking output node %p",self);
-	if (self->inputs == NULL) {
-		return errlog(nn,0,"output: fatal: NULL inputs");
-	}
-	if (self->inputs[0] == NULL) {
-		return errlog(nn,0,"output: fatal: NULL input 0");
+	for (i = 0; i < self->n_inputs; i++) {
+		if (self->inputs[i] == NULL) return errlog(nn,"output: NULL input");
 	}
 	logmsg(nn,2,"output node %p check OK",self);
 	return 0;

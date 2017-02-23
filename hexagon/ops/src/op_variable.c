@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -160,6 +160,7 @@ static int assign_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	/* Copy odd inputs to even inputs */
 	int i;
+	logmsg(nn,2,"assign execute. self=%p inputs=%d",self,self->n_inputs);
 	for (i = 0; i < self->n_inputs; i += 2) {
 		if (tensor_copy((struct tensor *)self->inputs[i],self->inputs[i+1]) != 0) {
 			return errlog(nn,"can't copy to input %d",i);

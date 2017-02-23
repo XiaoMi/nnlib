@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -61,6 +61,15 @@
 #ifdef __hexagon__
 #include <hexagon_protos.h>
 
+#ifdef HEXAGON_V66
+#define GVCONV_ASM gvconv2dbbb_v66_asm
+#define GVCONVSUM_ASM(BUF,FILT,OUT,W,OW,OD,WD,FW,FH,NL,IMSUM,FSUM,MAXBUF,U0,U1,BIASBUF,RLEV) \
+	GVCONV_ASM(BUF,FILT,OUT,W,OW,OD,WD,FW,FH,NL,IMSUM,FSUM,MAXBUF,BIASBUF,RLEV)
+#else
+#define GVCONV_ASM gvconv2dbbb_asm
+#define GVCONVSUM_ASM gvconvsum2dbbb_asm
+#endif
+
 struct tdata {
 	struct nn_node *self;
 	int whoami;
@@ -84,13 +93,6 @@ struct supernode_info {
 	float maxval;
 	int maxval_precalculated;
 };
-
-#define RESET_PMU() __asm__ __volatile__ (" r0 = #0x48 ; trap0(#0); \n" : : : "r0","r1","r2","r3","r4","r5","r6","r7","memory")
-#define DUMP_PMU() __asm__ __volatile__ (" r0 = #0x4a ; trap0(#0); \n" : : : "r0","r1","r2","r3","r4","r5","r6","r7","memory")
-
-#define DISABLE_PMU() __asm__ __volatile__ (" r0 = #0x42 ; trap0(#0); \n" : : : "r0","r1","r2","r3","r4","r5","r6","r7","memory")
-#define ENABLE_PMU() __asm__ __volatile__ (" r0 = #0x41 ; trap0(#0); \n" : : : "r0","r1","r2","r3","r4","r5","r6","r7","memory")
-
 
 #define VPAD 4   //gvm loops now only unrolled by 4
 #define HPAD 16
@@ -146,25 +148,25 @@ static int supernode_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	struct tensor *out_min = self->outputs[1];
 	struct tensor *out_max = self->outputs[2];
 
-	uint32_t in_batches = in_tensor->shape.batches;
-	uint32_t in_width = in_tensor->shape.width;
-	uint32_t in_height = in_tensor->shape.height;
-	uint32_t in_depth = in_tensor->shape.depth;
+	int32_t in_batches = in_tensor->shape.batches;
+	int32_t in_width = in_tensor->shape.width;
+	int32_t in_height = in_tensor->shape.height;
+	int32_t in_depth = in_tensor->shape.depth;
 
-	uint32_t filt_batches = filt_tensor->shape.byidx[0];
-	uint32_t filt_height = filt_tensor->shape.byidx[3];
-	uint32_t filt_width = filt_tensor->shape.byidx[2];
-	uint32_t filt_depth = filt_tensor->shape.byidx[1];
+	int32_t filt_batches = filt_tensor->shape.filt_batches;
+	int32_t filt_height = filt_tensor->shape.filt_height;
+	int32_t filt_width = filt_tensor->shape.filt_width;
+	int32_t filt_depth = filt_tensor->shape.filt_depth;
 
-	uint32_t stride_width = stride_tensor->shape.width;
-	uint32_t stride_height = stride_tensor->shape.height;
+	int32_t stride_width = stride_tensor->shape.width;
+	int32_t stride_height = stride_tensor->shape.height;
 
-	uint32_t out_batches = in_batches;
-	uint32_t out_width = nn_pad_compute_outsize(in_width,filt_width,stride_width,self->padding);
-	uint32_t out_height = nn_pad_compute_outsize(in_height,filt_height,stride_height,self->padding);
-	uint32_t out_depth = filt_batches;
+	int32_t out_batches = in_batches;
+	int32_t out_width = nn_pad_compute_outsize(in_width,filt_width,stride_width,self->padding);
+	int32_t out_height = nn_pad_compute_outsize(in_height,filt_height,stride_height,self->padding);
+	int32_t out_depth = filt_batches;
 
-	uint32_t batch;
+	int32_t batch;
 	int32_t filt_x;
 	int32_t filt_y;
 	int32_t filt_z;
@@ -470,10 +472,10 @@ static void supernode_execute_hvx_slice(struct nn_graph *nn, void * vinfo)
 	int32_t in_height = in_tensor->shape.height;
 	int32_t in_depth = in_tensor->shape.depth;
 
-	int32_t filt_batches = filt_tensor->shape.byidx[0];
-	int32_t filt_height = filt_tensor->shape.byidx[3];
-	int32_t filt_width = filt_tensor->shape.byidx[2];
-	int32_t filt_depth = filt_tensor->shape.byidx[1];
+	int32_t filt_batches = filt_tensor->shape.filt_batches;
+	int32_t filt_height = filt_tensor->shape.filt_height;
+	int32_t filt_width = filt_tensor->shape.filt_width;
+	int32_t filt_depth = filt_tensor->shape.filt_depth;
 
 	int32_t stride_width = stride_tensor->shape.width;
 	int32_t stride_height = stride_tensor->shape.height;
@@ -530,7 +532,7 @@ static void supernode_execute_hvx_slice(struct nn_graph *nn, void * vinfo)
 	/* filt_offset is 0.0f quantized to filt min/max */
 
 	int32_t input_offset = quantize_uint8(0.0f,in_min_float,in_max_float);
-	int32_t filt_offset = quantize_uint8(0.0f,filt_min_float,filt_max_float);
+	int32_t filt_offset __attribute__((unused)) = quantize_uint8(0.0f,filt_min_float,filt_max_float);
 	//int32_t bias_offset = quantize_uint(0.0f,bias_min_float,bias_max_float);
 
        //printf(" in_offset = %d filt_offset = %d bias_offset = %d\n", input_offset, filt_offset, bias_offset);
@@ -739,14 +741,14 @@ static void supernode_execute_hvx_slice(struct nn_graph *nn, void * vinfo)
                    //new mega loop
                    //printf("%d use ptr = %08X\n",whoami,im2col_buf + start_line*stride_width*W);
                if(weights == 0)
-                   gvconvsum2dbbb_asm(im2col_buf + start_line * stride_width * W,
+                   GVCONVSUM_ASM(im2col_buf + start_line * stride_width * W,
                                   filt_pad_trans,
                                   out_batch + start_line * out_width* out_depth_pad,
                                   W, //padded in width
                                   out_width,
                                   out_depth_pad,
                                   Q6_R_combine_RlRl(stride_width,in_depth_pad),
-                                  filt_width*in_depth_pad,
+                                  filt_width, //in_depth_pad
                                   filt_height,
                                   num_lines,
                                   im2col_sum + start_line * out_width,
@@ -755,14 +757,14 @@ static void supernode_execute_hvx_slice(struct nn_graph *nn, void * vinfo)
                                   (int *)biasbuf,
                                   fixed_recip_level_size); 
                else
-                   gvconv2dbbb_asm (  im2col_buf + start_line * stride_width * W,
+                   GVCONV_ASM (  im2col_buf + start_line * stride_width * W,
                                   filt_pad_trans + weights*K,
                                   out_batch + weights + start_line * out_width* out_depth_pad,
                                   W, //padded in width
                                   out_width,
                                   out_depth_pad,
                                   Q6_R_combine_RlRl(stride_width,in_depth_pad),
-                                  filt_width*in_depth_pad,
+                                  filt_width, //in_depth_pad
                                   filt_height,
                                   num_lines,
                                   im2col_sum + start_line * out_width,
@@ -812,10 +814,10 @@ static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	int32_t in_height = in_tensor->shape.height;
 	int32_t in_depth = in_tensor->shape.depth;
 
-	int32_t filt_batches = filt_tensor->shape.byidx[0];
-	int32_t filt_height = filt_tensor->shape.byidx[3];
-	int32_t filt_width = filt_tensor->shape.byidx[2];
-	int32_t filt_depth = filt_tensor->shape.byidx[1];
+	int32_t filt_batches = filt_tensor->shape.filt_batches;
+	int32_t filt_height = filt_tensor->shape.filt_height;
+	int32_t filt_width = filt_tensor->shape.filt_width;
+	int32_t filt_depth = filt_tensor->shape.filt_depth;
 
 	int32_t stride_width = stride_tensor->shape.width;
 	int32_t stride_height = stride_tensor->shape.height;
@@ -1030,11 +1032,13 @@ static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 
 	//conv_start = HAP_perf_get_pcycles();
         nn_os_work_for_vector(nn,supernode_execute_hvx_slice,&worker_info);
+        nn_os_work_for_vector(nn,supernode_execute_hvx_slice,&my_info);
         //supernode_execute_hvx_slice(nn,&worker_info);
-        supernode_execute_hvx_slice(nn,&my_info);
-	record_usertime(nn,self,NN_GRAPH_PERFEVENT_USER0,(my_info.cycles+worker_info.cycles)/2);
+        //supernode_execute_hvx_slice(nn,&my_info);
 
         nn_sem_wait(&worker_info.donesem);
+        nn_sem_wait(&my_info.donesem);
+	record_usertime(nn,self,NN_GRAPH_PERFEVENT_USER0,(my_info.cycles+worker_info.cycles)/2);
 	//nonconv_start = HAP_perf_get_pcycles();
 
 
@@ -1044,7 +1048,9 @@ static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 
 	if ((!nodeinfo->maxval_precalculated) && 
 		(((maxsum+bias_adder) * out_level_size) > final_out_max_val)) {
-		nodeinfo->maxval *= 2;
+		while (nodeinfo->maxval < ((maxsum+bias_adder) * out_level_size)) {
+			nodeinfo->maxval *= 2;
+		}
 		logmsg(nn,1,"Supernode %x maxvalue too small, retrying w/ %f...",
 			self->node_id,nodeinfo->maxval);
 		return supernode_execute_hvx(self,nn);
@@ -1058,7 +1064,7 @@ static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
         //nn_sem_wait(&worker_info.donesem);
 
 
-	record_usertime(nn,self,NN_GRAPH_PERFEVENT_USER1,(my_info.cycles+worker_info.cycles)/2);
+	//record_usertime(nn,self,NN_GRAPH_PERFEVENT_USER1,(my_info.cycles+worker_info.cycles)/2);
 
 	tensor_set_shape(out_min,1,1,1,1);
 	tensor_set_float(out_min,0,final_out_min_val);
@@ -1101,10 +1107,10 @@ static int supernode_check_ref(struct nn_node *self, struct nn_graph *nn)
 	const struct tensor *filt_tensor = self->inputs[1];
 	const struct tensor *min_filt_tensor = self->inputs[4];
 	const struct tensor *max_filt_tensor = self->inputs[5];
-	uint32_t filt_batches = filt_tensor->shape.byidx[0];
-	uint32_t filt_height = filt_tensor->shape.byidx[3];
-	uint32_t filt_width = filt_tensor->shape.byidx[2];
-	uint32_t filt_depth = filt_tensor->shape.byidx[1];
+	int32_t filt_batches = filt_tensor->shape.filt_batches;
+	int32_t filt_height = filt_tensor->shape.filt_height;
+	int32_t filt_width = filt_tensor->shape.filt_width;
+	int32_t filt_depth = filt_tensor->shape.filt_depth;
 	uint32_t out_depth = filt_batches;
 	uint8_t *filt = filt_tensor->data;
 	float filt_max_float = tensor_get_float(max_filt_tensor,0);

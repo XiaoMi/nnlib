@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -70,11 +70,13 @@ struct perfinfo {
 };
 
 int hexagon_nn_version(int *ver);
+int hexagon_nn_last_execution_cycles(nn_id_t id, unsigned int *cycles_lo, unsigned int *cycles_hi);
 nn_id_t hexagon_nn_init();
 int hexagon_nn_snpprint(nn_id_t id, unsigned char *buf, uint32_t length);
 int hexagon_nn_getlog(nn_id_t id, unsigned char *buf, uint32_t length);
 int hexagon_nn_set_debug_level(nn_id_t id, int level);
 
+typedef struct almost_a_tensor hexagon_nn_tensordef;
 int hexagon_nn_append_node(
 	nn_id_t id,
 	uint32_t node_id, 
@@ -110,6 +112,11 @@ int hexagon_nn_execute(nn_id_t id,
 	uint8_t *data_out,
 	uint32_t data_out_max,
 	uint32_t *data_out_size);
+int hexagon_nn_execute_new(nn_id_t id,
+	const hexagon_nn_tensordef *tensors_in,
+	uint32_t n_tensors_in,
+	hexagon_nn_tensordef *tensors_out,
+	uint32_t n_tensors_out);
 int hexagon_nn_teardown(nn_id_t id);
 int hexagon_nn_reset_perfinfo(nn_id_t id, uint32_t event);
 int hexagon_nn_get_perfinfo(nn_id_t id, 

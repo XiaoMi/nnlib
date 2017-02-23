@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -460,6 +460,8 @@ gemmpybbw_asm:
            z7 = #0
            x17x14x13x10 = memd(ptr_x++kk)    //[0, 3]
            loop0(.L_loopK, ki)               //[P, 9]ki is k1/4 - 2
+       } {
+           nop  //NOTE: THIS EXTRA NOP PACKET ADDED TO WORK AROUND TOOL V.8.0.X ISSUE (JIRA) [QTOOL-27821] - NOP NOT NEEDED FOR TOOLS V.7.2 & V8.1
        }:endloop1
 /*=============================================================================*/
        {   r17:16 = memd(sp+#0)              //restore stack

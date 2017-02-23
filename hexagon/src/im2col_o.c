@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -82,6 +82,7 @@
 /*     ASSUMPTIONS                                                      */
 /*        Data is 128byte aligned                                       */
 /************************************************************************/
+
 #ifdef __hexagon__
 #include <nn_graph.h>
 
@@ -236,12 +237,16 @@ void gemm_asm(const uint8_t * x, int x_offset,
     int i;
       for(i=0; i < M; i+=MSTEP) {
           if(i==0)gemsuma_asm(&x[0], NSTEP, Q6_R_combine_RlRl(KSTEP,K), &xsum[0], y_offset, K*x_offset*y_offset);
+          //if(i==0)gemsuma_cn(&x[0], NSTEP, K, &xsum[0], y_offset, K*x_offset*y_offset);
 
           gemsumb_asm(&yopt[i*K],  &ysum[i], KSTEP, x_offset);
+          //gemsumb_cn(&yopt[i*K], &ysum[i], M, KSTEP, x_offset);
 
           gemmpybbw_asm(x,  &yopt[i*K],  &z[i], NSTEP, M, Q6_R_combine_RlRl(KSTEP,K));
+          //gemmpybbw_cn(&x[0],   &yopt[i*K],        &z[i], NSTEP, M, K);
 
           gemaddvvm_asm(&xsum[0], &ysum[i], &z[i],NSTEP, M, minmax, (i==0));
+          //gemaddvvm_cn(&xsum[0], &ysum[i], &z[i],NSTEP, M); //, minmax, (i==0 && j==0));
       }//end M
 
     return;
@@ -325,6 +330,7 @@ void im2col_co(
     int filter_area = filter_width * input_depth;
     int filter_value_count = filter_area * filter_height; //will need to be padded to 8
     int filter_value_count_pad = (filter_value_count + HPAD - 1) & ~(HPAD-1);
+    filter_value_count_pad = max(filter_value_count_pad,32);
     int pad_x = filter_value_count_pad - filter_value_count;
     int patches_pad = (output_width * output_height + VPAD - 1) & ~(VPAD-1);
     int pad_y = patches_pad - output_width * output_height;

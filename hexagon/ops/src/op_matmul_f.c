@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -37,7 +37,6 @@
 #include <nn_graph.h>
 #include <string.h>
 #include <stdlib.h>
-
 /* transpose the weights matrix and shufle blocks of 32 together */
 
 
@@ -97,6 +96,7 @@ static int matmul_execute_ref(struct nn_node *self, struct nn_graph *nn)
 				adata = a[i+y*a_depth];
 				bdata = b[x+i*b_depth];
 				sum += adata * bdata;
+				//printf("y=%ld, x=%ld, i=%ld, adata=%f, bdata=%f, sum=%f\n",y,x,i,adata,bdata,sum);
 			}
 			out[x+y*out_depth] = sum;
 		}

@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -45,12 +45,11 @@
 
 void logv(const char *filename, unsigned int line, struct nn_graph *nn, int level, const char *fmt, va_list ap)
 {
+#if 1
 	char *pos;
 	uint32_t bytes_left;
 	uint32_t total_bytes = 0;
 	int printbytes;
-	if (level > nn->debug_level) return;
-	/* EJP: for now, just printf */
 	pos = nn->logbuf + nn->logbuf_pos;
 	bytes_left = nn->logbuf_size - nn->logbuf_pos;
 	if ((printbytes = snprintf(pos,bytes_left,"%s:%d:",filename,line)) >= bytes_left) return;
@@ -66,5 +65,11 @@ void logv(const char *filename, unsigned int line, struct nn_graph *nn, int leve
 	pos += printbytes;
 	total_bytes += printbytes;
 	nn->logbuf_pos += total_bytes;
+#else
+	/* EJP: for now, just printf */
+	printf("%s:%d:",filename,line);
+	vprintf(fmt,ap);
+	printf("\n");
+#endif
 }
 

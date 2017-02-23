@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -81,13 +81,13 @@ static int maxpool_execute(struct nn_node *self, struct nn_graph *nn)
 	float maxval;
 	size_t bytes = out_batches * out_width * out_height * out_depth * sizeof(float);
 
+	logmsg(nn,2,"maxpool execute. self=%p ",self);
 	if ((window_tensor->shape.batches != 1)
 		|| (window_tensor->shape.depth != 1)
 		|| (stride_tensor->shape.batches != 1)
 		|| (stride_tensor->shape.depth != 1)) {
 		return errlog(nn,"bad window/stride shape");
 	}
-	logmsg(nn,2,"maxpool execute. self=%p ",self);
 	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
 	if (self->padding == NN_PAD_NA) return errlog(nn,"This op might pad");
 	tensor_set_shape(out_tensor,out_batches,out_height,out_width,out_depth);
@@ -114,7 +114,7 @@ static int maxpool_execute(struct nn_node *self, struct nn_graph *nn)
 	        for (in_y = start_y; in_y < end_y; in_y++) {
 	          /* foreach window x */
 	          for (in_x = start_x; in_x < end_x; in_x++) {
-	            uint32_t data = in[in_z 
+	            float data = in[in_z
 	                      + in_depth * (in_x 
 	                        + in_width * ( in_y 
 	                          + in_height * (batch)))];
@@ -129,6 +129,7 @@ static int maxpool_execute(struct nn_node *self, struct nn_graph *nn)
 	    }
 	  }
 	}
+	logmsg(nn,2,"maxpool %p done",self);
 	return 0;
 }
 
@@ -143,8 +144,8 @@ static int maxpool_check(struct nn_node *self, struct nn_graph *nn)
 			return errlog(nn,"maxpool NULL input %d",i);
 		}
 	}
-	for (i = 0; i < self->n_inputs; i++) {
-		if (self->inputs[i] == NULL) {
+	for (i = 0; i < self->n_outputs; i++) {
+		if (self->outputs[i] == NULL) {
 			return errlog(nn,"maxpool NULL output %d",i);
 		}
 	}

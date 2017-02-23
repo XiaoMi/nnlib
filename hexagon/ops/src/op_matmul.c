@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -55,7 +55,8 @@
 static int min(int a, int b) { return((a<b)?a:b); }
 
 
-static int matmul_execute_ref(struct nn_node *self, struct nn_graph *nn)
+static inline int matmul_execute(struct nn_node *self, struct nn_graph *nn,
+		void (*f)(struct nn_node *self, struct nn_graph *nn, int32_t a_offset, int32_t b_offset))
 {
 	const struct tensor *a_tensor = self->inputs[0];
 	const struct tensor *b_tensor = self->inputs[1];
@@ -81,18 +82,6 @@ static int matmul_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	uint32_t out_height = a_height;
 	uint32_t out_width = a_width;
 	uint32_t out_depth = b_depth;
-
-	//int32_t x;
-	//int32_t y;
-	int32_t i;
-
-	uint8_t *a = a_tensor->data;
-	//uint8_t *b = b_tensor->data;
-	int32_t *out = out_tensor->data;
-
-	//int32_t adata;
-	//int32_t bdata;
-	//int32_t sum;
 
 	uint32_t out_elements = out_batches*out_height*out_width*out_depth;
 	size_t out_size = out_elements*sizeof(int32_t);
@@ -123,9 +112,11 @@ static int matmul_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	int32_t b_offset = quantize_uint8(0.0f,b_min_float,b_max_float);
 
 	logmsg(nn,2,"matmul execute. self=%p",self);
-	logmsg(nn,2,"matmul in dims: %dx%dx%dx%d * %dx%dx%dx%d",
+	logmsg(nn,2,"matmul in dims: %lux%lux%lux%lu * %lux%lux%lux%lu",
 		a_batches,a_height,a_width,a_depth,
 		b_batches,b_height,b_width,b_depth);
+	logmsg(nn,2,"matmul out dims: %lux%lux%lux%lu",
+			out_batches,out_height,out_width,out_depth);
 	if (a_height != 1) return errlog(nn,"oops, height != 1");
 	if (b_height != 1) return errlog(nn,"oops, height != 1");
 	if (a_batches != 1) return errlog(nn,"fixme: support batches");
@@ -144,27 +135,45 @@ static int matmul_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	out_min->data_size = sizeof(float);
 	out_max->data_size = sizeof(float);
 
-        //printf(" MATMUL ------- %d %d %d %d\n",a_width,b_depth,a_depth,out_depth);
-#ifdef __hexagon__
-        //SIM_ACQUIRE_HVX;
-        //SIM_SET_HVX_DOUBLE_MODE;
+	f(self, nn, a_offset, b_offset);
 
-        //int b_depth_pad = (b_depth + 32-1)&~(32-1);
-        int a_depth_pad = (a_depth + 16-1)&~(16-1);
+	logmsg(nn,2,"matmul execute done!");
+	return 0;
+}
 
-        for(i = 0; i < out_depth; i+=32)
-          gemvmpybbw_asm(
-		a,
-		-a_offset,
-		((uint8_t *)self->opaque)+i*a_depth_pad,
-		-b_offset,
-		((int *)out)+i,
-		min(32, out_depth-i),
-		a_depth_pad);
-        //SIM_RELEASE_HVX;
-#else
-	for (y = 0; y < a_width; y++) {
-		for (x = 0; x < b_depth; x++) {
+static inline void matmul_ref(
+		struct nn_node *self,
+		struct nn_graph *nn,
+		int32_t a_offset,
+		int32_t b_offset)
+{
+	const struct tensor *a_tensor = self->inputs[0];
+	const struct tensor *b_tensor = self->inputs[1];
+	struct tensor *out_tensor = self->outputs[0];
+
+	uint8_t *a = a_tensor->data;
+	uint8_t *b = b_tensor->data;
+	int32_t *out = out_tensor->data;
+
+	int32_t adata;
+	int32_t bdata;
+	int32_t sum;
+	int32_t x;
+	int32_t y;
+	int32_t i;
+
+	uint32_t a_width = a_tensor->shape.width;
+	uint32_t a_depth = a_tensor->shape.depth;
+
+	uint32_t b_depth = b_tensor->shape.depth;
+	uint32_t out_width = a_width;
+	uint32_t out_depth = b_depth;
+
+    logmsg(nn,2,"a_widthxa_depth=%lux%lu a_offset=%ld b_offset=%ld",
+    		a_width, a_depth, a_offset, b_offset);
+
+	for (y = 0; y < out_width; y++) {
+		for (x = 0; x < out_depth; x++) {
 			sum = 0;
 			for (i = 0; i < a_depth; i++) {
 				adata = a[i+y*a_depth] - a_offset;
@@ -174,12 +183,71 @@ static int matmul_execute_ref(struct nn_node *self, struct nn_graph *nn)
 			out[x+y*out_depth] = sum;
 		}
 	}
-#endif
-
-	logmsg(nn,2,"matmul execute (ref) done!");
-	return 0;
+	logmsg(nn,2,"matmul execute ref done!");
 }
 
+static inline void matmul_asm(
+		struct nn_node *self,
+		struct nn_graph *nn,
+		int32_t a_offset,
+		int32_t b_offset)
+{
+	const struct tensor *a_tensor = self->inputs[0];
+	const struct tensor *b_tensor = self->inputs[1];
+	struct tensor *out_tensor = self->outputs[0];
+
+	uint8_t *a = a_tensor->data;
+	int32_t *out = out_tensor->data;
+
+	uint32_t a_width = a_tensor->shape.width;
+	uint32_t a_depth = a_tensor->shape.depth;
+	uint32_t b_depth = b_tensor->shape.depth;
+	uint32_t out_width = a_width;
+	uint32_t out_depth = b_depth;
+	int32_t i;
+
+    //SIM_ACQUIRE_HVX;
+    //SIM_SET_HVX_DOUBLE_MODE;
+
+    //int b_depth_pad = (b_depth + 32-1)&~(32-1);
+    int a_depth_pad = (a_depth + 16-1)&~(16-1);
+
+	// ASM code does not handle out_width != 1, for now use reference C code
+	if(out_width == 1)
+	{
+		logmsg(nn,2,"Pad A: a_widthxa_depth=%lux%lu,a_widthxa_depth_pad=%lux%d, a_offset=%ld b_offset=%ld",
+				a_width, a_depth, a_width,a_depth_pad, a_offset, b_offset);
+
+		for(i = 0; i < out_depth; i+=32)
+		  gemvmpybbw_asm(
+			a,
+			-a_offset,
+			((uint8_t *)self->opaque)+i*a_depth_pad,
+			-b_offset,
+			((int *)out)+i,
+			min(32, out_depth-i),
+			a_depth_pad);
+		//SIM_RELEASE_HVX;
+	}
+	else
+	{
+		matmul_ref(self, nn, a_offset, b_offset);
+		logmsg(nn,2,"matmul execute asm does not handle out_width != 1, for now use reference C code!");
+
+	}
+	logmsg(nn,2,"matmul execute asm done!");
+}
+
+
+static int matmul_execute_ref(struct nn_node *self, struct nn_graph *nn)
+{
+	return matmul_execute(self,nn,matmul_ref);
+}
+
+static int matmul_execute_asm(struct nn_node *self, struct nn_graph *nn)
+{
+	return matmul_execute(self,nn,matmul_asm);
+}
 
 static inline void logmsg_input(
 	struct nn_graph *nn,
@@ -228,8 +296,8 @@ static int matmul_check_ref(struct nn_node *self, struct nn_graph *nn)
 	const struct tensor *filt_tensor = self->inputs[1];
 	const struct tensor *min_filt_tensor = self->inputs[4];
 	const struct tensor *max_filt_tensor = self->inputs[5];
-	uint32_t filt_batches = filt_tensor->shape.byidx[0];
-	uint32_t filt_depth = filt_tensor->shape.byidx[1];
+	uint32_t filt_batches = filt_tensor->shape.filt_batches;
+	uint32_t filt_depth = filt_tensor->shape.filt_depth;
 	uint32_t out_depth = filt_batches;
 	uint8_t *filt = filt_tensor->data;
 	float filt_max_float = tensor_get_float(max_filt_tensor,0);
@@ -238,13 +306,16 @@ static int matmul_check_ref(struct nn_node *self, struct nn_graph *nn)
 	uint32_t filt_elements = filt_depth;
 	uint32_t filt_elements_pad = (filt_elements + APAD - 1) & (~(APAD - 1));
 	int out_depth_pad = (out_depth + BPAD - 1) & ~(BPAD-1);
-	uint32_t consts_size = filt_elements_pad * out_depth_pad;
+	uint32_t consts_size;
 	uint32_t vecinfo;
+	filt_elements_pad = (filt_elements_pad < 32)?32:filt_elements_pad;
+	consts_size = filt_elements_pad * out_depth_pad;
 	if ((self->opaque = memalign(ALIGN_SIZE,consts_size)) == NULL) {
 		return errlog(nn,"couldn't allocate buffer for const rearrangement");
 	}
 	nn_os_hvx_power_on(nn);
 	vecinfo = nn_os_vector_acquire();
+	logmsg(nn,2,"Pad B: filt_elements=%lu %lu,out_depth=%lu %d, filt_offset=%ld", filt_elements, out_depth, filt_elements_pad,out_depth_pad, filt_offset);
 	pad2d(filt,filt_elements,out_depth,nn->scratch,filt_elements_pad,out_depth_pad,filt_offset);
 	transpack(nn->scratch,filt_elements_pad,out_depth_pad,self->opaque);
 	nn_os_vector_release(vecinfo);
@@ -278,7 +349,7 @@ static struct nn_node *matmul_ctor(
 }
 
 struct nn_node_ops nn_ops_for_QuantizedMatMul_8x8to32 = {
-	.execute = matmul_execute_ref,
+	.execute = matmul_execute_asm,
 	.check = matmul_check_ref,
 	.ctor = matmul_ctor,
 	.dtor = node_free_common,
@@ -287,7 +358,7 @@ struct nn_node_ops nn_ops_for_QuantizedMatMul_8x8to32 = {
 struct nn_node_ops nn_ops_for_QuantizedMatMul_8x8to32_ref = {
 	.execute = matmul_execute_ref,
 	.check = matmul_check_ref,
-	.ctor = node_alloc_common,
+	.ctor = matmul_ctor,
 	.dtor = node_free_common,
 };
 

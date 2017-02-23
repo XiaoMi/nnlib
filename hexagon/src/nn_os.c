@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -38,6 +38,10 @@
 #include <nn_graph.h>
 #include <stdlib.h>
 
+#ifndef NUM_VECTOR_THREADS
+#define NUM_VECTOR_THREADS 2
+#endif
+
 union workitem {
 	struct {
 		void (*f)(struct nn_graph *, void *);
@@ -70,7 +74,10 @@ static void *nn_os_worker(void *vinfo)
 
 void nn_os_workers_kill(struct nn_graph *nn)
 {
-	nn_os_work_for_vector(nn,NULL,NULL);
+	int i;
+	for (i = 0; i < (NUM_VECTOR_THREADS-1); i++) {
+		nn_os_work_for_vector(nn,NULL,NULL);
+	}
 	nn_os_work_for_scalar(nn,NULL,NULL);
 	nn_os_work_for_scalar(nn,NULL,NULL);
 }
@@ -134,7 +141,7 @@ static void __attribute__((unused)) qurt_worker(void *p)
 
 int nn_os_vector_acquire()
 {
-		if (dspCV_hvx_lock(DSPCV_HVX_MODE_128B, 0) < 0) {
+	if (dspCV_hvx_lock(DSPCV_HVX_MODE_128B, 0) < 0) {
 		return 0;
 	}
 	return 0;
@@ -147,9 +154,9 @@ void nn_os_vector_release(int idx)
 
 int nn_os_workers_spawn(struct nn_graph *nn)
 {
-	qurt_thread_t vec,scal1,scal2;
+	qurt_thread_t ids[NUM_VECTOR_THREADS+2];
 	struct tinfo info;
-	qurt_thread_attr_t attrs[3];
+	qurt_thread_attr_t attrs[NUM_VECTOR_THREADS+2];
 	qurt_pipe_attr_t pattr;
 	int i;
 
@@ -166,25 +173,18 @@ int nn_os_workers_spawn(struct nn_graph *nn)
 	qurt_pipe_attr_set_elements(&pattr,PIPESIZE_ELEMENTS);
 	qurt_pipe_create(&nn->nonvec_work,&pattr);
 
-	for (i = 0; i < 3; i++) {
+	for (i = 1; i < NUM_VECTOR_THREADS+2; i++) {
 		qurt_thread_attr_t *a = &attrs[i];
 		qurt_thread_attr_init(a);
 		qurt_thread_attr_set_name(a,(char *)"nn_worker");
 		qurt_thread_attr_set_stack_addr(a,malloc(STACK_SIZE));
 		qurt_thread_attr_set_stack_size(a,STACK_SIZE);
 		qurt_thread_attr_set_priority(a, QURT_THREAD_ATTR_PRIORITY_DEFAULT/2+i);
+		if (i < NUM_VECTOR_THREADS) info.pipe = nn->vec_work;
+		else info.pipe = nn->nonvec_work;
+		qurt_thread_create(&ids[i],a,qurt_worker,&info);
+		nn_sem_wait(&info.sem);
 	}
-	logmsg(nn,0,"thread priority: %d\n",QURT_THREAD_ATTR_PRIORITY_DEFAULT/2);
-	info.pipe = nn->vec_work;
-	if ((i=qurt_thread_create(&vec,&attrs[0],qurt_worker,&info)) != QURT_EOK) {
-		return errlog(nn,"thread create fail: %d",i);
-	}
-	nn_sem_wait(&info.sem);
-	info.pipe = nn->nonvec_work;
-	qurt_thread_create(&scal1,&attrs[1],qurt_worker,&info);
-	nn_sem_wait(&info.sem);
-	qurt_thread_create(&scal2,&attrs[2],qurt_worker,&info);
-	nn_sem_wait(&info.sem);
 	return 0;
 }
 
@@ -208,6 +208,7 @@ unsigned long long int nn_os_get_perfcount(struct nn_graph *nn) {
 	if (nn->perf_event < NN_GRAPH_PERFEVENT_HWPMU) {
 		if (nn->perf_event == 0) return qurt_get_core_pcycles();
 	}
+	if (nn->perf_event == NN_GRAPH_PERFEVENT_UTIME) return nn_os_get_usecs(nn);
 	lo = qurt_pmu_get(QURT_PMUCNT0);
 	hi = qurt_pmu_get(QURT_PMUCNT1);
 	ret = hi;
@@ -215,7 +216,61 @@ unsigned long long int nn_os_get_perfcount(struct nn_graph *nn) {
 	ret |= lo;
 	return ret;
 }
+
+
+
 #endif
+
+static int nn_os_vecinfo[NUM_VECTOR_THREADS];
+nn_sem_t worker_acquired_sem;
+nn_sem_t worker_go_sem;
+
+
+static void __attribute__((unused)) worker_acquire(struct nn_graph *nn, void *vptr)
+{
+	int *ptr = vptr;
+	*ptr = nn_os_vector_acquire();
+	nn_sem_post(&worker_acquired_sem);
+	nn_sem_wait(&worker_go_sem);
+}
+
+static void __attribute__((unused)) worker_release(struct nn_graph *nn, void *vptr)
+{
+	int *ptr = vptr;
+	nn_os_vector_release(*ptr);
+	nn_sem_post(&worker_acquired_sem);
+	nn_sem_wait(&worker_go_sem);
+}
+
+void nn_os_vector_workers_acquire(struct nn_graph *nn)
+{
+	int i;
+	nn_sem_init(&worker_acquired_sem,0);
+	nn_sem_init(&worker_go_sem,0);
+	for (i = 1; i < (NUM_VECTOR_THREADS); i++) {
+		nn_os_work_for_vector(nn,worker_acquire,&nn_os_vecinfo[i]);
+		nn_sem_wait(&worker_acquired_sem);
+	}
+	for (i = 1; i < (NUM_VECTOR_THREADS); i++) {
+		nn_sem_post(&worker_go_sem);
+	}
+	nn_os_vecinfo[0] = nn_os_vector_acquire();
+}
+
+void nn_os_vector_workers_release(struct nn_graph *nn)
+{
+	int i;
+	nn_sem_init(&worker_acquired_sem,0);
+	nn_sem_init(&worker_go_sem,0);
+	for (i = 1; i < (NUM_VECTOR_THREADS); i++) {
+		nn_os_work_for_vector(nn,worker_release,&nn_os_vecinfo[i]);
+		nn_sem_wait(&worker_acquired_sem);
+	}
+	for (i = 1; i < (NUM_VECTOR_THREADS); i++) {
+		nn_sem_post(&worker_go_sem);
+	}
+	nn_os_vector_release(nn_os_vecinfo[0]);
+}
 
 #if !defined(USE_OS_QURT)
 
@@ -225,7 +280,9 @@ int nn_os_workers_spawn(struct nn_graph *nn)
 	pthread_attr_t attrs;
 	pthread_attr_init(&attrs);
 	pthread_attr_setstacksize(&attrs,8192);
+	pthread_attr_setdetachstate(&attrs,1);
 	struct tinfo info;
+	int i;
 
 	nn->vec_work = nn_pipe_alloc(nn, 128);
 	nn->nonvec_work = nn_pipe_alloc(nn, 128);
@@ -238,8 +295,10 @@ int nn_os_workers_spawn(struct nn_graph *nn)
 
 	/* Create vector */
 	info.pipe = nn->vec_work;
-	pthread_create(&vec,&attrs,nn_os_worker,&info);
-	nn_sem_wait(&info.sem);
+	for (i = 0; i < (NUM_VECTOR_THREADS-1); i++) {
+		pthread_create(&vec,&attrs,nn_os_worker,&info);
+		nn_sem_wait(&info.sem);
+	}
 	/* create scalar */
 	info.pipe = nn->nonvec_work;
 	pthread_create(&scal1,&attrs,nn_os_worker,&info);

@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -72,54 +72,7 @@ struct tdata {
 	nn_sem_t donesem;
 };
 
-static inline void do_convert(
-	struct nn_graph *nn,
-	uint8_t *out,
-	const uint8_t *in, 
-	const uint32_t iters,
-	const uint32_t depth,
-	const uint32_t stride,
-	const float in_level,
-	const float in_min,
-	const float out_min,
-	const float recip_level)
-{
-#if 0
-	int i,j;
-	uint8_t val;
-	for (i = 0; i < iters; i++) {
-		for (j = 0; j < depth; j++) {
-			val = roundsatu8(((*(in++) * in_level) + in_min - out_min) * recip_level);
-			out[j] = val;
-		}
-		out += stride;
-	}
-#else
-        int offset = (int) ((in_min-out_min)/in_level);
-        int gain = (int) (recip_level*in_level*powf(2.0, 15));
-        short gains;
-        if(gain > 32767) gains  = 32767; else gains = (short) gain;
-#ifndef __hexagon__
-	int i,j;
-	int val, ival;
-	for (i = 0; i < iters; i++) {
-		for (j = 0; j < depth; j++) {
-                        ival = in[j];
-			val = ((ival + offset)* gains + (1<<14))>>15;
-                        if(val > 255) val = 255; else if(val < 0) val = 0;
-			out[j] = val;
-		}
-                in += depth;
-		out += stride;
-	}
-#else
-        memconvert_hvx(out, in, depth, offset, gains,stride, iters);
-#endif
-#endif
-}
-
-
-static void concat_execute_slice(struct nn_graph *nn, void *vinfo)
+static void concat_execute_slice_ref(struct nn_graph *nn, void *vinfo)
 {
 	struct tdata *info = vinfo;
 	struct nn_node *self = info->self;
@@ -134,7 +87,6 @@ static void concat_execute_slice(struct nn_graph *nn, void *vinfo)
 	uint32_t i;
 	float in_min;
 	float in_max; 
-	//float in_off; 
 	float in_level;
 	float out_min = info->out_min;
 	float out_max = info->out_max;
@@ -142,6 +94,13 @@ static void concat_execute_slice(struct nn_graph *nn, void *vinfo)
 	uint32_t iters = 0;
 	uint32_t total_depth = info->total_depth;
 	uint32_t stride;
+	int offset;
+	int gain;
+	short gains;
+	uint8_t *out;
+	const uint8_t *in; 
+	int k,l;
+	int oval, ival;
 
 	out_level_recip = 255.0f/(out_max-out_min);
 	stride = total_depth;
@@ -151,28 +110,103 @@ static void concat_execute_slice(struct nn_graph *nn, void *vinfo)
 			out_data += t->shape.depth;
 			continue;
 		}
-		// FIXME: l2fetch(t->data,t->shape.depth*t->shape.width,t->shape.height);
 		in_min = tensor_get_float(min_tensors[i],0);
 		in_max = tensor_get_float(max_tensors[i],0);
+		if (in_min > 0.0f) {
+			in_min = 0.0f; // comport with op_quantize use of quantize_adjust_range setting minval = fminf(0.0f,min);
+		}
 		in_level = (in_max-in_min)/255.0f;
-		//in_off = out_min-in_min;
 		iters = t->shape.width * t->shape.height * t->shape.batches;
-		do_convert(nn,
-			out_data,
-			t->data,
-			iters,
-			t->shape.depth,
-			stride,
-			in_level,
-			in_min,
-			out_min,
-			out_level_recip);
+		l2fetch(t->data, t->shape.depth, t->shape.depth, iters);
+		offset = (int) ((in_min-out_min)/in_level);
+		gain = (int) (out_level_recip*in_level*powf(2.0, 15));
+		if (gain > 32767) {
+			gains  = 32767; 
+		} else {
+			gains = (short) gain;
+		}
+		out = out_data;
+		in = t->data;
+		for (k = 0; k < iters; k++) {
+			for (l = 0; l < t->shape.depth; l++) {
+				ival = in[l];
+				oval = ((ival + offset)* gains + (1<<14))>>15;
+				if (oval > 255) {
+					oval = 255; 
+				} else if (oval < 0) {
+					oval = 0;
+				}
+				out[l] = oval;
+			}
+			in += t->shape.depth;
+			out += stride;
+		}
 		out_data += t->shape.depth;
 	}
 	nn_sem_post(&info->donesem);
 }
 
-static int concat_execute(struct nn_node *self, struct nn_graph *nn)
+static void concat_execute_slice_asm(struct nn_graph *nn, void *vinfo)
+{
+	struct tdata *info = vinfo;
+	struct nn_node *self = info->self;
+	int whoami = info->whoami;
+	int n_input_tensors = (self->n_inputs-1)/3;
+	const struct tensor **input_tensors = &self->inputs[1];
+	const struct tensor **min_tensors = &self->inputs[1+n_input_tensors];
+	const struct tensor **max_tensors = &self->inputs[1+2*n_input_tensors];
+	const struct tensor *t;
+	struct tensor *out_tensor = self->outputs[0];
+	uint8_t *out_data = out_tensor->data;
+	uint32_t i;
+	float in_min;
+	float in_max; 
+	float in_level;
+	float out_min = info->out_min;
+	float out_max = info->out_max;
+	float out_level_recip;
+	uint32_t iters = 0;
+	uint32_t total_depth = info->total_depth;
+	uint32_t stride;
+	int offset;
+	int gain;
+	short gains;
+	uint8_t *out;
+	const uint8_t *in; 
+
+	out_level_recip = 255.0f/(out_max-out_min);
+	stride = total_depth;
+	for (i = 0; i < n_input_tensors; i++) {
+		t = input_tensors[i];
+		out = out_data;
+		in = t->data;
+		if ((i & 1) != whoami) {
+			out_data += t->shape.depth;
+			continue;
+		}
+		in_min = tensor_get_float(min_tensors[i],0);
+		in_max = tensor_get_float(max_tensors[i],0);
+		if (in_min > 0.0f) {
+			in_min = 0.0f; // comport with op_quantize use of quantize_adjust_range setting minval = fminf(0.0f,min);
+		}
+		in_level = (in_max-in_min)/255.0f;
+		iters = t->shape.width * t->shape.height * t->shape.batches;
+		l2fetch((void*)in, t->shape.depth, t->shape.depth, iters); 
+		offset = (int) ((in_min-out_min)/in_level);
+		gain = (int) (out_level_recip*in_level*0x1.0p15f);
+		if (gain > 32767) {
+			gains  = 32767; 
+		} else {
+			gains = (short) gain;
+		}
+		memconvert_hvx(out, in, t->shape.depth, offset, gains, stride, iters);
+		out_data += t->shape.depth;
+	}
+	nn_sem_post(&info->donesem);
+}
+
+static int concat_execute(struct nn_node *self, struct nn_graph *nn,
+		void (*concat_execute_slice_f)(struct nn_graph *self, void *vinfo))
 {
 	int n_input_tensors = (self->n_inputs-1)/3;
 	const struct tensor *dim_tensor = self->inputs[0];
@@ -186,7 +220,6 @@ static int concat_execute(struct nn_node *self, struct nn_graph *nn)
 	uint32_t in_height = self->inputs[1]->shape.height;
 	uint32_t in_batches = self->inputs[1]->shape.batches;
 	uint32_t i;
-	//float in_off; 
 	float out_min = tensor_get_float(min_tensors[0],0);
 	float out_max = tensor_get_float(max_tensors[0],0);
 	uint32_t out_bytes = 0;
@@ -211,6 +244,9 @@ static int concat_execute(struct nn_node *self, struct nn_graph *nn)
 		total_depth += input_tensors[i]->shape.depth;
 	}
 	if (out_bytes > out_tensor->max_size) return errlog(nn,"out too small");
+	if (out_min > 0.0f) {
+		out_min = 0.0f; // comport with op_quantize use of quantize_adjust_range setting minval = fminf(0.0f,min);
+	}
 	tensor_set_shape(out_min_tensor,1,1,1,1);
 	tensor_set_shape(out_max_tensor,1,1,1,1);
 	tensor_set_float(out_min_tensor,0,out_min);
@@ -230,15 +266,24 @@ static int concat_execute(struct nn_node *self, struct nn_graph *nn)
 	nn_sem_init(&worker_info.donesem,0);
 	nn_sem_init(&my_info.donesem,0);
 
-	nn_os_work_for_vector(nn,concat_execute_slice,&worker_info);
-	//concat_execute_slice(nn,&worker_info);
-	concat_execute_slice(nn,&my_info);
+	nn_os_work_for_vector(nn,concat_execute_slice_f,&worker_info);
+	//concat_execute_slice_f(nn,&worker_info);
+	concat_execute_slice_f(nn,&my_info);
 	nn_sem_wait(&worker_info.donesem);
 
 	logmsg(nn,2,"concat %p done",self);
 	return 0;
 }
 
+static int concat_execute_ref(struct nn_node *self, struct nn_graph *nn)
+{
+	return concat_execute(self,nn,concat_execute_slice_ref);
+}
+
+static int concat_execute_asm(struct nn_node *self, struct nn_graph *nn)
+{
+	return concat_execute(self,nn,concat_execute_slice_asm);
+}
 
 static int concat_check(struct nn_node *self, struct nn_graph *nn)
 {
@@ -258,7 +303,7 @@ static int concat_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_QuantizedConcat_8 = {
-	.execute = concat_execute,
+	.execute = concat_execute_asm,
 	.check = concat_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
@@ -266,7 +311,7 @@ struct nn_node_ops nn_ops_for_QuantizedConcat_8 = {
 
 
 struct nn_node_ops nn_ops_for_QuantizedConcat_8_ref = {
-	.execute = concat_execute,
+	.execute = concat_execute_ref,
 	.check = concat_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,

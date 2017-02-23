@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -96,7 +96,7 @@ static inline float compute_lrn_at(
 	float input;
 	float sum = 0;
 	float tmp,tmp2;
-	logmsg(nn,0,"window=[%d,%d,%d] eachside=[%d,%d,%d]",
+	logmsg(nn,1,"window=[%d,%d,%d] eachside=[%d,%d,%d]",
 		window_y,
 		window_x,
 		window_z,
@@ -108,7 +108,7 @@ static inline float compute_lrn_at(
 	  if (y >= height) continue;
 	  for (x = (x_start - window_eachside_x); x < (x_start + window_eachside_x + 1); x++) {
 	    if (x < 0) continue;
-	    if (x >= height) continue;
+	    if (x >= width) continue;
 	    for (z = (z_start - window_eachside_z); z < (z_start + window_eachside_z + 1); z++) {
 	      if (z < 0) continue;
 	      if (z >= depth) continue;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -67,10 +67,10 @@ static int tanh_execute(struct nn_node *self, struct nn_graph *nn)
 
 static int tanh_check(struct nn_node *self, struct nn_graph *nn)
 {
-	logmsg(nn,2,"Checking sigmoid node %p",self);
+	logmsg(nn,2,"Checking tanh node %p",self);
 	if (self->n_inputs != 1) return errlog(nn,"wrong # inputs");
 	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"sigmoid node %p check OK",self);
+	logmsg(nn,2,"tanh node %p check OK",self);
 	return 0;
 }
 

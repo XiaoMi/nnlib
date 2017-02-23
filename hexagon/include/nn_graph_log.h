@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -48,6 +48,7 @@ void logv(const char *filename, unsigned int line, struct nn_graph *nn, int leve
 static inline void logmsg_function(const char *filename, unsigned int line, struct nn_graph *nn, int level, const char *fmt, ...)
 {
 	va_list ap;
+	if (likely(level > nn->debug_level)) return;
 	va_start(ap,fmt);
 	logv(filename,line,nn,level,fmt,ap);
 	va_end(ap);

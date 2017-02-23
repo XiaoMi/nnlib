@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -50,6 +50,7 @@
 #else
 #endif
 
+static int32_t max(int a, int32_t b) { return((a>b) ? a : b); }
 
 /* 8x8 convolution --> 32 bits */
 
@@ -102,6 +103,19 @@ static inline void im2col_stripe(
 	}
 }
 
+
+#define ALIGN_SIZE 128
+#define ROUNDUP(X) (((X) + ALIGN_SIZE - 1) & (~((X)-1)))
+#define MAXPAD (ALIGN_SIZE)
+static inline void *pad_and_align(void *ptr, unsigned long minsize)
+{
+	uintptr_t ptrval = (uintptr_t)(ptr);
+	ptrval += minsize + (MAXPAD-1);
+	ptrval &= ~(ALIGN_SIZE-1);
+	return (void *)ptrval;
+}
+
+
 static int __attribute__((unused)) conv2d_execute_ref_im2col(struct nn_node *self, struct nn_graph *nn)
 {
 	const struct tensor *in_tensor = self->inputs[0];
@@ -115,25 +129,25 @@ static int __attribute__((unused)) conv2d_execute_ref_im2col(struct nn_node *sel
 	struct tensor *out_min = self->outputs[1];
 	struct tensor *out_max = self->outputs[2];
 
-	uint32_t in_batches = in_tensor->shape.batches;
-	uint32_t in_width = in_tensor->shape.width;
-	uint32_t in_height = in_tensor->shape.height;
-	uint32_t in_depth = in_tensor->shape.depth;
+	int32_t in_batches = in_tensor->shape.batches;
+	int32_t in_width = in_tensor->shape.width;
+	int32_t in_height = in_tensor->shape.height;
+	int32_t in_depth = in_tensor->shape.depth;
 
-	uint32_t filt_batches = filt_tensor->shape.byidx[0];
-	uint32_t filt_height = filt_tensor->shape.byidx[3];
-	uint32_t filt_width = filt_tensor->shape.byidx[2];
-	uint32_t filt_depth = filt_tensor->shape.byidx[1];
+	int32_t filt_batches = filt_tensor->shape.filt_batches;
+	int32_t filt_height = filt_tensor->shape.filt_height;
+	int32_t filt_width = filt_tensor->shape.filt_width;
+	int32_t filt_depth = filt_tensor->shape.filt_depth;
 
-	uint32_t stride_width = stride_tensor->shape.width;
-	uint32_t stride_height = stride_tensor->shape.height;
+	int32_t stride_width = stride_tensor->shape.width;
+	int32_t stride_height = stride_tensor->shape.height;
 
-	uint32_t out_batches = in_batches;
-	uint32_t out_width = nn_pad_compute_outsize(in_width,filt_width,stride_width,self->padding);
-	uint32_t out_height = nn_pad_compute_outsize(in_height,filt_height,stride_height,self->padding);
-	uint32_t out_depth = filt_batches;
+	int32_t out_batches = in_batches;
+	int32_t out_width = nn_pad_compute_outsize(in_width,filt_width,stride_width,self->padding);
+	int32_t out_height = nn_pad_compute_outsize(in_height,filt_height,stride_height,self->padding);
+	int32_t out_depth = filt_batches;
 
-	uint32_t batch;
+	int32_t batch;
 	int32_t out_x;
 	int32_t out_y;
 	int32_t out_z;
@@ -152,7 +166,7 @@ static int __attribute__((unused)) conv2d_execute_ref_im2col(struct nn_node *sel
 	int32_t filt_element;
 	int32_t sum;
 
-	uint32_t out_elements = out_batches*out_height*out_width*out_depth;
+	int32_t out_elements = out_batches*out_height*out_width*out_depth;
 	size_t out_size = out_elements*sizeof(int32_t);
 
 	float in_max_float = tensor_get_float(max_in_tensor,0);
@@ -180,12 +194,12 @@ static int __attribute__((unused)) conv2d_execute_ref_im2col(struct nn_node *sel
 	/* input_offset is 0.0f quantized to in min/max */
 	/* filt_offset is 0.0f quantized to filt min/max */
 
-	int32_t input_offset = quantize_uint8(0.0f,in_min_float,in_max_float);
-	int32_t filt_offset = quantize_uint8(0.0f,filt_min_float,filt_max_float);
+	int32_t input_offset = quantize_int(0.0f,in_min_float,in_max_float);
+	int32_t filt_offset = quantize_int(0.0f,filt_min_float,filt_max_float);
 
 	uint8_t *im2col_row;
-	uint32_t i;
-	uint32_t filt_total_length = filt_depth*filt_width*filt_height;
+	int32_t i;
+	int32_t filt_total_length = filt_depth*filt_width*filt_height;
 
 	logmsg(nn,2,"conv2d execute. node=%p id=%x",self,self->node_id);
 	logmsg(nn,2,"conv2d input min/max=%f/%f",self,in_min_float,in_max_float);
@@ -283,25 +297,25 @@ static int conv2d_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	struct tensor *out_min = self->outputs[1];
 	struct tensor *out_max = self->outputs[2];
 
-	uint32_t in_batches = in_tensor->shape.batches;
-	uint32_t in_width = in_tensor->shape.width;
-	uint32_t in_height = in_tensor->shape.height;
-	uint32_t in_depth = in_tensor->shape.depth;
+	int32_t in_batches = in_tensor->shape.batches;
+	int32_t in_width = in_tensor->shape.width;
+	int32_t in_height = in_tensor->shape.height;
+	int32_t in_depth = in_tensor->shape.depth;
 
-	uint32_t filt_batches = filt_tensor->shape.byidx[0];
-	uint32_t filt_height = filt_tensor->shape.byidx[3];
-	uint32_t filt_width = filt_tensor->shape.byidx[2];
-	uint32_t filt_depth = filt_tensor->shape.byidx[1];
+	int32_t filt_batches = filt_tensor->shape.filt_batches;
+	int32_t filt_height = filt_tensor->shape.filt_height;
+	int32_t filt_width = filt_tensor->shape.filt_width;
+	int32_t filt_depth = filt_tensor->shape.filt_depth;
 
-	uint32_t stride_width = stride_tensor->shape.width;
-	uint32_t stride_height = stride_tensor->shape.height;
+	int32_t stride_width = stride_tensor->shape.width;
+	int32_t stride_height = stride_tensor->shape.height;
 
-	uint32_t out_batches = in_batches;
-	uint32_t out_width = nn_pad_compute_outsize(in_width,filt_width,stride_width,self->padding);
-	uint32_t out_height = nn_pad_compute_outsize(in_height,filt_height,stride_height,self->padding);
-	uint32_t out_depth = filt_batches;
+	int32_t out_batches = in_batches;
+	int32_t out_width = nn_pad_compute_outsize(in_width,filt_width,stride_width,self->padding);
+	int32_t out_height = nn_pad_compute_outsize(in_height,filt_height,stride_height,self->padding);
+	int32_t out_depth = filt_batches;
 
-	uint32_t batch;
+	int32_t batch;
 	int32_t filt_x;
 	int32_t filt_y;
 	int32_t filt_z;
@@ -324,7 +338,7 @@ static int conv2d_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	int32_t filt_element;
 	int32_t sum;
 
-	uint32_t out_elements = out_batches*out_height*out_width*out_depth;
+	int32_t out_elements = out_batches*out_height*out_width*out_depth;
 	size_t out_size = out_elements*sizeof(int32_t);
 
 	float in_max_float = tensor_get_float(max_in_tensor,0);
@@ -352,8 +366,8 @@ static int conv2d_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	/* input_offset is 0.0f quantized to in min/max */
 	/* filt_offset is 0.0f quantized to filt min/max */
 
-	int32_t input_offset = quantize_uint8(0.0f,in_min_float,in_max_float);
-	int32_t filt_offset = quantize_uint8(0.0f,filt_min_float,filt_max_float);
+	int32_t input_offset = quantize_int(0.0f,in_min_float,in_max_float);
+	int32_t filt_offset = quantize_int(0.0f,filt_min_float,filt_max_float);
 
 	logmsg(nn,2,"conv2d execute. node=%p id=%x",self,self->node_id);
 	logmsg(nn,2,"conv2d input %dx%dx%dx%d",in_batches,in_height,in_width,in_depth);
@@ -444,25 +458,25 @@ static int conv2d_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	struct tensor *out_min = self->outputs[1];
 	struct tensor *out_max = self->outputs[2];
 
-	uint32_t in_batches = in_tensor->shape.batches;
-	uint32_t in_width = in_tensor->shape.width;
-	uint32_t in_height = in_tensor->shape.height;
-	uint32_t in_depth = in_tensor->shape.depth;
+	int32_t in_batches = in_tensor->shape.batches;
+	int32_t in_width = in_tensor->shape.width;
+	int32_t in_height = in_tensor->shape.height;
+	int32_t in_depth = in_tensor->shape.depth;
 
-	uint32_t filt_batches = filt_tensor->shape.byidx[0];
-	uint32_t filt_height = filt_tensor->shape.byidx[3];
-	uint32_t filt_width = filt_tensor->shape.byidx[2];
-	uint32_t filt_depth = filt_tensor->shape.byidx[1];
+	int32_t filt_batches = filt_tensor->shape.filt_batches;
+	int32_t filt_height = filt_tensor->shape.filt_height;
+	int32_t filt_width = filt_tensor->shape.filt_width;
+	int32_t filt_depth = filt_tensor->shape.filt_depth;
 
-	uint32_t stride_width = stride_tensor->shape.width;
-	uint32_t stride_height = stride_tensor->shape.height;
+	int32_t stride_width = stride_tensor->shape.width;
+	int32_t stride_height = stride_tensor->shape.height;
 
-	uint32_t out_batches = in_batches;
-	uint32_t out_width = nn_pad_compute_outsize(in_width,filt_width,stride_width,self->padding);
-	uint32_t out_height = nn_pad_compute_outsize(in_height,filt_height,stride_height,self->padding);
-	uint32_t out_depth = filt_batches;
+	int32_t out_batches = in_batches;
+	int32_t out_width = nn_pad_compute_outsize(in_width,filt_width,stride_width,self->padding);
+	int32_t out_height = nn_pad_compute_outsize(in_height,filt_height,stride_height,self->padding);
+	int32_t out_depth = filt_batches;
 
-	uint32_t batch;
+	int32_t batch;
 
 //	int32_t in_y_base;
 //	int32_t in_x_base;
@@ -533,16 +547,30 @@ static int conv2d_execute_hvx(struct nn_node *self, struct nn_graph *nn)
         int out_depth_pad = (out_depth + DPAD - 1) & ~(DPAD-1);
         int32_t filter_value_count = filt_width*filt_height*filt_depth; //aka K 
         int32_t filter_value_count_pad = (filter_value_count+(HPAD-1))&~(HPAD-1); //K rounding
-        uint8_t* im2col_buf = (uint8_t*)memalign(128, sizeof(uint8_t)*patches_pad*filter_value_count_pad);
+        // filter count has to be multiple of 16 and should have minimum value of 32 for gemmpybbw_asm to work properly
+        filter_value_count_pad = max(32,filter_value_count_pad);
+	int32_t im2col_buf_size = (patches_pad*filter_value_count_pad);
+	int32_t minmax_size = sizeof(int)*64;
+	int32_t suma_size = patches_pad*sizeof(int);
+	int32_t sumb_size = out_depth_pad*sizeof(int);
+	int32_t filt_pad_size = filter_value_count_pad * out_depth_pad;
+	int32_t filt_pad_trans_size = filt_pad_size;
+	//int32_t out_pad_size = sizeof(int)*patches_pad*out_depth_pad;
 
-        int *minmax = (int *) memalign(128, sizeof(int)*64);
-        int * suma = (int *) memalign(128, patches_pad*sizeof(int));             //N row sum
-        int * sumb = (int *) memalign(128, out_depth_pad*sizeof(int));           //M col sum
-        uint8_t* filt_pad = (uint8_t*)memalign(128, filter_value_count_pad*out_depth_pad);
-        uint8_t* filt_pad_trans = (uint8_t*)memalign(128, filter_value_count_pad*out_depth_pad);
-        int* out_pad = (int*)memalign(128, sizeof(int)*patches_pad*out_depth_pad);
-
+        uint8_t* im2col_buf = nn->scratch;
+        int *minmax = (int *) pad_and_align(im2col_buf, im2col_buf_size);
+        int * suma = (int *) pad_and_align(minmax, minmax_size);
+        int * sumb = (int *) pad_and_align(suma, suma_size);
+        uint8_t* filt_pad = (uint8_t*)pad_and_align(sumb, sumb_size);
+        uint8_t* filt_pad_trans = (uint8_t*)pad_and_align(filt_pad, filt_pad_size);
+        int* out_pad = (int*)pad_and_align(filt_pad_trans, filt_pad_trans_size);
+		//printf("CCCCC alloc size scratch addr %p, : scratch_size: %d",nn->scratch, nn->scratch_size);
         /* pad out the filter weights matrix to M x K */
+	/* Zero out output since we accumulate with it */
+	memset(out_pad,0,out_depth_pad*patches_pad*sizeof(int)+128);
+	logmsg(nn,2,"im2col_buf_size = %d @ %p\n",patches_pad * filter_value_count_pad,im2col_buf);
+	logmsg(nn,2,"filt_pad = %d @ %p\n",out_depth_pad * filter_value_count_pad,filt_pad);
+	logmsg(nn,2,"out_pad = %d @ %p\n",out_depth_pad * patches_pad * 4,out_pad);
         pad2d(filt, filter_value_count, out_depth,
               filt_pad, filter_value_count_pad, out_depth_pad, filt_offset);
         transpack(filt_pad, filter_value_count_pad, out_depth_pad, filt_pad_trans) ;
@@ -560,21 +588,15 @@ static int conv2d_execute_hvx(struct nn_node *self, struct nn_graph *nn)
                     patches_pad, out_depth_pad, filter_value_count_pad, //N M K
                     patches_pad, 32           , filter_value_count_pad, suma, sumb, minmax); 
 
-          int gmax = minmax[0];
-          int gmin = minmax[32];
-          printf(" gemm max min %d %d\n", gmax, gmin);
+          //int gmax = minmax[0];
+          //int gmin = minmax[32];
+          //printf(" gemm max min %d %d\n", gmax, gmin);
 
           /* strip out the padding from the output */
           unpad2d(out_pad, patches_pad, out_depth_pad,
                   (void *)(&out[batch*patches*out_depth]), patches, out_depth);
 	}//end batch
-        free(im2col_buf);
-        free(suma);
-        free(sumb);
-        free(filt_pad);
-        free(filt_pad_trans);
-        free(out_pad);
-        free(minmax);
+		//free(temp32);
 	logmsg(nn,2,"conv2d execute (hvx) done! %dx%dx%dx%d",
 		out_batches,out_height,out_width,out_depth);
 	return 0;

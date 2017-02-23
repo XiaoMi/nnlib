@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -66,7 +66,7 @@ static inline int fourd_index(
 		+ z;
 }
 	
-static inline float compute_lrn_at(
+static inline uint8_t compute_lrn_at(
 	unsigned char *data,
 	float min,
 	float max,
@@ -102,7 +102,7 @@ static inline float compute_lrn_at(
 	  if (y >= height) continue;
 	  for (x = x_start - window_eachside_x; x < x_start + window_eachside_x + 1; x++) {
 	    if (x < 0) continue;
-	    if (x >= height) continue;
+	    if (x >= width) continue;
 	    for (z = z_start - window_eachside_z; z < z_start + window_eachside_z + 1; z++) {
 	      if (z < 0) continue;
 	      if (z >= depth) continue;
@@ -116,15 +116,15 @@ static inline float compute_lrn_at(
 	sum *= alpha;
 	sum += bias;
 	/* Then we pow by -beta... that's the same as exp(ln(x)*-beta) */
-	sum = expf(logf(x) * -beta);
+	sum = expf(logf(sum) * -beta);
 	/* Then we multiply by input value */
-	input = data[fourd_index(b,y_start,x_start,z_start,batches,height,width,depth)];
+	input = min + stepsize * data[fourd_index(b,y_start,x_start,z_start,batches,height,width,depth)];
 	sum *= input;
 	/* Then we are done! */
 	return quantize_uint8(sum,min,max);
 }
 
-static int lrn_8_execute(struct nn_node *self, struct nn_graph *nn)
+static int lrn_8_execute_ref(struct nn_node *self, struct nn_graph *nn)
 {
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *in_min_tensor = self->inputs[1];
@@ -138,10 +138,12 @@ static int lrn_8_execute(struct nn_node *self, struct nn_graph *nn)
 	const float beta = tensor_get_float(beta_tensor,0);
 
 	struct tensor *out_tensor = self->outputs[0];
-	float *out = out_tensor->data;
+	struct tensor *out_min_tensor = self->outputs[1];
+	struct tensor *out_max_tensor = self->outputs[2];
+	uint8_t *out = out_tensor->data;
 
-	float min = tensor_get_float(in_min_tensor,0);
-	float max = tensor_get_float(in_max_tensor,0);
+	float in_min = tensor_get_float(in_min_tensor,0);
+	float in_max = tensor_get_float(in_max_tensor,0);
 
 	int32_t batches = in_tensor->shape.batches;
 	int32_t width = in_tensor->shape.width;
@@ -165,11 +167,11 @@ static int lrn_8_execute(struct nn_node *self, struct nn_graph *nn)
 	for (b = 0; b < batches; b++) {
 	  for (y = 0; y < height; y++) {
 	    for (x = 0; x < width; x++) {
-	      for (z = 0; z < height; z++) {
-	        uint32_t out_data = compute_lrn_at(
+	      for (z = 0; z < depth; z++) {
+	        uint8_t out_data = compute_lrn_at(
 		        in_tensor->data,
-			min,
-			max,
+			in_min,
+			in_max,
 			b,
 			y,
 			x,
@@ -188,6 +190,10 @@ static int lrn_8_execute(struct nn_node *self, struct nn_graph *nn)
 	    }
 	  }
 	}
+
+	tensor_copy(out_min_tensor,in_min_tensor);
+	tensor_copy(out_max_tensor,in_max_tensor);
+
 	return 0;
 }
 
@@ -196,13 +202,20 @@ static int lrn_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking q lrn node %p",self);
 	if (self->n_inputs != 7) return errlog(nn,"LRN wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"LRN wrong # outs");
+	if (self->n_outputs != 3) return errlog(nn,"LRN wrong # outs");
 	logmsg(nn,2,"q lrn %p check OK",self);
 	return 0;
 }
 
+struct nn_node_ops nn_ops_for_QuantizedLRN_8_ref = {
+	.execute = lrn_8_execute_ref,
+	.check = lrn_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};
+
 struct nn_node_ops nn_ops_for_QuantizedLRN_8 = {
-	.execute = lrn_8_execute,
+	.execute = lrn_8_execute_ref,
 	.check = lrn_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,

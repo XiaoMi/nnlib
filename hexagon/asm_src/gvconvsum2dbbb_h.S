@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -99,7 +99,7 @@ gvconvsum2dbbb_asm:
 #define out_width     r4    //out_width 
 #define m             r5    //is stride of the output matrix always mult of 32
 #define stride_depth  r8    //0 stride|depth  between computations
-#define filt_width    r6    //1 depth*filt_width  
+#define filt_width    r6    //1 filt_width   mpy by depth
 #define filt_height   r6    //2 filt_hieght lines per filter
 #define out_height    r9    //3 number of vertical lines to perform
 #define ptr_datasum   r10   //4
@@ -131,6 +131,7 @@ gvconvsum2dbbb_asm:
 #define sel2          r18
 #define sel3          r19
 #define one           r20
+#define tmp_ptr_z     r7
 
 #define sum1_sum0     r1:0
 #define sum1          r1
@@ -201,6 +202,7 @@ gvconvsum2dbbb_asm:
        {
            sel = ##0x01010101                     // entry 0
            len = #32                              //
+           dcfetch(ptr_x)                         //
        } {
            q0 = vsetq(len);                       // 1000
            len = #64                              //
@@ -222,11 +224,17 @@ gvconvsum2dbbb_asm:
        } {
            vpreds|= vand(q2, sel)                 //
            sel = add(sel, sel)                    //08080808
-           dcfetch(ptr_x)                         //
+           dcfetch(ptr_x+#32)                     //
        } {
            vpreds|= vand(q3, sel)                 // entry 3 10101010 selects all zero
            stride_depth = memw(sp+#0<<2)          //extract stride*depth 
+           filt_width = memw(sp+#1<<2)            //
+       } {   
+           p0 = cmp.eq(filt_width, #1)            //
            dcfetch(ptr_x+#32)                     //
+           filt_width = mpy(stride_depth.L, filt_width.L)
+       } {   
+           memw(sp+#1<<2) = filt_width            //
        } {   
            filt_height = memw(sp+#2<<2)           //extract filt_height 
            ptr_biasbuf = memw(sp+#9<<2)           //
@@ -249,6 +257,7 @@ gvconvsum2dbbb_asm:
            M0 = stride_depth                      //
            memd(sp+#8)  = r19:18                  //
            memd(sp+#40) = r27:26                  //
+           PREFETCH = #96
        } {
            vwsum = vmem(ptr_weightsum+#0)         //
            stride3_1 = addasl(stride_depth, stride_depth,#1)  //3*stride
@@ -261,11 +270,11 @@ gvconvsum2dbbb_asm:
        } {
            filt_width = memw(sp+#21<<2)           //extract filt_width*depth 
            M1 = stride3_1                         // add to
-           PREFETCH = #64
+           if(p0) PREFETCH = add(PREFETCH, #-32)  //64 IF xx1 FILTER
        } {
            memw(sp+#68) = PREFETCH
            p3 = cmp.gt(filt_width, #192)          //is !(D <= 192) heuristic to fix fetchahaead for small nx1 cases
-           PREFETCH += mpyi(filt_width, #3)       //used for line prefetch
+           PREFETCH = asl(stride_depth, #2)       //mpyi(filt_width, #3)       //used for line prefetch
        } {
            if(!p3) memw(sp+#68) = PREFETCH
        } {
@@ -284,12 +293,14 @@ gvconvsum2dbbb_asm:
            filt_width = add(filt_width, #-1)
            p3 = cmp.gt(stride_depth, #96)
        } {
-           if(p3) stride3_1 = sub(stride3_1, stride_depth) //used for line prefetch
+           stride3_1 = sub(stride3_1, stride_depth) //used for line prefetch
            maxe= vmem(ptr_max+#0)
            in_width = mpyi(in_width, stride)      //
            memw(sp+#21<<2) = filt_width           //extract filt_width*depth /16 - 1
-       }
+       } {
            PREFETCH = memw(sp+#68)
+           dcfetch(ptr_x+#64)                     //
+       }
 /*============================================================================*/
         .balign 32
 .L_height:
@@ -306,7 +317,7 @@ gvconvsum2dbbb_asm:
        {
            ptr_y = memw(sp+#52)                   //ptr_yi //[P, 0] initialize filter pointer
            filt_height = memw(sp+#22<<2)          //extract filt_height 
-           fetch_count = #0
+           fetch_count = #0                       //#0
        } {
            y0 = vmem(ptr_y++#2)                   //[0, 0]32x4
            z1z0 = vcombine(vwsum, vwsum)          //[P, 0]
@@ -333,22 +344,21 @@ gvconvsum2dbbb_asm:
            filt_width = memw(sp+#21<<2)           //extract filt_width*depth /16 - 1
            sum1_sum0 += vraddub(x0fx0cx0bx08, x07x04x03x00) //[0, 4]
            dcfetch(pre_x)
-           fetch_count = add(fetch_count, #1)
+           pre_x = add(pre_x, stride_depth)
        } {
            loop0(.L_filt_width, filt_width)       //[P, 0]ki is k1/16 - 1
            z0.uw += vrmpy(y0.ub, x03x00.ub)       //[0, 4]
-           pre_x = add(pre_x, stride_depth)
-           p3 = cmp.eq(fetch_count, #2)           //
+           p3 = cmp.eq(fetch_count, #1)
        } {
            sum3_sum2 += vraddub(x1fx1cx1bx18, x17x14x13x10) //[0, 5]
            z1.uw += vrmpy(y0.ub, x13x10.ub)       //[0, 5]
            y2 = vmem(ptr_y++#2)                   //[0, 5]32x4
-           if(p3) fetch_count = #0
+           if(p3) pre_x = add(pre_x, stride3_1)
        } {
            z0.uw += vrmpy(y1.ub, x07x04.ub)       //[0, 6]
            z1.uw += vrmpy(y1.ub, x17x14.ub)       //[0, 6]
            y3 = vmem(ptr_y+#-1)                   //[0, 6]32x4
-           if(p3) pre_x = add(pre_x, stride3_1)
+           fetch_count = sub(#1, fetch_count)
        } {
            z0.uw += vrmpy(y2.ub, x0bx08.ub)       //[0, 7]
            z1.uw += vrmpy(y2.ub, x1bx18.ub)       //[0, 7]
@@ -394,12 +404,12 @@ gvconvsum2dbbb_asm:
            sum3_sum2 += vraddub(x1fx1cx1bx18, x17x14x13x10) //[1, 5]
            z1.uw += vrmpy(y0.ub, x13x10.ub)       //[1, 5]
            y2 = vmem(ptr_y++#2)                   //[1, 5]32x4
-           fetch_count = add(fetch_count, #1)
+           p3 = cmp.eq(fetch_count, #1)
        } {
            z0.uw += vrmpy(y1.ub, x07x04.ub)       //[1, 6]
            z1.uw += vrmpy(y1.ub, x17x14.ub)       //[1, 6]
            y3 = vmem(ptr_y+#-1)                   //[1, 6]32x4
-           p3 = cmp.eq(fetch_count #2)
+           dcfetch(pre_x)
        } {
            z0.uw += vrmpy(y2.ub, x0bx08.ub)       //[1, 7]
            z1.uw += vrmpy(y2.ub, x1bx18.ub)       //[1, 7]
@@ -411,9 +421,9 @@ gvconvsum2dbbb_asm:
            x3fx3cx3bx38 = memd(ptr_x0+#8)         //[1, 8]
            x37x34x33x30 = memd(ptr_x0++M4STRIDE_1)//[1, 8]
        } {
+           fetch_count = sub(#1, fetch_count)
            sum5_sum4 += vraddub(x2fx2cx2bx28, x27x24x23x20) //[1, 9]
            z2.uw += vrmpy(y0.ub, x23x20.ub)       //[1, 9]
-           if(p3) fetch_count = #0                //[1, 9]
            if(p3) pre_x = add(pre_x, stride3_1)   //[1, 9]
        }:endloop0 
        {
@@ -454,8 +464,8 @@ gvconvsum2dbbb_asm:
            one = #1                               //
        } {
            sum0 += mpyi(in_offset, sum1)          //
-           mstride = memw(sp+#60)                 // result matrix stride copied into separete reg
-           sel0 = extractu(ptr_z, #2, #5)          //extract alignement 32bytes
+           mstride = memw(sp+#60)                 //result matrix stride copied to separete reg
+           sel0 = extractu(ptr_z, #2, #5)         //extract alignement 32bytes
            PREFETCH = memw(sp+#68)                //
        } {
            memw(ptr_datasum++#1<<2) = sum0        //
@@ -496,71 +506,71 @@ gvconvsum2dbbb_asm:
            y1.w += vmpyie(x1.w, recipvec.uh)      //#1
            if(p1)memw(ptr_datasum++#1<<2) = sum4  //#2
            p2 = cmp.gt(col_count, #3)             //#3
+           tmp_ptr_z = add(ptr_z, mstride)        //
        } {
            y0.ub = vpack(y0.h, y0.h):sat          //sat8  <0, >255
            x2 = vsplat(sum4)                      //#2
            dcfetch(ptr_x0)
+           sel1 = extractu(tmp_ptr_z, #2, #5)     //#1
        } {
            if(q0) vmem(ptr_z+#0):nt = y0          //[E,  ]store first 32bytes
            ptr_z = add(ptr_z, mstride)            //
            y1.h = vpacko(y1.w, y1.w)              //#1>>16
            z2.w = vadd(z2.w, x2.w)                //#2
        } {
-           sel1 = extractu(ptr_z, #2, #5)         //#1
            x2.w = vadd(z2.w, biasvec.w)           //#2
            if(!p1) z2 = vc8000                    //#2
            dcfetch(ptr_x0+#32)
-       } {
            sel1 = asl(one, sel1)                  //#1
-           y1.ub = vpack(y1.h, y1.h):sat          //#1sat8  <0, >255
-           maxe.w = vmax(maxe.w, z2.w)            //#2
-           dcfetch(ptr_x0+#64)
        } {
-           sel1 = vsplatb(sel1)                   //#102 -> 02020202
-           y2.w += vmpyie(x2.w, recipvec.uh)      //#2
+           y1.ub = vpack(y1.h, y1.h):sat          //#1sat8  <0, >255
            sum6 = zsum                            //#3
            sum7 = add(sum6, sum7)                 //#3
+           sel1 = vsplatb(sel1)                   //#102 -> 02020202
        } {
-           q1 = vand(vpreds, sel1)                //#1
+           maxe.w = vmax(maxe.w, z2.w)            //#2
+           y2.w += vmpyie(x2.w, recipvec.uh)      //#2
            sum6 += mpyi(in_offset, sum7)          //#3
            y3 = rndvec                            //#3y3 = 0x8000
-           one = mux(p1, #1, #16)                 //#2
        } {
+           x3 = vsplat(sum6)                      //#3
+           q1 = vand(vpreds, sel1)                //#1
+           dcfetch(ptr_x0+#64)
+       } {
+           one = mux(p1, #1, #16)                 //#2
+           if(p0)tmp_ptr_z = add(tmp_ptr_z,mstride) //#1
+           z3.w = vadd(z3.w, x3.w)                //#3
            if(q1)vmem(ptr_z+#0):nt = y1           //#1[E,  ]
+       } {
            if(p0)ptr_z = add(ptr_z, mstride)      //#1
+           if(p2)memw(ptr_datasum++#1<<2) = sum6  //#3
+           x3.w = vadd(z3.w, biasvec.w)           //#3
            y2.h = vpacko(y2.w, y2.w)              //#2>>16
        } {
-           sel2 = extractu(ptr_z, #2, #5)         //#2
-           if(p2)memw(ptr_datasum++#1<<2) = sum6  //#3
-           x3 = vsplat(sum6)                      //#3
-       } {
-           sel2 = asl(one, sel2)                  //#2
-           y2.ub = vpack(y2.h, y2.h):sat          //#2sat8  <0, >255
-           z3.w = vadd(z3.w, x3.w)                //#3
+           sel2 = extractu(tmp_ptr_z, #2, #5)         //#2
+           y3.w += vmpyie(x3.w, recipvec.uh)      //#3
+           if(p1)tmp_ptr_z = add(tmp_ptr_z, mstride) //#2
            memw(sp+#24<<2) = ptr_datasum          //data sum ptr
        } {
-           sel2 = vsplatb(sel2)                   //#202 -> 02020202
-           x3.w = vadd(z3.w, biasvec.w)           //#3
-           if(!p2) z3 = vc8000                    //#3
+           sel2 = asl(one, sel2)                  //#2
+           sel3 = extractu(tmp_ptr_z, #2, #5)         //#3
+           one = mux(p2, #1, #16)                 //#3
+           y2.ub = vpack(y2.h, y2.h):sat          //#2sat8  <0, >255
        } {
-           q2 = vand(vpreds, sel2)                //#2
-           maxe.w = vmax(maxe.w, z3.w)            //#3
+           sel2 = vsplatb(sel2)                   //#202 -> 02020202
+           y3.h = vpacko(y3.w, y3.w)              //#3>>16
+           if(!p2) z3 = vc8000                    //#3
+           sel3 = asl(one, sel3)                  //#3
+       } {
+           sel3 = vsplatb(sel3)                   //#302 -> 02020202
            col_count = add(col_count, #-4)        //
+           maxe.w = vmax(maxe.w, z3.w)            //#3
+           q2 = vand(vpreds, sel2)                //#2
        } {
            if(q2)vmem(ptr_z+#0):nt = y2           //#2[E,  ]
            if(p1)ptr_z = add(ptr_z, mstride)      //#2
-           y3.w += vmpyie(x3.w, recipvec.uh)      //#3
-       } {
-           one = mux(p2, #1, #16)                 //#3
-           sel3 = extractu(ptr_z, #2, #5)         //#3
-       } {
-           sel3 = asl(one, sel3)                  //#3
-           y3.h = vpacko(y3.w, y3.w)              //#3>>16
-       } {
-           sel3 = vsplatb(sel3)                   //#302 -> 02020202
-       } {
-           q3 = vand(vpreds, sel3)                //#3
            y3.ub = vpack(y3.h, y3.h):sat          //#3sat8  <0, >255
+           q3 = vand(vpreds, sel3)                //#3
        } {
            if(q3)vmem(ptr_z+#0):nt = y3           //#3[E,  ]
            if(p2)ptr_z = add(ptr_z, mstride)      //#3

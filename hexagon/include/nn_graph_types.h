@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -51,25 +51,32 @@ typedef enum padding_type_enum {
 	NN_PAD_NA = 0,
 	NN_PAD_SAME,
 	NN_PAD_VALID,
+	NN_PAD_MIRROR_REFLECT,
+	NN_PAD_MIRROR_SYMMETRIC,
 } padding_type;
 
 struct shape {
 	union {
 		struct {
-			uint32_t depth;
-			uint32_t width;
-			uint32_t height;
 			uint32_t batches;
+			uint32_t height;
+			uint32_t width;
+			uint32_t depth;
 		};
-		uint32_t byidx[4];
+		struct {
+			uint32_t filt_height;
+			uint32_t filt_width;
+			uint32_t filt_depth;
+			uint32_t filt_batches;
+		};
 	};
 };
 
 struct tensor {
 	struct shape shape;
-	uint32_t data_size;
 	void *data;
 	uint32_t max_size;
+	uint32_t data_size;
 	struct tensor *self;
 };
 

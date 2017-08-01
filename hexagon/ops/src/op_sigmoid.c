@@ -36,11 +36,15 @@
 
 #include <nn_graph.h>
 #include <string.h>
+#include <stdio.h>
 #include <quantize.h>
 #include <math.h>
-#include <hexagon_types.h>
+#if defined(__hexagon__)
+#include "hexagon_types.h"
+#endif
 #include <op_sigmoid.h>
 #include <op_non_lin_gen_hvx_common.h>
+//#define TEST_PERFORMANCE
 
 static int qsigmoid_execute_ref(struct nn_node *self, struct nn_graph *nn)
 {
@@ -55,8 +59,8 @@ static int qsigmoid_execute_ref(struct nn_node *self, struct nn_graph *nn)
 		* in_tensor->shape.width
 		* in_tensor->shape.depth;
 	size_t bytes = elements * sizeof(uint8_t);
-	const uint8_t *in_data = in_tensor->data;
-	uint8_t *out_data = out_tensor->data;
+	const uint8_t *in_data = (const uint8_t *)in_tensor->data;
+	uint8_t *out_data = (uint8_t *)out_tensor->data;
 	uint32_t i;
 	float inval,tmpval,outval;
 	float in_min = tensor_get_float(in_min_tensor,0);
@@ -68,6 +72,11 @@ static int qsigmoid_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	out_tensor->shape = in_tensor->shape;
 	out_tensor->data_size = bytes;
 
+#ifdef TEST_PERFORMANCE
+	int start_time, end_time;
+	start_time =  nn_os_get_cycles(nn);
+#endif
+
 	for (i = 0; i < elements; i++) {
 		inval = in_min + stepsize * in_data[i];
 		inval *= 0.5f;
@@ -76,6 +85,11 @@ static int qsigmoid_execute_ref(struct nn_node *self, struct nn_graph *nn)
 		if (outval > 255.0f) outval = 255.0f;
 		out_data[i] = outval;
 	}
+	
+#ifdef TEST_PERFORMANCE
+	end_time =  nn_os_get_cycles(nn);
+	printf("qsigmoid ref cycles = %d (elements = %d)\n", (end_time-start_time), elements);
+#endif
 	
 	tensor_set_shape(out_min_tensor,1,1,1,1);
 	tensor_set_float(out_min_tensor,0,0.0f);
@@ -102,36 +116,39 @@ static int qsigmoid_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 		* in_tensor->shape.depth;
 	size_t bytes = elements * sizeof(uint8_t);
 	size_t pad_size = (bytes+MAXPAD-1)&~(MAXPAD-1);
-	const uint8_t *in_data = in_tensor->data;
-	uint8_t *out_data = out_tensor->data;
-	uint8_t *out_pad = nn->scratch;
-	uint8_t *in_pad = (uint8_t *)pad_and_align(out_pad, pad_size);
-	float *scratch_pad = (float *)pad_and_align(in_pad, pad_size);
+	const uint8_t *in_data = (const uint8_t *)in_tensor->data;
+	uint8_t *out_data = (uint8_t *)out_tensor->data;
 	float in_min = tensor_get_float(in_min_tensor,0);
 	float in_max = tensor_get_float(in_max_tensor,0);
 	float rng_min = (float)(MIN_RNG);
 	float rng_max = (float)(MAX_RNG);
 	
 	logmsg(nn,2,"sigmoid execute. self=%p ",self);
-	if (self->padding == NN_PAD_NA) return errlog(nn,"This op might pad");
 	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
 	out_tensor->shape = in_tensor->shape;
 	out_tensor->data_size = bytes;
-	memset(out_pad,0,pad_size);
 	
-	memset(in_pad,0,pad_size);
-	memcpy(in_pad,in_data,bytes);
+#ifdef TEST_PERFORMANCE
+	int start_time, end_time;
+	start_time =  nn_os_get_cycles(nn);
+#endif
+
+#ifdef USE_SCRATCH_PAD
+	uint8_t *scratch_pad = nn->scratch;
+	vmemcpy_asm(scratch_pad,in_data,bytes);
+	requant_u8u8_inplace(scratch_pad, bytes, in_min, in_max, rng_min, rng_max);
+	qnonlinear_execute_i(scratch_pad,scratch_pad,pad_size,lut_non_lin_asm_sigmoid);
+	vmemcpy_asm(out_data,scratch_pad,bytes);
+#else
+	vmemcpy_asm(out_data,in_data,bytes);
+	requant_u8u8_inplace(out_data,bytes,in_min,in_max,rng_min,rng_max);
+	qnonlinear_execute_i(out_data,out_data,pad_size,lut_non_lin_asm_sigmoid);
+#endif
 	
-	if ((in_min >= rng_min) && (in_max <= rng_max)) {
-		requant_u8u8_inplace(in_pad, bytes, in_min, in_max, rng_min, rng_max);
-	}
-	else {
-		dequant_u8(scratch_pad, in_pad, bytes, in_min, in_max);
-		quant_u8(in_pad, scratch_pad, bytes, rng_min, rng_max);
-	}
-	
-	qnonlinear_execute_i(out_pad,in_pad,pad_size,lut_non_lin_asm_sigmoid);
-	memcpy(out_data,out_pad,bytes);
+#ifdef TEST_PERFORMANCE
+	end_time =  nn_os_get_cycles(nn);
+	printf("qsigmoid hvx cycles = %d (elements = %d)\n", (end_time-start_time), elements);
+#endif
 	
 	tensor_set_shape(out_min_tensor,1,1,1,1);
 	tensor_set_float(out_min_tensor,0,0.0f);
@@ -154,16 +171,16 @@ static int qsigmoid_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_QuantizedSigmoid_8_ref = {
-	.execute = qsigmoid_execute_ref,
-	.check = qsigmoid_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, qsigmoid_execute_ref),
+	SFINIT(  .check, qsigmoid_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedSigmoid_8 = {
-	.execute = qsigmoid_execute_hvx,
-	.check = qsigmoid_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, qsigmoid_execute_hvx),
+	SFINIT(  .check, qsigmoid_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 

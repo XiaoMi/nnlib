@@ -76,8 +76,8 @@ static int maxpool_execute(struct nn_node *self, struct nn_graph *nn)
 	int32_t adj_x = ((out_width-1) * stride_width + window_width - in_width) / 2;
 	int32_t adj_y = ((out_height-1) * stride_height + window_height - in_height) / 2;
 
-	const float *in = in_tensor->data;
-	float *out = out_tensor->data;
+	const float *in = (const float *)in_tensor->data;
+	float *out = (float *)out_tensor->data;
 	float maxval;
 	size_t bytes = out_batches * out_width * out_height * out_depth * sizeof(float);
 
@@ -155,9 +155,9 @@ static int maxpool_check(struct nn_node *self, struct nn_graph *nn)
 
 
 struct nn_node_ops nn_ops_for_MaxPool_f = {
-	.execute = maxpool_execute,
-	.check = maxpool_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	maxpool_execute,
+	maxpool_check,
+	node_alloc_common,
+	node_free_common,
 };
 

@@ -81,146 +81,141 @@
  * But I Think the big loops above are the best bet.
  */
 
-static inline float nn_do_reductions_float(
-	const float *in,
-	int b_in,
-	int h_in,
-	int w_in,
-	int d_in,
-	int rb,
-	int rh,
-	int rw,
-	int rd,
-	float (*f)(float,float),
-	float initializer)
-{
-	float tmp = initializer;
-	const float *p;
-	int b,h,w,d;
-	for (b = 0; b < rb; b++)
-	  for (h = 0; h < rh; h++)
-	    for (w = 0; w < rw; w++)
-	      for (d = 0; d < rd; d++) {
-	        p = in + b * h_in * w_in * d_in + h * w_in * d_in + w * d_in + d;
-		tmp = f(tmp,*p);
-	}
-	/* finalizer? */
-	return tmp;
-}
-
-static inline int nn_reduction_float(
-	struct nn_node *self,
-	struct nn_graph *nn,
-	float (*f)(float, float),
-	float initializer)
-{
-	const struct tensor *input_tensor = self->inputs[0];
-	struct tensor *out_tensor = self->outputs[0];
-	struct shape out_shape = input_tensor->shape;
-	int b_in = input_tensor->shape.batches;
-	int h_in = input_tensor->shape.height;
-	int w_in = input_tensor->shape.width;
-	int d_in = input_tensor->shape.depth;
-	int b_out = b_in;
-	int h_out = h_in;
-	int w_out = w_in;
-	int d_out = d_in;
-	int rb;
-	int rh;
-	int rw;
-	int rd;
-	int b,h,w,d;
-	int out_elements;
-	int out_bytes;
-	const float *in;
-	const float *base = input_tensor->data;
-	float *out = out_tensor->data;
-	if (self->n_inputs == 3) {
-		const struct tensor *reduction_dims_tensor = self->inputs[1];
-		const int32_t true_rank = tensor_get_int32(self->inputs[2],0);
-		const int32_t *dims = reduction_dims_tensor->data;
-		int32_t dim;
-		int i;
-		for (i = 0; i < reduction_dims_tensor->shape.depth; i++) {
-			dim = true_rank - dims[i] - 1;
-			if (dim > 3) d_out = w_out = h_out = b_out = 1;
-			if (dim == 0) d_out = 1;
-			if (dim == 1) w_out = 1;
-			if (dim == 2) h_out = 1;
-			if (dim == 3) b_out = 1;
-		}
-		out_shape.batches = b_out;
-		out_shape.height = h_out;
-		out_shape.width = w_out;
-		out_shape.depth = d_out;
-		if (self->padding == NN_PAD_VALID) {
-			/* Eliminate the dimensions that are reduced */
-			for (i = 0; i < reduction_dims_tensor->shape.depth; i++) {
-				dim = true_rank - dims[i] - 1;
-				if (dim > 3) out_shape.depth = 
-					out_shape.width = 
-					out_shape.height = 
-					out_shape.batches = 0;
-				if (dim == 0) out_shape.depth = 0;
-				if (dim == 1) out_shape.width = 0;
-				if (dim == 2) out_shape.height = 0;
-				if (dim == 3) out_shape.batches = 0;
-			}
-			if (out_shape.batches == 0) {
-				out_shape.batches = 1;
-			}
-			if (out_shape.height == 0) {
-				out_shape.height = out_shape.batches;
-				out_shape.batches = 1;
-			}
-			if (out_shape.width == 0) {
-				out_shape.width = out_shape.height;
-				out_shape.height = out_shape.batches;
-				out_shape.batches = 1;
-			}
-			if (out_shape.depth == 0) {
-				out_shape.depth = out_shape.width;
-				out_shape.width = out_shape.height;
-				out_shape.height = out_shape.batches;
-				out_shape.batches = 1;
-			}
-		}
-	} else {
-		/* assume flatten */
-		b_out = h_out = w_out = d_out = 1;
-		out_shape.batches = 1;
-		out_shape.height = 1;
-		out_shape.width = 1;
-		out_shape.depth = 1;
-	}
-	out_elements = b_out * h_out * w_out * d_out;
-	out_bytes = out_elements * sizeof(float);
-	if (out_bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	out_tensor->shape = out_shape;
-	out_tensor->data_size = out_bytes;
-	/* calculate number of elements to reduce in each dimension */
-	rb = (b_out == 1) ? b_in : 1;
-	rh = (h_out == 1) ? h_in : 1;
-	rw = (w_out == 1) ? w_in : 1;
-	rd = (d_out == 1) ? d_in : 1;
-	for (b = 0; b < b_out; b++)
-	  for (h = 0; h < h_out; h++)
-	    for (w = 0; w < w_out; w++)
-	      for (d = 0; d < d_out; d++) {
-	        in = base + b * h_in * w_in * d_in + h * w_in * d_in + w * d_in + d;
-	        *out++ = nn_do_reductions_float(in,b_in,h_in,w_in,d_in,rb,rh,rw,rd,f,initializer);
-	}
-	return 0;
-}
-
-#define CREATE_REDUCTION_INLINE(NAME,TYPE) \
-static inline int NAME( \
+#define CREATE_REDUCTION_INLINE(TYPENAME,TYPE) \
+static inline TYPE nn_do_reductions_##TYPENAME( \
+	const TYPE *in, \
+	int b_in, \
+	int h_in, \
+	int w_in, \
+	int d_in, \
+	int rb, \
+	int rh, \
+	int rw, \
+	int rd, \
+	TYPE (*f)(TYPE,TYPE), \
+	TYPE initializer) \
+{ \
+	TYPE tmp = initializer; \
+	const TYPE *p; \
+	int b,h,w,d; \
+	for (b = 0; b < rb; b++) \
+	  for (h = 0; h < rh; h++) \
+	    for (w = 0; w < rw; w++) \
+	      for (d = 0; d < rd; d++) { \
+	        p = in + b * h_in * w_in * d_in + h * w_in * d_in + w * d_in + d; \
+		tmp = f(tmp,*p); \
+	} \
+	/* finalizer? */ \
+	return tmp; \
+} \
+static inline int nn_reduction_##TYPENAME( \
 	struct nn_node *self, \
 	struct nn_graph *nn, \
-	TYPE (*f)(TYPE, TYPE)) \
+	TYPE (*f)(TYPE, TYPE), \
+	TYPE initializer) \
 { \
+	const struct tensor *input_tensor = (const struct tensor *)self->inputs[0]; \
+	struct tensor *out_tensor = (struct tensor *)self->outputs[0]; \
+	struct shape out_shape = input_tensor->shape; \
+	int b_in = input_tensor->shape.batches; \
+	int h_in = input_tensor->shape.height; \
+	int w_in = input_tensor->shape.width; \
+	int d_in = input_tensor->shape.depth; \
+	int b_out = b_in; \
+	int h_out = h_in; \
+	int w_out = w_in; \
+	int d_out = d_in; \
+	int rb; \
+	int rh; \
+	int rw; \
+	int rd; \
+	int b,h,w,d; \
+	int out_elements; \
+	int out_bytes; \
+	const TYPE *in; \
+	const TYPE *base = (const TYPE *)input_tensor->data; \
+	TYPE *out = (TYPE *)out_tensor->data; \
+	if (self->n_inputs == 3) { \
+		const struct tensor *reduction_dims_tensor = (const struct tensor *)self->inputs[1]; \
+		const int32_t true_rank = tensor_get_int32(self->inputs[2],0); \
+		const int32_t *dims = (const int32_t *)reduction_dims_tensor->data; \
+		int32_t dim; \
+		int i; \
+		for (i = 0; i < reduction_dims_tensor->shape.depth; i++) { \
+			dim = true_rank - dims[i] - 1; \
+			if (dim > 3) d_out = w_out = h_out = b_out = 1; \
+			if (dim == 0) d_out = 1; \
+			if (dim == 1) w_out = 1; \
+			if (dim == 2) h_out = 1; \
+			if (dim == 3) b_out = 1; \
+		} \
+		out_shape.batches = b_out; \
+		out_shape.height = h_out; \
+		out_shape.width = w_out; \
+		out_shape.depth = d_out; \
+		if (self->padding == NN_PAD_VALID) { \
+			/* Eliminate the dimensions that are reduced */ \
+			for (i = 0; i < reduction_dims_tensor->shape.depth; i++) { \
+				dim = true_rank - dims[i] - 1; \
+				if (dim > 3) out_shape.depth =  \
+					out_shape.width =  \
+					out_shape.height =  \
+					out_shape.batches = 0; \
+				if (dim == 0) out_shape.depth = 0; \
+				if (dim == 1) out_shape.width = 0; \
+				if (dim == 2) out_shape.height = 0; \
+				if (dim == 3) out_shape.batches = 0; \
+			} \
+			if (out_shape.batches == 0) { \
+				out_shape.batches = 1; \
+			} \
+			if (out_shape.height == 0) { \
+				out_shape.height = out_shape.batches; \
+				out_shape.batches = 1; \
+			} \
+			if (out_shape.width == 0) { \
+				out_shape.width = out_shape.height; \
+				out_shape.height = out_shape.batches; \
+				out_shape.batches = 1; \
+			} \
+			if (out_shape.depth == 0) { \
+				out_shape.depth = out_shape.width; \
+				out_shape.width = out_shape.height; \
+				out_shape.height = out_shape.batches; \
+				out_shape.batches = 1; \
+			} \
+		} \
+	} else { \
+		/* assume flatten */ \
+		b_out = h_out = w_out = d_out = 1; \
+		out_shape.batches = 1; \
+		out_shape.height = 1; \
+		out_shape.width = 1; \
+		out_shape.depth = 1; \
+	} \
+	out_elements = b_out * h_out * w_out * d_out; \
+	out_bytes = out_elements * sizeof(TYPE); \
+	if (out_bytes > out_tensor->max_size) return errlog(nn,"out too small"); \
+	out_tensor->shape = out_shape; \
+	out_tensor->data_size = out_bytes; \
+	/* calculate number of elements to reduce in each dimension */ \
+	rb = (b_out == 1) ? b_in : 1; \
+	rh = (h_out == 1) ? h_in : 1; \
+	rw = (w_out == 1) ? w_in : 1; \
+	rd = (d_out == 1) ? d_in : 1; \
+	for (b = 0; b < b_out; b++) \
+	  for (h = 0; h < h_out; h++) \
+	    for (w = 0; w < w_out; w++) \
+	      for (d = 0; d < d_out; d++) { \
+	        in = base + b * h_in * w_in * d_in + h * w_in * d_in + w * d_in + d; \
+	        *out++ = nn_do_reductions_##TYPENAME(in,b_in,h_in,w_in,d_in,rb,rh,rw,rd,f,initializer); \
+	} \
+	return 0; \
 }
 
+
+CREATE_REDUCTION_INLINE(float,float)
+CREATE_REDUCTION_INLINE(int32,int32_t)
 
 #undef CREATE_REDUCTION_INLINE
 

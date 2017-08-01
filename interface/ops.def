@@ -1,5 +1,45 @@
 /* 
- * You probably want to add nodes to the end,
+ * You probably want to 
+ * 
+ *    ##    #####   #####
+ *   #  #   #    #  #    #
+ *  #    #  #    #  #    #
+ *  ######  #    #  #    #
+ *  #    #  #    #  #    #
+ *  #    #  #####   #####
+ * 
+ * 
+ *  #    #   ####   #####   ######   ####
+ *  ##   #  #    #  #    #  #       #
+ *  # #  #  #    #  #    #  #####    ####
+ *  #  # #  #    #  #    #  #            #
+ *  #   ##  #    #  #    #  #       #    #
+ *  #    #   ####   #####   ######   ####
+ * 
+ * 
+ *    ##     #####
+ *   #  #      #
+ *  #    #     #
+ *  ######     #
+ *  #    #     #
+ *  #    #     #
+ * 
+ * 
+ *   #####  #    #  ######
+ *     #    #    #  #
+ *     #    ######  #####
+ *     #    #    #  #
+ *     #    #    #  #
+ *     #    #    #  ######
+ * 
+ * 
+ *  ######  #    #  #####
+ *  #       ##   #  #    #
+ *  #####   # #  #  #    #
+ *  #       #  # #  #    #
+ *  #       #   ##  #    #
+ *  ######  #    #  #####
+ * 
  * otherwise the interface becomes incompatible.
  */
 DEF_OP(INPUT)
@@ -28,14 +68,10 @@ DEF_OP_WREF(QuantizedMatMul_8x8to32)
 DEF_OP_WREF(QuantizeDownAndShrinkRange_32to8)
 DEF_OP_WREF(QuantizedRelu_8)
 DEF_OP_WREF(QuantizedReluX_8)
-DEF_OP_WREF(QuantizedSigmoid_8)
-DEF_OP_WREF(QuantizedTanh_8)
 DEF_OP_WREF(QuantizedMaxPool_8)
 DEF_OP_WREF(QuantizedAvgPool_8)
 DEF_OP_WREF(QuantizedConcat_8)
 DEF_OP_WREF(QuantizedBiasAdd_8p8to32)
-DEF_OP_WREF(QuantizedSoftmax_8)
-DEF_OP_WREF(QuantizedLRN_8)
 DEF_OP_WREF(Min_f)
 DEF_OP_WREF(Max_f)
 DEF_OP_WREF(Quantize)
@@ -85,7 +121,7 @@ DEF_OP(Add_int32)
 DEF_OP(Split_f)
 DEF_OP(Dequantize_qint32_f)
 DEF_OP(PRelu_f)
-DEF_OP(QuantizedPRelu_8)
+DEF_OP_WREF(QuantizedPRelu_8)
 DEF_OP(Sum_f)
 DEF_OP(Prod_f)
 DEF_OP(Mul_int32)
@@ -108,6 +144,31 @@ DEF_OP(QuantizedSplit_8)
 DEF_OP(Deconv_f)
 DEF_OP_WREF(QuantizedDeconv_8x8to32)
 
+DEF_OP_WREF(QuantizedMul_8x8to32)
+DEF_OP_WREF(QuantizedAdd_8p8to32)
+DEF_OP_WREF(QuantizedSigmoid_8)
+DEF_OP_WREF(QuantizedTanh_8)
+DEF_OP_WREF(QuantizedSoftmax_8)
+DEF_OP_WREF(QuantizedLRN_8)
+DEF_OP_WREF(QuantizedSub_8p8to32)
+DEF_OP_WREF(QuantizedMaximum_8)
+DEF_OP_WREF(QuantizedMinimum_8)
+
+DEF_OP(Pad_f)
+DEF_OP(SpaceToBatchND_f)
+DEF_OP(BatchToSpaceND_f)
+DEF_OP(QuantizedPad_8)
+DEF_OP(ResizeBilinear_f)
+DEF_OP(ConcatV2_f)
+DEF_OP(ConcatV2_int32)
+DEF_OP(Prod_int32)
+DEF_OP(Slice_int32)
+
+DEF_OP(QuantizedAdd_8p8to8)
+
+DEF_OP_WREF(AutoQuantize)
+DEF_OP_WREF(QuantizedDepthwiseConv2d_8x8to32)
+DEF_OP(DepthwiseConv2d_f)
 
 #ifdef __SELF_DEF_OP_WREF
 #undef __SELF_DEF_OP_WREF

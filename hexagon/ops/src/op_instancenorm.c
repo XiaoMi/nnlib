@@ -86,7 +86,7 @@ static int execute_qinstancenorm_ref(struct nn_node *self, struct nn_graph *nn)
 	int32_t depth = in_tensor->shape.depth;
 
 	uint32_t tmp;
-	uint32_t *sum = nn->scratch;
+	uint32_t *sum = (uint32_t *)nn->scratch;
 	uint32_t *sum_of_squares = sum + depth;
 	float *mean = (float *)(sum_of_squares + depth);
 	float *variance = mean + depth;
@@ -96,9 +96,9 @@ static int execute_qinstancenorm_ref(struct nn_node *self, struct nn_graph *nn)
 	float out_max = 0.0f;
 	float ftmp;
 
-	const uint8_t *in_data = in_tensor->data;
+	const uint8_t *in_data = (const uint8_t *)in_tensor->data;
 	const uint8_t *data;
-	uint8_t *out_data = out_tensor->data;
+	uint8_t *out_data = (uint8_t *)out_tensor->data;
 	//const float epsilon = tensor_get_float(epsilon_tensor,0);
 
 	int32_t b,h,w,d;
@@ -194,13 +194,13 @@ static int execute_finstancenorm(struct nn_node *self, struct nn_graph *nn)
 	int32_t depth = in_tensor->shape.depth;
 
 	float tmp;
-	float *sum = nn->scratch;
+	float *sum = (float *)nn->scratch;
 	float *sum_of_squares = sum + depth;
 	float *mean = sum_of_squares + depth;
 	float *variance = mean + depth;
 	float *invsqrt_variance = mean + depth;
 
-	const float *in_data = in_tensor->data;
+	const float *in_data = (const float *)in_tensor->data;
 	const float *data;
 	float *out_data;
 	//const float epsilon = tensor_get_float(epsilon_tensor,0);
@@ -234,7 +234,7 @@ static int execute_finstancenorm(struct nn_node *self, struct nn_graph *nn)
 			invsqrt_variance[d] = 1.0f / sqrtf(variance[d] + epsilon);
 		}
 		data = in_data + (b * width * height * depth);
-		out_data = out_tensor->data;
+		out_data = (float *)out_tensor->data;
 		for (h = 0; h < height; h++) {
 			for (w = 0; w < width; w++) {
 				for (d = 0; d < depth; d++) {
@@ -264,24 +264,22 @@ static int check_finstancenorm(struct nn_node *self, struct nn_graph *nn)
 
 
 struct nn_node_ops nn_ops_for_QuantizedInstanceNorm_8_ref = {
-	.execute = execute_qinstancenorm_ref,
-	.check = check_qinstancenorm,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, execute_qinstancenorm_ref),
+	SFINIT(  .check, check_qinstancenorm),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedInstanceNorm_8 = {
-	.execute = execute_qinstancenorm_ref,
-	.check = check_qinstancenorm,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, execute_qinstancenorm_ref),
+	SFINIT(  .check, check_qinstancenorm),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_InstanceNorm_f = {
-	.execute = execute_finstancenorm,
-	.check = check_finstancenorm,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, execute_finstancenorm),
+	SFINIT(  .check, check_finstancenorm),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
-
-

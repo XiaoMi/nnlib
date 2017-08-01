@@ -45,25 +45,51 @@ static inline float prod_helper(float a, float b)
 	return a*b;
 }
 
+static inline int32_t prod_helper_i32(int32_t a, int32_t b)
+{
+	return a*b;
+}
+
 static int prod_f_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	return nn_reduction_float(self,nn,prod_helper,1.0f);
 }
 
+static int prod_i32_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	return nn_reduction_int32(self,nn,prod_helper_i32,1);
+}
+
 static int prod_f_check(struct nn_node *self, struct nn_graph *nn)
 {
-	logmsg(nn,2,"sum node %p",self);
+	logmsg(nn,2,"prod node %p",self);
 	if (self->n_inputs > 3) return errlog(nn,"wrong # inputs");
 	if (self->n_inputs < 1) return errlog(nn,"wrong # inputs");
 	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"sum %p check OK",self);
+	logmsg(nn,2,"prod %p check OK",self);
+	return 0;
+}
+
+static int prod_i32_check(struct nn_node *self, struct nn_graph *nn)
+{
+	logmsg(nn,2,"prod node %p",self);
+	if (self->n_inputs > 3) return errlog(nn,"wrong # inputs");
+	if (self->n_inputs < 1) return errlog(nn,"wrong # inputs");
+	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
+	logmsg(nn,2,"prod %p check OK",self);
 	return 0;
 }
 
 struct nn_node_ops nn_ops_for_Prod_f = {
-	.execute = prod_f_execute,
-	.check = prod_f_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, prod_f_execute),
+	SFINIT(  .check, prod_f_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
+struct nn_node_ops nn_ops_for_Prod_int32 = {
+	SFINIT(.execute, prod_i32_execute),
+	SFINIT(  .check, prod_i32_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
+};

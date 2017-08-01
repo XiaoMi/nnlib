@@ -56,8 +56,8 @@ static int autorequantize_execute(struct nn_node *self, struct nn_graph *nn)
 		* in_tensor->shape.height
 		* in_tensor->shape.width
 		* in_tensor->shape.depth;
-	const int32_t *in_data = in_tensor->data;
-	uint8_t *out_data = out_tensor->data;
+	const int32_t *in_data = (const int32_t *)in_tensor->data;
+	uint8_t *out_data = (uint8_t *)out_tensor->data;
 	uint32_t i;
 	float in_min = tensor_get_float(in_min_tensor,0);
 	float in_max = tensor_get_float(in_max_tensor,0);
@@ -68,7 +68,7 @@ static int autorequantize_execute(struct nn_node *self, struct nn_graph *nn)
 	int32_t in_max_val;
 	int32_t in_min_val;
 	int32_t inval;
-	float in_level_size = (in_max - in_min) / 0x1.0p32f;
+	float in_level_size = (in_max - in_min) / 4294967296.0f/*0x1.0p32f*/;
 
 	/* Assert min and max are size 1,1,1,1 ? */
 
@@ -108,7 +108,7 @@ static int autorequantize_execute(struct nn_node *self, struct nn_graph *nn)
 		}
 	} else {
 		float gain = recip_stepsize*in_level_size;
-		int gaini = (int) (gain*0x1.0p31f+0.5f);
+		int gaini = (int) (gain*2147483648.0f/*0x1.0p31f*/+0.5f);
 		/* 
 		 * Since out min is not necessarily in_min, we need to make 
 		 * sure we have exactly the right offset
@@ -144,13 +144,13 @@ static int requantize_execute(struct nn_node *self, struct nn_graph *nn)
 		* in_tensor->shape.height
 		* in_tensor->shape.width
 		* in_tensor->shape.depth;
-	const int32_t *in_data = in_tensor->data;
-	uint8_t *out_data = out_tensor->data;
+	const int32_t *in_data = (const int32_t *)in_tensor->data;
+	uint8_t *out_data = (uint8_t *)out_tensor->data;
 	float in_min = tensor_get_float(in_min_tensor,0);
 	float in_max = tensor_get_float(in_max_tensor,0);
 	float out_min = tensor_get_float(min_val_tensor,0);
 	float out_max = tensor_get_float(max_val_tensor,0);
-	float in_level_size = (in_max - in_min) / 0x1.0p32f;
+	float in_level_size = (in_max - in_min) / 4294967296.0f/*0x1.0p32f*/;
 	float recip_stepsize;
 	float stepsize;
 
@@ -183,10 +183,10 @@ static int requantize_execute(struct nn_node *self, struct nn_graph *nn)
 	}
 	else
 	{
-	        float gain = (255.f *in_level_size)/(out_max-out_min);
-        	int gaini = (int) (gain*0x1.0p31f+0.5f);
-	        int offseti = out_min / in_level_size;
-        	quantize_asm(in_data, offseti, gaini, out_data, elements);
+		float gain = (255.f *in_level_size)/(out_max-out_min);
+		int gaini = (int) (gain*2147483648.0f/*0x1.0p31f*/+0.5f);
+		int offseti = out_min / in_level_size;
+		quantize_asm(in_data, offseti, gaini, out_data, elements);
 	}
 	tensor_set_shape(out_min_tensor,1,1,1,1);
 	tensor_set_float(out_min_tensor,0,out_min);
@@ -213,7 +213,7 @@ static int requantrange_execute(struct nn_node *self, struct nn_graph *nn)
 		* in_tensor->shape.height
 		* in_tensor->shape.width
 		* in_tensor->shape.depth;
-	const int32_t *in_data = in_tensor->data;
+	const int32_t *in_data = (const int32_t *)in_tensor->data;
 	uint32_t i;
 	float in_min = tensor_get_float(in_min_tensor,0);
 	float in_max = tensor_get_float(in_max_tensor,0);
@@ -222,7 +222,7 @@ static int requantrange_execute(struct nn_node *self, struct nn_graph *nn)
 	int32_t in_max_val;
 	int32_t in_min_val;
 	int32_t inval;
-	float in_level_size = (in_max - in_min) / 0x1.0p32f;
+	float in_level_size = (in_max - in_min) / 4294967296.0f/*0x1.0p32f*/;
 
 	/* Assert min and max are size 1,1,1,1 ? */
 
@@ -290,45 +290,45 @@ static int requantrange_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_QuantizeDownAndShrinkRange_32to8 = {
-	.execute = autorequantize_execute,
-	.check = autorequantize_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, autorequantize_execute),
+	SFINIT(  .check, autorequantize_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_QuantizeDownAndShrinkRange_32to8_ref = {
-	.execute = autorequantize_execute,
-	.check = autorequantize_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, autorequantize_execute),
+	SFINIT(  .check, autorequantize_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_Requantize_32to8 = {
-	.execute = requantize_execute,
-	.check = requantize_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, requantize_execute),
+	SFINIT(  .check, requantize_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_Requantize_32to8_ref = {
-	.execute = requantize_execute,
-	.check = requantize_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, requantize_execute),
+	SFINIT(  .check, requantize_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_RequantizationRange_32 = {
-	.execute = requantrange_execute,
-	.check = requantrange_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, requantrange_execute),
+	SFINIT(  .check, requantrange_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_RequantizationRange_32_ref = {
-	.execute = requantrange_execute,
-	.check = requantrange_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, requantrange_execute),
+	SFINIT(  .check, requantrange_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 

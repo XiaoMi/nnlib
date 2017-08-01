@@ -50,7 +50,7 @@ static int addn_execute(struct nn_node *self, struct nn_graph *nn)
 	uint32_t d = in_tensor->shape.depth;
 	size_t elements = b*h*w*d;
 	size_t bytes = elements * sizeof(float);
-	float *out_data = out_tensor->data;
+	float *out_data = (float *)out_tensor->data;
 	float sum;
 	uint32_t i,j;
 
@@ -87,9 +87,9 @@ static int addn_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_AddN_f = {
-	.execute = addn_execute,
-	.check = addn_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, addn_execute),
+	SFINIT(  .check, addn_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 

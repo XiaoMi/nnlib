@@ -65,9 +65,9 @@ static int matmul_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	int32_t y;
 	int32_t i;
 
-	const float *a = a_tensor->data;
-	const float *b = b_tensor->data;
-	float *out = out_tensor->data;
+	const float *a = (const float *)a_tensor->data;
+	const float *b = (const float *)b_tensor->data;
+	float *out = (float *)out_tensor->data;
 
 	float adata;
 	float bdata;
@@ -118,9 +118,9 @@ static int matmul_check_ref(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_MatMul_f = {
-	.execute = matmul_execute_ref,
-	.check = matmul_check_ref,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	matmul_execute_ref,
+	matmul_check_ref,
+	node_alloc_common,
+	node_free_common,
 };
 

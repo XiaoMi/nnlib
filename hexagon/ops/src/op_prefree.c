@@ -83,9 +83,9 @@ static int prefree_dtor(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_PreFree = {
-	.execute = prefree_execute,
-	.check = prefree_check,
-	.ctor = prefree_ctor,
-	.dtor = prefree_dtor,
+	SFINIT(.execute, prefree_execute),
+	SFINIT(  .check, prefree_check),
+	SFINIT(   .ctor, prefree_ctor),
+	SFINIT(   .dtor, prefree_dtor),
 };
 

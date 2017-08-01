@@ -40,21 +40,21 @@
 #include <math.h>
 #include <nn_broadcast.h>
 
-static inline int32_t xor_helper(int32_t a, int32_t b) { return a^b; }
-static inline int32_t and_helper(int32_t a, int32_t b) { return a&b; }
-static inline int32_t ior_helper(int32_t a, int32_t b) { return a|b; }
+static inline int32_t xor_helper(int32_t a, int32_t b, void *u) { return a^b; }
+static inline int32_t and_helper(int32_t a, int32_t b, void *u) { return a&b; }
+static inline int32_t ior_helper(int32_t a, int32_t b, void *u) { return a|b; }
 
 static int and_int32_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return broadcast_elementwise_execute_int32(self,nn,and_helper);
+	return broadcast_elementwise_execute_int32(self,nn,and_helper,NULL);
 }
 static int ior_int32_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return broadcast_elementwise_execute_int32(self,nn,ior_helper);
+	return broadcast_elementwise_execute_int32(self,nn,ior_helper,NULL);
 }
 static int xor_int32_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return broadcast_elementwise_execute_int32(self,nn,xor_helper);
+	return broadcast_elementwise_execute_int32(self,nn,xor_helper,NULL);
 }
 
 static int logical_int32_check(struct nn_node *self, struct nn_graph *nn)
@@ -67,23 +67,22 @@ static int logical_int32_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_LogicalAnd_int32 = {
-	.execute = and_int32_execute,
-	.check = logical_int32_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, and_int32_execute),
+	SFINIT(  .check, logical_int32_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_LogicalOr_int32 = {
-	.execute = ior_int32_execute,
-	.check = logical_int32_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, ior_int32_execute),
+	SFINIT(  .check, logical_int32_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_LogicalXor_int32 = {
-	.execute = xor_int32_execute,
-	.check = logical_int32_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, xor_int32_execute),
+	SFINIT(  .check, logical_int32_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
-

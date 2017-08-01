@@ -35,8 +35,15 @@
  */
 #include <nn_graph.h>
 #include <string.h>
+#include <stdio.h>
 #include <math.h>
+#include <quantize.h>
 #include <nn_broadcast.h>
+#include <nn_reduction.h>
+#include <op_min_max.h>
+#if defined(__hexagon__)
+#include "hexagon_types.h"
+#endif
 
 /*
  * 
@@ -45,50 +52,15 @@
  * This contains min and max (floating) ops
  */
 
-#if 0
-static inline int minmax_execute(struct nn_node *self, struct nn_graph *nn, float (*f)(float,float))
+static inline float min_helper(float a, float b, void * u)
 {
-	const struct tensor *in_tensor = self->inputs[0];
-	//const struct tensor *reduction_tensor = self->inputs[1];
-	struct tensor *out_tensor = self->outputs[0];
-	int32_t batches = in_tensor->shape.batches;
-	int32_t height = in_tensor->shape.height;
-	int32_t width = in_tensor->shape.width;
-	int out_elements = batches;
-	int depth = in_tensor->shape.depth;
-	const float *data = in_tensor->data;
-	float *out = out_tensor->data;
-	float minmax = data[0];
-	int i;
-	int j;
-	size_t bytes = out_elements * sizeof(float);
-	logmsg(nn,2,"min/max execute. self=%p ",self);
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	for (j = 0; j < out_elements; j++) {
-		minmax = *data;
-		for (i = 0; i < height*width*depth; i++) {
-			minmax = f(minmax,*data++);
-		}
-		*out++ = minmax;
-	}
-	tensor_set_shape(out_tensor,batches,1,1,1);
-	out_tensor->data_size = sizeof(float);
-	tensor_set_float(out_tensor,0,minmax);
-	return 0;
+	return fminf(a,b);
 }
 
-static int min_execute(struct nn_node *self, struct nn_graph *nn)
+static inline float max_helper(float a, float b, void * u)
 {
-	return minmax_execute(self,nn,fminf);
+	return fmaxf(a,b);
 }
-
-static int max_execute(struct nn_node *self, struct nn_graph *nn)
-{
-	return minmax_execute(self,nn,fmaxf);
-}
-#else
-
-#include <nn_reduction.h>
 
 static int min_execute(struct nn_node *self, struct nn_graph *nn)
 {
@@ -100,16 +72,14 @@ static int max_execute(struct nn_node *self, struct nn_graph *nn)
 	return nn_reduction_float(self,nn,fmaxf,-INFINITY);
 }
 
-#endif
-
 static int minimum_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return broadcast_elementwise_execute_f(self,nn,fminf);
+	return broadcast_elementwise_execute_f(self,nn,min_helper,NULL);
 }
 
 static int maximum_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return broadcast_elementwise_execute_f(self,nn,fmaxf);
+	return broadcast_elementwise_execute_f(self,nn,max_helper,NULL);
 }
 
 static int minmax_check(struct nn_node *self, struct nn_graph *nn)
@@ -126,44 +96,56 @@ static int minmax_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Min_f = {
-	.execute = min_execute,
-	.check = minmax_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, min_execute),
+	SFINIT(  .check, minmax_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_Min_f_ref = {
-	.execute = min_execute,
-	.check = minmax_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, min_execute),
+	SFINIT(  .check, minmax_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_Max_f = {
-	.execute = max_execute,
-	.check = minmax_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, max_execute),
+	SFINIT(  .check, minmax_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_Max_f_ref = {
-	.execute = max_execute,
-	.check = minmax_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, max_execute),
+	SFINIT(  .check, minmax_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 
 struct nn_node_ops nn_ops_for_Minimum_f = {
-	.execute = minimum_execute,
-	.check = minmax_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, minimum_execute),
+	SFINIT(  .check, minmax_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_Maximum_f = {
-	.execute = maximum_execute,
-	.check = minmax_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, maximum_execute),
+	SFINIT(  .check, minmax_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
+
+#if defined(__hexagon__)
+static int max(int a, int b) {return((a>b)?a:b);}
+static int min(int a, int b) {return((a<b)?a:b);}
+#endif
+
+CREATE_REF_OP_MIN_MAX(maximum, Maximum, max)
+CREATE_REF_OP_MIN_MAX(minimum, Minimum, min)
+
+CREATE_HVX_OP_MIN_MAX(maximum, Maximum, max)
+CREATE_HVX_OP_MIN_MAX(minimum, Minimum, min)
+

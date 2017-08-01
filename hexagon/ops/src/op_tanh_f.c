@@ -48,8 +48,8 @@ static int tanh_execute(struct nn_node *self, struct nn_graph *nn)
 		* in_tensor->shape.width
 		* in_tensor->shape.depth;
 	size_t bytes = elements * sizeof(float);
-	const float *in_data = in_tensor->data;
-	float *out_data = out_tensor->data;
+	const float *in_data = (const float *)in_tensor->data;
+	float *out_data = (float *)out_tensor->data;
 	uint32_t i;
 
 	logmsg(nn,2,"tanh execute. self=%p ",self);
@@ -75,9 +75,9 @@ static int tanh_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Tanh_f = {
-	.execute = tanh_execute,
-	.check = tanh_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, tanh_execute),
+	SFINIT(  .check, tanh_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 

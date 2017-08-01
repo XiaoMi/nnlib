@@ -59,7 +59,7 @@ static int pack_execute(struct nn_node *self, struct nn_graph *nn)
 	int out_height = height;
 	int out_batches = batches;
 	unsigned int total_bytes = t0->data_size;
-	char *out = out_tensor->data;
+	char *out = (char *)out_tensor->data;
 	int i;
 	for (i = 1; i < n_inputs; i++) {
 		t = self->inputs[i];
@@ -98,16 +98,16 @@ static int pack_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Pack_f = {
-	.execute = pack_execute,
-	.check = pack_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, pack_execute),
+	SFINIT(  .check, pack_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_Pack_int32 = {
-	.execute = pack_execute,
-	.check = pack_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, pack_execute),
+	SFINIT(  .check, pack_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 

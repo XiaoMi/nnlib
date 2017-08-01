@@ -58,9 +58,9 @@ static int biasadd_f_execute(struct nn_node *self, struct nn_graph *nn)
 
 	int32_t stripe;
 
-	const float *in = in_tensor->data;
-	const float *bias = bias_tensor->data;
-	float *out = out_tensor->data;
+	const float *in = (const float *)in_tensor->data;
+	const float *bias = (const float *)bias_tensor->data;
+	float *out = (float *)out_tensor->data;
 
 	int32_t i;
 
@@ -99,10 +99,10 @@ static int biasadd_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_BiasAdd_f = {
-	.execute = biasadd_f_execute,
-	.check = biasadd_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, biasadd_f_execute),
+	SFINIT(  .check, biasadd_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 

@@ -51,8 +51,9 @@
 #define ALIGN_SIZE 128
 
 /* 8x8 matrix multiply --> 32 bits */
-
+#if defined(__hexagon__)
 static int min(int a, int b) { return((a<b)?a:b); }
+#endif
 
 
 static inline int matmul_execute(struct nn_node *self, struct nn_graph *nn,
@@ -151,9 +152,9 @@ static inline void matmul_ref(
 	const struct tensor *b_tensor = self->inputs[1];
 	struct tensor *out_tensor = self->outputs[0];
 
-	uint8_t *a = a_tensor->data;
-	uint8_t *b = b_tensor->data;
-	int32_t *out = out_tensor->data;
+	uint8_t *a = (uint8_t *)a_tensor->data;
+	uint8_t *b = (uint8_t *)b_tensor->data;
+	int32_t *out = (int32_t *)out_tensor->data;
 
 	int32_t adata;
 	int32_t bdata;
@@ -196,8 +197,8 @@ static inline void matmul_asm(
 	const struct tensor *b_tensor = self->inputs[1];
 	struct tensor *out_tensor = self->outputs[0];
 
-	uint8_t *a = a_tensor->data;
-	int32_t *out = out_tensor->data;
+	uint8_t *a = (uint8_t *)a_tensor->data;
+	int32_t *out = (int32_t *)out_tensor->data;
 
 	uint32_t a_width = a_tensor->shape.width;
 	uint32_t a_depth = a_tensor->shape.depth;
@@ -299,7 +300,7 @@ static int matmul_check_ref(struct nn_node *self, struct nn_graph *nn)
 	uint32_t filt_batches = filt_tensor->shape.filt_batches;
 	uint32_t filt_depth = filt_tensor->shape.filt_depth;
 	uint32_t out_depth = filt_batches;
-	uint8_t *filt = filt_tensor->data;
+	uint8_t *filt = (uint8_t *)filt_tensor->data;
 	float filt_max_float = tensor_get_float(max_filt_tensor,0);
 	float filt_min_float = tensor_get_float(min_filt_tensor,0);
 	int32_t filt_offset = quantize_uint8(0.0f,filt_min_float,filt_max_float);
@@ -316,8 +317,8 @@ static int matmul_check_ref(struct nn_node *self, struct nn_graph *nn)
 	nn_os_hvx_power_on(nn);
 	vecinfo = nn_os_vector_acquire();
 	logmsg(nn,2,"Pad B: filt_elements=%lu %lu,out_depth=%lu %d, filt_offset=%ld", filt_elements, out_depth, filt_elements_pad,out_depth_pad, filt_offset);
-	pad2d(filt,filt_elements,out_depth,nn->scratch,filt_elements_pad,out_depth_pad,filt_offset);
-	transpack(nn->scratch,filt_elements_pad,out_depth_pad,self->opaque);
+	pad2d(filt,filt_elements,out_depth,(uint8_t*)nn->scratch,filt_elements_pad,out_depth_pad,filt_offset);
+	transpack((const uint8_t *)nn->scratch,filt_elements_pad,out_depth_pad,(uint8_t *)self->opaque);
 	nn_os_vector_release(vecinfo);
 	nn_os_hvx_power_off(nn);
 	logmsg(nn,2,"matmul node %p check OK",self);
@@ -349,17 +350,15 @@ static struct nn_node *matmul_ctor(
 }
 
 struct nn_node_ops nn_ops_for_QuantizedMatMul_8x8to32 = {
-	.execute = matmul_execute_asm,
-	.check = matmul_check_ref,
-	.ctor = matmul_ctor,
-	.dtor = node_free_common,
+	SFINIT(.execute, matmul_execute_asm),
+	SFINIT(  .check, matmul_check_ref),
+	SFINIT(   .ctor, matmul_ctor),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedMatMul_8x8to32_ref = {
-	.execute = matmul_execute_ref,
-	.check = matmul_check_ref,
-	.ctor = matmul_ctor,
-	.dtor = node_free_common,
+	SFINIT(.execute, matmul_execute_ref),
+	SFINIT(  .check, matmul_check_ref),
+	SFINIT(   .ctor, matmul_ctor),
+	SFINIT(   .dtor, node_free_common),
 };
-
-

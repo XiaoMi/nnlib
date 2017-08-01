@@ -52,6 +52,7 @@ typedef struct nn_pipe nn_pipe_t;
 static inline void nn_mutex_init(nn_mutex_t *mutex) { pthread_mutex_init(mutex,NULL); }
 static inline void nn_mutex_lock(nn_mutex_t *mutex) {pthread_mutex_lock(mutex); }
 static inline void nn_mutex_unlock(nn_mutex_t *mutex) {pthread_mutex_unlock(mutex); }
+#define NN_MUTEX_INIT PTHREAD_MUTEX_INITIALIZER
 static inline void nn_sem_init(nn_sem_t *sem, int val) { sem_init(sem,0,val); }
 static inline void nn_sem_post(nn_sem_t *sem) { sem_post(sem); }
 static inline void nn_sem_wait(nn_sem_t *sem) { sem_wait(sem); }
@@ -82,8 +83,8 @@ static inline uint64_t nn_os_get_cycles(struct nn_graph *nn)
 static inline uint64_t nn_os_get_cycles(struct nn_graph *nn)
 {
 	uint64_t ret;
-    asm volatile ( " %0 = c15:14 // READ UPCYCLES \n" : "=r"(ret));
-    return ret;
+	asm volatile ( " %0 = c15:14 // READ UPCYCLES \n" : "=r"(ret));
+	return ret;
 }
 
 static inline uint64_t nn_os_get_perfcount(struct nn_graph *nn) { return nn_os_get_cycles(nn); }
@@ -98,9 +99,9 @@ static inline uint64_t nn_os_get_usecs(struct nn_graph *nn)
 	uint64_t ret;
 	struct timespec ts;
 	clock_gettime(CLOCK_REALTIME,&ts);
-	ret = tv.tv_sec;
+	ret = ts.tv_sec;
 	ret *= 1000*1000*1000;
-	ret += tv.tv_nsec;
+	ret += ts.tv_nsec;
 	return ret;
 }
 

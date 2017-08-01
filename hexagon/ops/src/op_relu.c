@@ -44,6 +44,12 @@
 #include <string.h>
 #include <quantize.h>
 
+#if defined(__hexagon__)
+#include "hexagon_types.h"
+#endif
+
+#define USE_ASM
+#if !defined(USE_ASM)
 static inline uint8_t uint8_t_max(uint8_t a, uint8_t b)
 {
 	if (a > b) return a;
@@ -55,6 +61,10 @@ static inline uint8_t uint8_t_min(uint8_t a, uint8_t b)
 	if (a < b) return a;
 	else return b;
 }
+#else
+void relu_kernel(uint8_t *in_data, uint8_t *out_data, int bytes, uint8_t quantized_zero);
+void reluX_kernel(uint8_t *in_data, uint8_t *out_data, int bytes, uint8_t quantized_zero, uint8_t quantized_max);
+#endif
 
 static int relu_execute(struct nn_node *self, struct nn_graph *nn)
 {
@@ -68,10 +78,9 @@ static int relu_execute(struct nn_node *self, struct nn_graph *nn)
 		* in_tensor->shape.height
 		* in_tensor->shape.width
 		* in_tensor->shape.depth;
-	uint8_t *in_data = in_tensor->data;
-	uint8_t *out_data = out_tensor->data;
+	uint8_t *in_data = (uint8_t *)in_tensor->data;
+	uint8_t *out_data = (uint8_t *)out_tensor->data;
 	uint8_t quantized_zero;
-	uint32_t i;
 	float in_min = tensor_get_float(in_min_tensor,0);
 	float in_max = tensor_get_float(in_max_tensor,0);
 
@@ -88,9 +97,7 @@ static int relu_execute(struct nn_node *self, struct nn_graph *nn)
 	out_tensor->shape = in_tensor->shape;
 	out_tensor->data_size = bytes;
 
-	for (i = 0; i < bytes; i++) {
-		out_data[i] = uint8_t_max(in_data[i],quantized_zero);
-	}
+	relu_kernel(in_data, out_data, bytes, quantized_zero);
 
 	tensor_copy(out_min_tensor,in_min_tensor);
 	tensor_copy(out_max_tensor,in_max_tensor);
@@ -115,11 +122,10 @@ static int reluX_execute(struct nn_node *self, struct nn_graph *nn)
 		* in_tensor->shape.height
 		* in_tensor->shape.width
 		* in_tensor->shape.depth;
-	uint8_t *in_data = in_tensor->data;
-	uint8_t *out_data = out_tensor->data;
+	uint8_t *in_data = (uint8_t *)in_tensor->data;
+	uint8_t *out_data = (uint8_t *)out_tensor->data;
 	uint8_t quantized_zero;
 	uint8_t quantized_max;
-	uint32_t i;
 	float in_min = tensor_get_float(in_min_tensor,0);
 	float in_max = tensor_get_float(in_max_tensor,0);
 	float max_val = tensor_get_float(max_val_tensor,0);
@@ -135,9 +141,7 @@ static int reluX_execute(struct nn_node *self, struct nn_graph *nn)
 	out_tensor->shape = in_tensor->shape;
 	out_tensor->data_size = bytes;
 
-	for (i = 0; i < bytes; i++) {
-		out_data[i] = uint8_t_min(uint8_t_max(in_data[i],quantized_zero),quantized_max);
-	}
+	reluX_kernel(in_data, out_data, bytes, quantized_zero, quantized_max);
 
 	tensor_copy(out_min_tensor,in_min_tensor);
 	tensor_copy(out_max_tensor,in_max_tensor);
@@ -176,31 +180,31 @@ static int reluX_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_QuantizedRelu_8 = {
-	.execute = relu_execute,
-	.check = relu_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, relu_execute),
+	SFINIT(  .check, relu_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedReluX_8 = {
-	.execute = reluX_execute,
-	.check = reluX_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, reluX_execute),
+	SFINIT(  .check, reluX_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 
 struct nn_node_ops nn_ops_for_QuantizedRelu_8_ref = {
-	.execute = relu_execute,
-	.check = relu_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, relu_execute),
+	SFINIT(  .check, relu_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedReluX_8_ref = {
-	.execute = reluX_execute,
-	.check = reluX_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, reluX_execute),
+	SFINIT(  .check, reluX_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 

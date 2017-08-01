@@ -47,8 +47,8 @@ static int relu_execute(struct nn_node *self, struct nn_graph *nn)
 		* in_tensor->shape.width
 		* in_tensor->shape.depth;
 	size_t bytes = elements * sizeof(float);
-	const float *in_data = in_tensor->data;
-	float *out_data = out_tensor->data;
+	const float *in_data = (const float *)in_tensor->data;
+	float *out_data = (float *)out_tensor->data;
 	uint32_t i;
 
 	logmsg(nn,2,"relu execute. self=%p ",self);
@@ -74,8 +74,8 @@ static int reluX_execute(struct nn_node *self, struct nn_graph *nn)
 		* in_tensor->shape.width
 		* in_tensor->shape.depth;
 	size_t bytes = elements * sizeof(float);
-	const float *in_data = in_tensor->data;
-	float *out_data = out_tensor->data;
+	const float *in_data = (const float *)in_tensor->data;
+	float *out_data = (float *)out_tensor->data;
 	uint32_t i;
 	float max_val = tensor_get_float(max_val_tensor,0);
 
@@ -111,16 +111,16 @@ static int reluX_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Relu_f = {
-	.execute = relu_execute,
-	.check = relu_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	relu_execute,
+	relu_check,
+	node_alloc_common,
+	node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_ReluX_f = {
-	.execute = reluX_execute,
-	.check = reluX_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	reluX_execute,
+	reluX_check,
+	node_alloc_common,
+	node_free_common,
 };
 

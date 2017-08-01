@@ -35,9 +35,12 @@
 
 #ifndef NN_OP_NON_LIN_COMMON_H
 #define NN_OP_NON_LIN_COMMON_H
-
+#include <quantize.h>
 #define ALIGN_SIZE (128)
 #define MAXPAD     (2*ALIGN_SIZE)
+#define NUM_ELEM_WRD_VECTOR (ALIGN_SIZE/sizeof(int32_t))
+#define NUM_ELEM_HFW_VECTOR (ALIGN_SIZE/sizeof(int16_t))
+#define NUM_ELEM_BYT_VECTOR (ALIGN_SIZE/sizeof(uint8_t))
 static inline void *pad_and_align(void *ptr, unsigned long minsize)
 {
 	uintptr_t ptrval = (uintptr_t)(ptr);
@@ -48,48 +51,49 @@ static inline void *pad_and_align(void *ptr, unsigned long minsize)
 
 static inline void requant_u8u8_inplace(uint8_t *data, int numbytes, float in_min, float in_max, float out_min, float out_max)
 {
-	#define QUANTMAX_8BITVAR    (0x000000FFL)
+	#define QUANTMAX_8BITUNSIGN (0x000000FFL)
+	#define QUANTMAX_8BITSIGNED (0x0000007FL)
+	#define QUANTMIN_8BITSIGNED (0xFFFFFF80L)
 	#define QUANTSHIFT_16BITVAR (15)
 	float out_level_recip;
 	float in_level;
 	float limgain;
-	short gains;
 	int gain;
-	int offset;
 	int rval;
 	int lval;
+	int in_zero;
+	int out_zero;
 	int i;
 	
 	// compute with appropriate bitshift the gain and offset for requantization from input min-max to output min-max on data
-	out_level_recip = ((float)(QUANTMAX_8BITVAR) / (out_max - out_min));
-	in_level = ((in_max - in_min) / (float)(QUANTMAX_8BITVAR));
-	offset = (int)((in_min - out_min) / in_level);
+	in_zero = ((int)quantize_uint8(0.0f,in_min,in_max) & QUANTMAX_8BITUNSIGN);
+	out_zero = ((int)quantize_uint8(0.0f,out_min,out_max) & QUANTMAX_8BITUNSIGN);
+	out_level_recip = ((float)(QUANTMAX_8BITUNSIGN) / (out_max - out_min));
+	in_level = ((in_max - in_min) / (float)(QUANTMAX_8BITUNSIGN));
 	limgain = (float)(powf(2.0, QUANTSHIFT_16BITVAR));
 	gain = (int)(out_level_recip * in_level * limgain);
 	if (gain > (int)(limgain - 1)) {
-		gains = (short)(limgain - 1); 
-	} else {
-		gains = (short)(gain);
+		gain = (int)(limgain - 1);
 	}
 	
 	// apply with appropriate bitshift the gain and offset for requantization from input min-max to output min-max on data
 	for (i = 0; i < numbytes; i++) {
-		rval = ((int)data[i] & QUANTMAX_8BITVAR);
-		lval = (((rval + offset) * gains) + ((int)(limgain) / 2)) >> QUANTSHIFT_16BITVAR;
-		if (lval > QUANTMAX_8BITVAR) {
-			lval = QUANTMAX_8BITVAR; 
-		} else if (lval < 0) {
-			lval = 0;
+		rval = (((int)data[i] & QUANTMAX_8BITUNSIGN) - in_zero);
+		lval = ((rval * gain) + ((int)(limgain) / 2)) >> QUANTSHIFT_16BITVAR;
+		if (lval > (int)QUANTMAX_8BITSIGNED) {
+			lval = (int)QUANTMAX_8BITSIGNED;
+		} else if (lval < (int)QUANTMIN_8BITSIGNED) {
+			lval = (int)QUANTMIN_8BITSIGNED;
 		}
-		data[i] = (uint8_t)(lval & QUANTMAX_8BITVAR);
+		data[i] = (uint8_t)((lval + out_zero) & QUANTMAX_8BITUNSIGN);
 	}
 }
 
 static inline void dequant_u8(float *out, const uint8_t *in, int numbytes, float in_min, float in_max)
 {
-	#define QUANTMAX_8BITVAR    (0x000000FFL)
+	#define QUANTMAX_8BITUNSIGN (0x000000FFL)
 	float range = fmaxf(0.0001f,(in_max - in_min));
-	float stepsize = (range / (float)(QUANTMAX_8BITVAR));
+	float stepsize = (range / (float)(QUANTMAX_8BITUNSIGN));
 	int i;
 	
 	// apply dequantization
@@ -100,21 +104,21 @@ static inline void dequant_u8(float *out, const uint8_t *in, int numbytes, float
 
 static inline void quant_u8(uint8_t *out, const float *in, int numbytes, float out_min, float out_max)
 {
-	#define QUANTMAX_8BITVAR    (0x000000FFL)
+	#define QUANTMAX_8BITUNSIGN (0x000000FFL)
 	float range = fmaxf(0.0001f,(out_max - out_min));
-	float steprecip = ((float)(QUANTMAX_8BITVAR) / range);
+	float steprecip = ((float)(QUANTMAX_8BITUNSIGN) / range);
 	int lval;
 	int i;
 	
 	// apply quantization
 	for (i = 0; i < numbytes; i++) {
 		lval = roundf((in[i] - out_min) * steprecip);
-		if (lval > QUANTMAX_8BITVAR) {
-			lval = QUANTMAX_8BITVAR; 
+		if (lval > (int)QUANTMAX_8BITUNSIGN) {
+			lval = (int)QUANTMAX_8BITUNSIGN; 
 		} else if (lval < 0) {
 			lval = 0;
-		}		
-		out[i] = (uint8_t)(lval & QUANTMAX_8BITVAR);
+		}
+		out[i] = (uint8_t)(lval & QUANTMAX_8BITUNSIGN);
 	}
 }
 

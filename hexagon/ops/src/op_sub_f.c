@@ -40,14 +40,14 @@
 #include <math.h>
 #include <nn_broadcast.h>
 
-static inline float sub_helper(float a, float b)
+static inline float sub_helper(float a, float b, void *u)
 {
 	return a-b;
 }
 
 static int sub_f_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return broadcast_elementwise_execute_f(self,nn,sub_helper);
+	return broadcast_elementwise_execute_f(self,nn,sub_helper,NULL);
 }
 
 static int sub_f_check(struct nn_node *self, struct nn_graph *nn)
@@ -60,9 +60,9 @@ static int sub_f_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Sub_f = {
-	.execute = sub_f_execute,
-	.check = sub_f_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, sub_f_execute),
+	SFINIT(  .check, sub_f_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 

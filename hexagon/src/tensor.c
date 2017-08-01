@@ -50,7 +50,7 @@
 struct tensor *tensor_alloc(const struct shape *shape, size_t data_size)
 {
 	struct tensor *newtensor;
-	if ((newtensor = malloc(sizeof(*newtensor))) == NULL) {
+	if ((newtensor = (struct tensor *)malloc(sizeof(*newtensor))) == NULL) {
 		return NULL;
 	}
 	if (data_size) {
@@ -71,7 +71,7 @@ struct tensor *tensor_alloc(const struct shape *shape, size_t data_size)
 struct tensor *tensor_dup(const struct tensor *src)
 {
 	struct tensor *dst;
-	if ((dst = tensor_alloc(&src->shape,src->data_size)) == NULL) {
+	if ((dst = (struct tensor *)tensor_alloc(&src->shape,src->data_size)) == NULL) {
 		return NULL;
 	}
 	memcpy(dst->data,src->data,src->data_size);

@@ -58,33 +58,77 @@ static int strided_slice_impl(
 	int h_in = input_tensor->shape.height;
 	int w_in = input_tensor->shape.width;
 	int d_in = input_tensor->shape.depth;
-	int32_t start = tensor_get_int32(start_tensor,0);
-	int32_t stop = tensor_get_int32(stop_tensor,0);
-	int32_t step = tensor_get_int32(step_tensor,0);
-	int32_t out_elements = (stop - start + (step-1))/step;
-	const char *in = input_tensor->data;
-	char *out = out_tensor->data;
+	const char *in = (const char *)input_tensor->data;
+	char *out = (char *)out_tensor->data;
+	int32_t order = start_tensor->shape.depth;
+	int b_start = (order < 4) ? 0 : tensor_get_int32(start_tensor,order-4);
+	int h_start = (order < 3) ? 0 : tensor_get_int32(start_tensor,order-3);
+	int w_start = (order < 2) ? 0 : tensor_get_int32(start_tensor,order-2);
+	int d_start = (order < 1) ? 0 : tensor_get_int32(start_tensor,order-1);
+	int b_stop = (order < 4) ? b_in : tensor_get_int32(stop_tensor,order-4);
+	int h_stop = (order < 3) ? h_in : tensor_get_int32(stop_tensor,order-3);
+	int w_stop = (order < 2) ? w_in : tensor_get_int32(stop_tensor,order-2);
+	int d_stop = (order < 1) ? d_in : tensor_get_int32(stop_tensor,order-1);
+	int b_step = (order < 4) ? 1 : tensor_get_int32(step_tensor,order-4);
+	int h_step = (order < 3) ? 1 : tensor_get_int32(step_tensor,order-3);
+	int w_step = (order < 2) ? 1 : tensor_get_int32(step_tensor,order-2);
+	int d_step = (order < 1) ? 1 : tensor_get_int32(step_tensor,order-1);
+
+	int b_out = (b_stop - b_start + b_step - 1) / (b_step);
+	int h_out = (h_stop - h_start + h_step - 1) / (h_step);
+	int w_out = (w_stop - w_start + w_step - 1) / (w_step);
+	int d_out = (d_stop - d_start + d_step - 1) / (d_step);
+
+	int out_elements = b_out*h_out*w_out*d_out;
 	uint32_t total_bytes = out_elements * element_size;
-	int i,j;
-	int32_t out_off,in_off;
+	int b,h,w,d;
+	int offset;
 
-	if (total_bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	if (b_in > 1) return errlog(nn,"strided slice: Only 1D for now.");
-	if (h_in > 1) return errlog(nn,"strided slice: Only 1D for now.");
-	if (w_in > 1) return errlog(nn,"strided slice: Only 1D for now.");
-	if (d_in <= start) return errlog(nn,"bad start");
-	if (d_in < stop) return errlog(nn,"bad stop");
+	if (b_stop == 0) b_stop = b_in;
+	if (w_stop == 0) w_stop = w_in;
+	if (h_stop == 0) h_stop = h_in;
+	if (d_stop == 0) d_stop = d_in;
 
-	logmsg(nn,2,"slice node %p execute %d,%d,%d",
-		self,(int)start,(int)stop,(int)step);
+	logmsg(nn,2,"start_tensor: %d %d %d %d stop: %d %d %d %d step: %d %d %d %d",
+		tensor_get_int32(start_tensor,0),
+		tensor_get_int32(start_tensor,1),
+		tensor_get_int32(start_tensor,2),
+		tensor_get_int32(start_tensor,3),
+		tensor_get_int32(stop_tensor,0),
+		tensor_get_int32(stop_tensor,1),
+		tensor_get_int32(stop_tensor,2),
+		tensor_get_int32(stop_tensor,3),
+		tensor_get_int32(step_tensor,0),
+		tensor_get_int32(step_tensor,1),
+		tensor_get_int32(step_tensor,2),
+		tensor_get_int32(step_tensor,3));
+	logmsg(nn,2,"slice node %p execute order=%d in=%dx%dx%dx%d start=%dx%dx%dx%d stop=%dx%dx%dx%d step=%dx%dx%dx%d out=%dx%dx%dx%d", 
+		self,order,
+		b_in,h_in,w_in,d_in,
+		b_start,h_start,w_start,d_start,
+		b_stop,h_stop,w_stop,d_stop,
+		b_step,h_step,w_step,d_step,
+		b_out,h_out,w_out,d_out);
+	if (total_bytes > out_tensor->max_size) {
+		return errlog(nn,"out too small, %d > %d",total_bytes,out_tensor->max_size);
+	}
 
-	tensor_set_shape(out_tensor,1,1,1,out_elements);
+	tensor_set_shape(out_tensor,b_out,h_out,w_out,d_out);
 	out_tensor->data_size = total_bytes;
 
-	for (i = start, j = 0; j < out_elements; j++, i += step) {
-		in_off = i*element_size;
-		out_off = j*element_size;
-		memcpy(out+out_off,in+in_off,element_size);
+	for (b = b_start; b < b_stop; b += b_step) {
+		for (h = h_start; h < h_stop; h += h_step) {
+			for (w = w_start; w < w_stop; w += w_step) {
+				for (d = d_start; d < d_stop; d += d_step) {
+					offset = element_size*(b*h_in*w_in*d_in 
+						+ h*w_in*d_in
+						+ w*d_in
+						+ d);
+					memcpy(out,in+offset,element_size);
+					out += element_size;
+				}
+			}
+		}
 	}
 
 	return 0;
@@ -125,32 +169,29 @@ static int sslice_check_q8(struct nn_node *self, struct nn_graph *nn)
 
 
 struct nn_node_ops nn_ops_for_StridedSlice_f = {
-	.execute = sslice_execute_4b,
-	.check = sslice_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, sslice_execute_4b),
+	SFINIT(  .check, sslice_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_StridedSlice_int32 = {
-	.execute = sslice_execute_4b,
-	.check = sslice_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, sslice_execute_4b),
+	SFINIT(  .check, sslice_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_StridedSlice_uint8 = {
-	.execute = sslice_execute_1b,
-	.check = sslice_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, sslice_execute_1b),
+	SFINIT(  .check, sslice_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedStridedSlice_8 = {
-	.execute = sslice_execute_q8,
-	.check = sslice_check_q8,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, sslice_execute_q8),
+	SFINIT(  .check, sslice_check_q8),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
-
-
-

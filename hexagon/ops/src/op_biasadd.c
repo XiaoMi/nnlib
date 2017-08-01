@@ -70,9 +70,9 @@ static int biasadd_8p8to32_execute(struct nn_node *self, struct nn_graph *nn)
 
 	int32_t stripe;
 
-	uint8_t *in = in_tensor->data;
-	uint8_t *bias = bias_tensor->data;
-	int32_t *out = out_tensor->data;
+	uint8_t *in = (uint8_t *)in_tensor->data;
+	uint8_t *bias = (uint8_t *)bias_tensor->data;
+	int32_t *out = (int32_t *)out_tensor->data;
 
 	int32_t i;
 
@@ -107,7 +107,7 @@ static int biasadd_8p8to32_execute(struct nn_node *self, struct nn_graph *nn)
 	}
 
 	logmsg(nn,2,"biasadd execute. self=%p ",self);
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
+	if (bytes > out_tensor->max_size) return errlog(nn,"out too small: %d > %d (id=%x)",bytes,out_tensor->max_size,self->node_id);
 	tensor_set_shape(out_tensor,batches,height,width,depth);
 	out_tensor->data_size = bytes;
 
@@ -129,7 +129,7 @@ static int biasadd_8p8to32_execute(struct nn_node *self, struct nn_graph *nn)
 	out_max = fmaxf(out_max,fmaxf(fabsf(bias_min_float),bias_max_float));
 	out_max *= (1 << 17);
 	out_min = -out_max;
-	out_level_size = (out_max - out_min) / 0x1.0p32f;
+	out_level_size = (out_max - out_min) / 4294967296.0f/*0x1.0p32f*/;
 
 	in_sub_amt = quantize_uint8(0.0f,in_min_float,in_max_float);
 	bias_sub_amt = quantize_uint(0.0f,bias_min_float,bias_max_float);
@@ -154,7 +154,7 @@ static int biasadd_8p8to32_execute(struct nn_node *self, struct nn_graph *nn)
 
 	for (stripe = 0; stripe < width*height*batches; stripe++) {
 		for (i = 0; i < depth; i++) {
-			out[i] = round( ((in[i] - in_sub_amt) * in_mpy_amt) + (((int32_t)bias[i] - bias_sub_amt) * bias_mpy_amt));
+			out[i] = (0.5f + ((in[i] - in_sub_amt) * in_mpy_amt) + (((int32_t)bias[i] - bias_sub_amt) * bias_mpy_amt));
 			//indata = round((in[i] - in_sub_amt) * in_mpy_amt);
 			//biasdata = round((bias[i] - bias_sub_amt) * bias_mpy_amt);
 			//outdata = indata + biasdata;
@@ -194,17 +194,17 @@ static int biasadd_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_QuantizedBiasAdd_8p8to32 = {
-	.execute = biasadd_8p8to32_execute,
-	.check = biasadd_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, biasadd_8p8to32_execute),
+	SFINIT(  .check, biasadd_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedBiasAdd_8p8to32_ref = {
-	.execute = biasadd_8p8to32_execute,
-	.check = biasadd_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, biasadd_8p8to32_execute),
+	SFINIT(  .check, biasadd_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 

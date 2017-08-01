@@ -61,7 +61,7 @@ static int transpose_execute(struct nn_node *self, struct nn_graph *nn)
 	int idx;
 	int nd_idx;
 	int32_t val;
-	int32_t *out_data = out_tensor->data;
+	int32_t *out_data = (int32_t *)out_tensor->data;
 
 	logmsg(nn,2,"transpose execute. self=%p ",self);
 	logmsg(nn,3,"transpose input = %dx%dx%dx%d",
@@ -161,16 +161,16 @@ static int transpose_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Transpose_int32 = {
-	.execute = transpose_execute,
-	.check = transpose_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, transpose_execute),
+	SFINIT(  .check, transpose_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_Transpose_f = {
-	.execute = transpose_execute,
-	.check = transpose_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, transpose_execute),
+	SFINIT(.check, transpose_check),
+	SFINIT(.ctor, node_alloc_common),
+	SFINIT(.dtor, node_free_common),
 };
 

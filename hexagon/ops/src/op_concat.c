@@ -74,8 +74,8 @@ struct tdata {
 
 static void concat_execute_slice_ref(struct nn_graph *nn, void *vinfo)
 {
-	struct tdata *info = vinfo;
-	struct nn_node *self = info->self;
+	struct tdata *info = (struct tdata *)vinfo;
+	struct nn_node *self = (struct nn_node *)info->self;
 	int whoami = info->whoami;
 	int n_input_tensors = (self->n_inputs-1)/3;
 	const struct tensor **input_tensors = &self->inputs[1];
@@ -83,7 +83,7 @@ static void concat_execute_slice_ref(struct nn_graph *nn, void *vinfo)
 	const struct tensor **max_tensors = &self->inputs[1+2*n_input_tensors];
 	const struct tensor *t;
 	struct tensor *out_tensor = self->outputs[0];
-	uint8_t *out_data = out_tensor->data;
+	uint8_t *out_data = (uint8_t *)out_tensor->data;
 	uint32_t i;
 	float in_min;
 	float in_max; 
@@ -148,8 +148,8 @@ static void concat_execute_slice_ref(struct nn_graph *nn, void *vinfo)
 
 static void concat_execute_slice_asm(struct nn_graph *nn, void *vinfo)
 {
-	struct tdata *info = vinfo;
-	struct nn_node *self = info->self;
+	struct tdata *info = (struct tdata *)vinfo;
+	struct nn_node *self = (struct nn_node *)info->self;
 	int whoami = info->whoami;
 	int n_input_tensors = (self->n_inputs-1)/3;
 	const struct tensor **input_tensors = &self->inputs[1];
@@ -157,7 +157,7 @@ static void concat_execute_slice_asm(struct nn_graph *nn, void *vinfo)
 	const struct tensor **max_tensors = &self->inputs[1+2*n_input_tensors];
 	const struct tensor *t;
 	struct tensor *out_tensor = self->outputs[0];
-	uint8_t *out_data = out_tensor->data;
+	uint8_t *out_data = (uint8_t *)out_tensor->data;
 	uint32_t i;
 	float in_min;
 	float in_max; 
@@ -179,7 +179,7 @@ static void concat_execute_slice_asm(struct nn_graph *nn, void *vinfo)
 	for (i = 0; i < n_input_tensors; i++) {
 		t = input_tensors[i];
 		out = out_data;
-		in = t->data;
+		in = (const uint8_t *)t->data;
 		if ((i & 1) != whoami) {
 			out_data += t->shape.depth;
 			continue;
@@ -193,7 +193,7 @@ static void concat_execute_slice_asm(struct nn_graph *nn, void *vinfo)
 		iters = t->shape.width * t->shape.height * t->shape.batches;
 		l2fetch((void*)in, t->shape.depth, t->shape.depth, iters); 
 		offset = (int) ((in_min-out_min)/in_level);
-		gain = (int) (out_level_recip*in_level*0x1.0p15f);
+		gain = (int) (out_level_recip*in_level*32768.0f/*0x1.0p15f*/);
 		if (gain > 32767) {
 			gains  = 32767; 
 		} else {
@@ -303,17 +303,17 @@ static int concat_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_QuantizedConcat_8 = {
-	.execute = concat_execute_asm,
-	.check = concat_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, concat_execute_asm),
+	SFINIT(  .check, concat_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 
 struct nn_node_ops nn_ops_for_QuantizedConcat_8_ref = {
-	.execute = concat_execute_ref,
-	.check = concat_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, concat_execute_ref),
+	SFINIT(  .check, concat_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 

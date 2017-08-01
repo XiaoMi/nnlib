@@ -57,7 +57,7 @@ static int NAME(struct nn_node *self, struct nn_graph *nn)\
 	uint32_t in_width = in_tensor->shape.width;\
 	uint32_t in_depth = in_tensor->shape.depth;\
 	uint32_t w,x,y,z;\
-	TYPE *in_data = in_tensor->data;\
+	TYPE *in_data = (TYPE *)in_tensor->data;\
 	logmsg(nn,2,"pprinting node %p id %x",self,self->node_id); \
 	logmsg(nn,1,"bhwd = %d,%d,%d,%d",\
 		in_batches,in_height,in_width,in_depth); \
@@ -83,23 +83,23 @@ static int pprint_check(struct nn_node *self, struct nn_graph *nn)
 
 
 struct nn_node_ops nn_ops_for_PPrint_8 = {
-	.execute = pprint_8_execute,
-	.check = pprint_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, pprint_8_execute),
+	SFINIT(  .check, pprint_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_PPrint_32 = {
-	.execute = pprint_32_execute,
-	.check = pprint_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, pprint_32_execute),
+	SFINIT(  .check, pprint_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_PPrint_f = {
-	.execute = pprint_f_execute,
-	.check = pprint_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, pprint_f_execute),
+	SFINIT(  .check, pprint_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 

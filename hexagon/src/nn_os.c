@@ -58,7 +58,7 @@ struct tinfo {
 
 static void *nn_os_worker(void *vinfo)
 {
-	struct tinfo *info = vinfo;
+	struct tinfo *info = (struct tinfo *)vinfo;
 	struct nn_graph *nn = info->nn;
 	nn_pipe_t *pipe = info->pipe;
 	union workitem work;
@@ -70,16 +70,6 @@ static void *nn_os_worker(void *vinfo)
 		work.f(nn,work.arg);
 	}
 	return NULL;
-}
-
-void nn_os_workers_kill(struct nn_graph *nn)
-{
-	int i;
-	for (i = 0; i < (NUM_VECTOR_THREADS-1); i++) {
-		nn_os_work_for_vector(nn,NULL,NULL);
-	}
-	nn_os_work_for_scalar(nn,NULL,NULL);
-	nn_os_work_for_scalar(nn,NULL,NULL);
 }
 
 void nn_os_work_for_vector(struct nn_graph *nn, void (*f)(struct nn_graph *, void *),void *arg)
@@ -141,7 +131,8 @@ static void __attribute__((unused)) qurt_worker(void *p)
 
 int nn_os_vector_acquire()
 {
-	if (dspCV_hvx_lock(DSPCV_HVX_MODE_128B, 0) < 0) {
+	int wait_for_context = 1;
+	if (dspCV_hvx_lock(DSPCV_HVX_MODE_128B, wait_for_context) < 0) {
 		return 0;
 	}
 	return 0;
@@ -154,11 +145,19 @@ void nn_os_vector_release(int idx)
 
 int nn_os_workers_spawn(struct nn_graph *nn)
 {
-	qurt_thread_t ids[NUM_VECTOR_THREADS+2];
+	qurt_thread_t *worker_ids;
 	struct tinfo info;
 	qurt_thread_attr_t attrs[NUM_VECTOR_THREADS+2];
 	qurt_pipe_attr_t pattr;
 	int i;
+
+	if (nn->os_opaque != NULL) {
+		return errlog(nn,"OS workers already spawned?");
+	}
+	if ((worker_ids = malloc(sizeof(*worker_ids)*(2+NUM_VECTOR_THREADS))) == NULL) {
+		return errlog(nn,"OS malloc fail");
+	}
+	nn->os_opaque = worker_ids;
 
 	nn_sem_init(&info.sem,0);
 	info.nn = nn;
@@ -182,10 +181,29 @@ int nn_os_workers_spawn(struct nn_graph *nn)
 		qurt_thread_attr_set_priority(a, QURT_THREAD_ATTR_PRIORITY_DEFAULT/2+i);
 		if (i < NUM_VECTOR_THREADS) info.pipe = nn->vec_work;
 		else info.pipe = nn->nonvec_work;
-		qurt_thread_create(&ids[i],a,qurt_worker,&info);
+		qurt_thread_create(&worker_ids[i],a,qurt_worker,&info);
 		nn_sem_wait(&info.sem);
 	}
 	return 0;
+}
+
+void nn_os_workers_kill(struct nn_graph *nn)
+{
+	int i;
+	int status;
+	qurt_thread_t *worker_ids = nn->os_opaque;
+	if (worker_ids == NULL) {
+		errlog(nn,"OS workers already killed?");
+		return;
+	}
+	for (i = 0; i < (NUM_VECTOR_THREADS); i++) {
+		nn_os_work_for_vector(nn,NULL,NULL);
+	}
+	nn_os_work_for_scalar(nn,NULL,NULL);
+	nn_os_work_for_scalar(nn,NULL,NULL);
+	for (i = 1; i < (NUM_VECTOR_THREADS+2); i++) {
+		qurt_thread_join(worker_ids[i],&status);
+	}
 }
 
 void nn_os_hvx_power_on(struct nn_graph *nn)
@@ -213,7 +231,7 @@ unsigned long long int nn_os_get_perfcount(struct nn_graph *nn) {
 	hi = qurt_pmu_get(QURT_PMUCNT1);
 	ret = hi;
 	ret <<= 32;
-	ret |= lo;
+	ret |= (unsigned long long int) lo;
 	return ret;
 }
 
@@ -228,7 +246,7 @@ nn_sem_t worker_go_sem;
 
 static void __attribute__((unused)) worker_acquire(struct nn_graph *nn, void *vptr)
 {
-	int *ptr = vptr;
+	int *ptr = (int *)vptr;
 	*ptr = nn_os_vector_acquire();
 	nn_sem_post(&worker_acquired_sem);
 	nn_sem_wait(&worker_go_sem);
@@ -236,7 +254,7 @@ static void __attribute__((unused)) worker_acquire(struct nn_graph *nn, void *vp
 
 static void __attribute__((unused)) worker_release(struct nn_graph *nn, void *vptr)
 {
-	int *ptr = vptr;
+	int *ptr = (int *)vptr;
 	nn_os_vector_release(*ptr);
 	nn_sem_post(&worker_acquired_sem);
 	nn_sem_wait(&worker_go_sem);
@@ -280,9 +298,17 @@ int nn_os_workers_spawn(struct nn_graph *nn)
 	pthread_attr_t attrs;
 	pthread_attr_init(&attrs);
 	pthread_attr_setstacksize(&attrs,8192);
-	pthread_attr_setdetachstate(&attrs,1);
+	pthread_t *worker_ids;
+	//pthread_attr_setdetachstate(&attrs,1);
 	struct tinfo info;
 	int i;
+	if (nn->os_opaque != NULL) {
+		return errlog(nn,"OS workers already spawned?");
+	}
+	if ((worker_ids = malloc(sizeof(*worker_ids)*(2+NUM_VECTOR_THREADS-1))) == NULL) {
+		return errlog(nn,"OS malloc fail");
+	}
+	nn->os_opaque = worker_ids;
 
 	nn->vec_work = nn_pipe_alloc(nn, 128);
 	nn->nonvec_work = nn_pipe_alloc(nn, 128);
@@ -297,14 +323,38 @@ int nn_os_workers_spawn(struct nn_graph *nn)
 	info.pipe = nn->vec_work;
 	for (i = 0; i < (NUM_VECTOR_THREADS-1); i++) {
 		pthread_create(&vec,&attrs,nn_os_worker,&info);
+		worker_ids[2+i] = vec;
 		nn_sem_wait(&info.sem);
 	}
 	/* create scalar */
 	info.pipe = nn->nonvec_work;
 	pthread_create(&scal1,&attrs,nn_os_worker,&info);
+	worker_ids[0] = scal1;
 	nn_sem_wait(&info.sem);
 	pthread_create(&scal2,&attrs,nn_os_worker,&info);
+	worker_ids[1] = scal2;
 	nn_sem_wait(&info.sem);
+
 	return 0;
 }
+
+void nn_os_workers_kill(struct nn_graph *nn)
+{
+	int i;
+	pthread_t *worker_ids = nn->os_opaque;
+	if (worker_ids == NULL) {
+		errlog(nn,"OS workers already killed?");
+		return;
+	}
+	for (i = 0; i < (NUM_VECTOR_THREADS-1); i++) {
+		nn_os_work_for_vector(nn,NULL,NULL);
+		pthread_join(worker_ids[2+i],NULL);
+	}
+	nn_os_work_for_scalar(nn,NULL,NULL);
+	nn_os_work_for_scalar(nn,NULL,NULL);
+	pthread_join(worker_ids[0],NULL);
+	pthread_join(worker_ids[1],NULL);
+}
+
+
 #endif

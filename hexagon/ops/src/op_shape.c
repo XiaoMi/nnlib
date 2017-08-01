@@ -70,9 +70,9 @@ static int shape_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Shape_int32 = {
-	.execute = shape_execute,
-	.check = shape_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, shape_execute),
+	SFINIT(  .check, shape_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 

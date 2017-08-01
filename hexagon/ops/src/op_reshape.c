@@ -113,16 +113,16 @@ static int qreshape_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Reshape = {
-	.execute = reshape_execute,
-	.check = reshape_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, reshape_execute),
+	SFINIT(  .check, reshape_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedReshape = {
-	.execute = reshape_execute,
-	.check = qreshape_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, reshape_execute),
+	SFINIT(  .check, qreshape_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 

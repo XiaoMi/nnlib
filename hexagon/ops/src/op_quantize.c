@@ -64,14 +64,14 @@ static int quantize_execute(struct nn_node *self, struct nn_graph *nn)
 	float height = in_tensor->shape.height;
 	float width = in_tensor->shape.width;
 	float depth = in_tensor->shape.depth;
-	const float *in = in_tensor->data;
-	uint8_t *out = out_tensor->data;
+	const float *in = (const float *)in_tensor->data;
+	uint8_t *out = (uint8_t *)out_tensor->data;
 	int out_bytes = batches*height*width*depth;
 	float inval;
 	int i;
 	int ival;
 	logmsg(nn,2,"quantize execute. self=%p ",self);
-	if (out_tensor->max_size < out_bytes) return errlog(nn,"out too small");
+	if (out_tensor->max_size < out_bytes) return errlog(nn,"out too small %d < %d",out_tensor->max_size,out_bytes);
 	tensor_set_shape(out_tensor,batches,height,width,depth);
 	out_tensor->data_size = out_bytes;
 	quantize_adjust_range(
@@ -81,7 +81,61 @@ static int quantize_execute(struct nn_node *self, struct nn_graph *nn)
 
 	for (i = 0; i < batches*height*width*depth; i++) {
 		inval = in[i];
-		ival = roundf((inval - min_out)*recip_stepsize);
+		ival = ((inval - min_out)*recip_stepsize+0.5f);
+		if (ival < 0) ival = 0;
+		if (ival > 255) ival = 255;
+		out[i] = ival;
+	}
+
+	tensor_set_shape(out_min_tensor,1,1,1,1);
+	tensor_set_shape(out_max_tensor,1,1,1,1);
+	tensor_set_float(out_min_tensor,0,min_out);
+	tensor_set_float(out_max_tensor,0,max_out);
+	out_min_tensor->data_size = sizeof(float);
+	out_max_tensor->data_size = sizeof(float);
+	return 0;
+}
+
+static int autoquantize_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	const struct tensor *in_tensor = self->inputs[0];
+	struct tensor *out_tensor = self->outputs[0];
+	struct tensor *out_min_tensor = self->outputs[1];
+	struct tensor *out_max_tensor = self->outputs[2];
+	float min_in = 0.0f;
+	float max_in = 0.0f;
+	float recip_stepsize;
+	float min_out;
+	float max_out;
+	float stepsize;
+	int batches = in_tensor->shape.batches;
+	int height = in_tensor->shape.height;
+	int width = in_tensor->shape.width;
+	int depth = in_tensor->shape.depth;
+	const float *in = (const float *)in_tensor->data;
+	uint8_t *out = (uint8_t *)out_tensor->data;
+	int out_bytes = batches*height*width*depth;
+	float inval;
+	int i;
+	int ival;
+	logmsg(nn,2,"autoquantize execute. self=%p ",self);
+	if (out_tensor->max_size < out_bytes) return errlog(nn,"out too small %d < %d",out_tensor->max_size,out_bytes);
+	tensor_set_shape(out_tensor,batches,height,width,depth);
+	out_tensor->data_size = out_bytes;
+
+	for (i = 0; i < batches*height*width*depth; i++) {
+		min_in = fminf(min_in,in[i]);
+		max_in = fmaxf(max_in,in[i]);
+	}
+	logmsg(nn,2,"min=%f max=%f bhwd=%d,%d,%d,%d",min_in,max_in,batches,height,width,depth);
+	quantize_adjust_range(
+		&min_out,&max_out,
+		&stepsize,&recip_stepsize,
+		min_in,max_in);
+
+	for (i = 0; i < batches*height*width*depth; i++) {
+		inval = in[i];
+		ival = ((inval - min_out)*recip_stepsize+0.5f);
 		if (ival < 0) ival = 0;
 		if (ival > 255) ival = 255;
 		out[i] = ival;
@@ -110,8 +164,8 @@ static int dequantize_execute(struct nn_node *self, struct nn_graph *nn)
 	float height = in_tensor->shape.height;
 	float width = in_tensor->shape.width;
 	float depth = in_tensor->shape.depth;
-	const uint8_t *in = in_tensor->data;
-	float *out = out_tensor->data;
+	const uint8_t *in = (uint8_t *)in_tensor->data;
+	float *out = (float *)out_tensor->data;
 	int out_bytes = batches*height*width*depth*sizeof(float);
 	int i;
 	logmsg(nn,2,"dequantize execute. self=%p ",self);
@@ -133,13 +187,13 @@ static int dequantize_i32_execute(struct nn_node *self, struct nn_graph *nn)
 	float minval = tensor_get_float(min_tensor,0);
 	float maxval = tensor_get_float(max_tensor,0);
 	float range = fmaxf(0.0001f,maxval-minval);
-	float stepsize = range/0x1.0p32f;
+	float stepsize = range/4294967296.0f/*0x1.0p32f*/;
 	float batches = in_tensor->shape.batches;
 	float height = in_tensor->shape.height;
 	float width = in_tensor->shape.width;
 	float depth = in_tensor->shape.depth;
-	const int32_t *in = in_tensor->data;
-	float *out = out_tensor->data;
+	const int32_t *in = (const int32_t *)in_tensor->data;
+	float *out = (float *)out_tensor->data;
 	int out_bytes = batches*height*width*depth*sizeof(float);
 	int i;
 	logmsg(nn,2,"dequantize 32 execute.");
@@ -162,6 +216,15 @@ static int quantize_check(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
+static int autoquantize_check(struct nn_node *self, struct nn_graph *nn)
+{
+	logmsg(nn,2,"Checking quantize node %p",self);
+	if (self->n_inputs != 1) return errlog(nn,"wrong # inputs");
+	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
+	logmsg(nn,2,"quantize node %p OK",self);
+	return 0;
+}
+
 static int dequantize_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking dequantize node %p",self);
@@ -172,36 +235,50 @@ static int dequantize_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Quantize = {
-	.execute = quantize_execute,
-	.check = quantize_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, quantize_execute),
+	SFINIT(  .check, quantize_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_Quantize_ref = {
-	.execute = quantize_execute,
-	.check = quantize_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, quantize_execute),
+	SFINIT(  .check, quantize_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
+};
+
+struct nn_node_ops nn_ops_for_AutoQuantize = {
+	SFINIT(.execute, autoquantize_execute),
+	SFINIT(  .check, autoquantize_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
+};
+
+struct nn_node_ops nn_ops_for_AutoQuantize_ref = {
+	SFINIT(.execute, autoquantize_execute),
+	SFINIT(  .check, autoquantize_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_Dequantize = {
-	.execute = dequantize_execute,
-	.check = dequantize_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, dequantize_execute),
+	SFINIT(  .check, dequantize_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_Dequantize_ref = {
-	.execute = dequantize_execute,
-	.check = dequantize_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, dequantize_execute),
+	SFINIT(  .check, dequantize_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_Dequantize_qint32_f = {
-	.execute = dequantize_i32_execute,
-	.check = dequantize_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, dequantize_i32_execute),
+	SFINIT(  .check, dequantize_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };

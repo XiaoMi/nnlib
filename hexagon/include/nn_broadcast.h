@@ -87,15 +87,16 @@ static inline int output_dim(int a, int b)
  * is the simplest I could think of.
  */
 
-#define CREATE_ELEMENTWISE_INLINE(NAME,TYPE) \
+#define CREATE_ELEMENTWISE_INLINE(NAME,INTYPE,OUTTYPE) \
 static inline int NAME( \
 	struct nn_node *self, \
 	struct nn_graph *nn, \
-	TYPE (*f)(TYPE, TYPE)) \
+	OUTTYPE (*f)(INTYPE, INTYPE, void *), \
+	void *opaque) \
 { \
-	const struct tensor *a_tensor = self->inputs[0]; \
-	const struct tensor *b_tensor = self->inputs[1]; \
-	struct tensor *out_tensor = self->outputs[0]; \
+	const struct tensor *a_tensor = (const struct tensor *)self->inputs[0]; \
+	const struct tensor *b_tensor = (const struct tensor *)self->inputs[1]; \
+	struct tensor *out_tensor = (struct tensor *)self->outputs[0]; \
 	int32_t ab = a_tensor->shape.batches; \
 	int32_t ah = a_tensor->shape.height; \
 	int32_t aw = a_tensor->shape.width; \
@@ -109,7 +110,7 @@ static inline int NAME( \
 	int32_t ow = output_dim(aw,bw); \
 	int32_t od = output_dim(ad,bd); \
 	size_t elements = ob*ow*oh*od; \
-	size_t bytes = elements * sizeof(TYPE); \
+	size_t bytes = elements * sizeof(OUTTYPE); \
 	/* \
 	 * Need to precompute strides for BHWD \
 	 * If broadcasting, stride == 0 \
@@ -123,20 +124,19 @@ static inline int NAME( \
 	int32_t bhstride = (bh == 1) ? 0 : (bd*bw); \
 	int32_t abstride = (ab == 1) ? 0 : (ad*aw*ah); \
 	int32_t bbstride = (bb == 1) ? 0 : (bd*bw*bh); \
-	const TYPE *a_data = a_tensor->data; \
-	const TYPE *b_data = b_tensor->data; \
-	TYPE *out_data = out_tensor->data; \
+	const INTYPE *a_data = (const INTYPE *)a_tensor->data; \
+	const INTYPE *b_data = (const INTYPE *)b_tensor->data; \
+	OUTTYPE *out_data = (OUTTYPE *)out_tensor->data; \
 	int32_t b,w,h,d; \
-	const TYPE *abstart; \
-	const TYPE *bbstart; \
-	const TYPE *ahstart; \
-	const TYPE *bhstart; \
-	const TYPE *aptr; \
-	const TYPE *bptr; \
-	TYPE aval; \
-	TYPE bval; \
+	const INTYPE *abstart; \
+	const INTYPE *bbstart; \
+	const INTYPE *ahstart; \
+	const INTYPE *bhstart; \
+	const INTYPE *aptr; \
+	const INTYPE *bptr; \
+	INTYPE aval; \
+	INTYPE bval; \
 	logmsg(nn,2,"elementwise execute. self=%p ",self); \
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small"); \
 	if (!are_dims_compatible(a_tensor->shape,b_tensor->shape)) { \
 		return errlog(nn,"incompatible shapes (%dx%dx%dx%d) (%dx%dx%dx%d)", \
 			a_tensor->shape.batches, \
@@ -158,6 +158,7 @@ static inline int NAME( \
 			b_tensor->shape.width, \
 			b_tensor->shape.depth, \
 			ob,oh,ow,od); \
+	if (bytes > out_tensor->max_size) return errlog(nn,"out too small (id=%x): %d > %d",self->node_id,bytes,out_tensor->max_size); \
 	tensor_set_shape(out_tensor,ob,oh,ow,od); \
 	out_tensor->data_size = bytes; \
 	for (b = 0; b < ob; b++) { \
@@ -173,7 +174,7 @@ static inline int NAME( \
 					aval = *aptr; \
 					bval = *bptr; \
 					/* FUNCTION */ \
-					*out_data++ = f(aval,bval); \
+					*out_data++ = f(aval,bval,opaque); \
 					/* END FUNCTION */ \
 					aptr += adstride; \
 					bptr += bdstride; \
@@ -185,10 +186,146 @@ static inline int NAME( \
 	return 0; \
 }
 
-CREATE_ELEMENTWISE_INLINE(broadcast_elementwise_execute_f,float)
-CREATE_ELEMENTWISE_INLINE(broadcast_elementwise_execute_int32,int32_t)
+CREATE_ELEMENTWISE_INLINE(broadcast_elementwise_execute_f,float,float)
+CREATE_ELEMENTWISE_INLINE(broadcast_elementwise_execute_int32,int32_t,int32_t)
+CREATE_ELEMENTWISE_INLINE(broadcast_elementwise_execute_qint32_quint8,uint8_t,int32_t)
+CREATE_ELEMENTWISE_INLINE(broadcast_elementwise_execute_quint8,uint8_t,uint8_t)
 
 #undef CREATE_ELEMENTWISE_INLINE
+
+#define ABPAD 128
+#define ALIGN_SIZE 128
+static inline void *pad_and_align(void *ptr, unsigned long minsize)
+{
+	uintptr_t ptrval = (uintptr_t)(ptr);
+	ptrval += minsize + (ALIGN_SIZE-1);
+	ptrval &= ~(ALIGN_SIZE-1);
+	return (void *)ptrval;
+}
+
+struct hvx_info {
+	uint8_t *a_data_pad;
+	uint8_t *b_data_pad;
+	int a_const_value;
+	int b_const_value;
+	int elements;
+};
+
+/* Look for patterns to use HVX intrinsics version of the code and broadcast/prepare the data */
+static inline int check_prepare_hvx_opt(
+		struct nn_graph *nn,
+		const struct tensor *a_tensor,
+		const struct tensor *b_tensor,
+		struct tensor *out_tensor,
+		const uint8_t *a_data,
+		const uint8_t *b_data,
+		struct hvx_info *opt_info) {
+
+	uint32_t ab, ah, aw, ad;
+	uint32_t bb, bh, bw, bd;
+	int opt_flag=0;
+	uint8_t *a_data_pad = NULL;
+	uint8_t *b_data_pad = NULL;
+	int elements, bhw, i;
+	int a_const_value = 0;
+	int b_const_value = 0;
+
+	tensor_get_shape(a_tensor,&ab,&ah,&aw,&ad);
+	tensor_get_shape(b_tensor,&bb,&bh,&bw,&bd);
+	//t2 =  nn_os_get_cycles(nn);
+
+	/* One of the operands is scalar */
+	if((ab==1)&&(ah==1)&&(aw==1)&&(ad==1))	{
+		elements = bb*bh*bw*bd;
+
+		b_data_pad = (uint8_t *)b_data;// since b_data is already aligned to 128, no need to create padded buffer
+		a_data_pad = (uint8_t *)nn->scratch;
+
+		tensor_set_shape(out_tensor,bb,bh,bw,bd);
+
+		opt_flag = 1;
+		a_const_value = a_data[0];
+	}
+	else if((bb==1)&&(bh==1)&&(bw==1)&&(bd==1))	{
+		elements = ab*ah*aw*ad;
+
+		a_data_pad = (uint8_t *)a_data;// since a_data is already aligned to 128, no need to create padded buffer
+		b_data_pad = (uint8_t *)nn->scratch;
+
+		tensor_set_shape(out_tensor,ab,ah,aw,ad);
+
+		opt_flag = 1;
+		b_const_value = b_data[0];
+	}
+
+	/* Both operands are of same dimensions */
+	else if ((ab==bb)&&(ah==bh)&&(aw==bw)&&(ad==bd))	{
+		//logmsg(nn,0,"Entering qmul asm - a=%p, b=%p, elem=%d, elem_pad=%d", a_data_pad, b_data_pad, elements, elements_pad);
+		//t3 =  nn_os_get_cycles(nn);
+		elements = ab*ah*aw*ad;
+
+		a_data_pad = (uint8_t *)a_data;// since a_data is already aligned to 128, no need to create padded buffer
+		b_data_pad = (uint8_t *)b_data;// since b_data is already aligned to 128, no need to create padded buffer
+
+		tensor_set_shape(out_tensor,ab,ah,aw,ad);
+
+		opt_flag = 1;
+	}
+
+	/* Depth matches on both operands - Broadcast elements in one operand to match dimensions of other operand */
+	else if ((bb==1)&&(bh==1)&&(bw==1)&&(bd==ad))	{
+
+		elements = ab*ah*aw*ad;
+		bhw = ab*ah*aw;
+
+		a_data_pad = (uint8_t *)a_data;// since a_data is already aligned to 128, no need to create padded buffer
+		b_data_pad = (uint8_t *)nn->scratch;
+
+		// Broadcast elements in b to match a dimensions
+		for(i=0;i<bhw;i++) {
+			vmemcpy_asm(b_data_pad,b_data,bd);
+			b_data_pad += bd;
+		}
+		b_data_pad = (uint8_t *)nn->scratch;//pad_and_align(a_data_pad, elements_pad);
+
+		tensor_set_shape(out_tensor,ab,ah,aw,ad);
+
+		opt_flag = 1;
+		//printf("Depth optimization: a: %lux%lux%lux%lu b: %lux%lux%lux%lu\n", ab,ah,aw,ad, bb,bh,bw,bd);
+
+	}
+	else if ((ab==1)&&(ah==1)&&(aw==1)&&(bd==ad))	{
+
+		elements = bb*bh*bw*bd;
+		bhw = bb*bh*bw;
+
+		b_data_pad = (uint8_t *)b_data ;// since b_data is already aligned to 128, no need to create padded buffer
+		a_data_pad = (uint8_t *)nn->scratch;
+
+		// Broadcast elements in b to match a dimensions
+		for(i=0;i<bhw;i++) {
+			vmemcpy_asm(a_data_pad,a_data,ad);
+			a_data_pad += ad;
+		}
+		a_data_pad = (uint8_t *)nn->scratch;
+
+		tensor_set_shape(out_tensor,bb,bh,bw,bd);
+
+		opt_flag = 1;
+		//printf("Depth optimization: a: %lux%lux%lux%lu b: %lux%lux%lux%lu\n", ab,ah,aw,ad, bb,bh,bw,bd);
+
+	}
+
+	if(opt_flag) {
+		opt_info->a_data_pad = a_data_pad;
+		opt_info->b_data_pad = b_data_pad;
+		opt_info->elements = elements;
+		opt_info->a_const_value = a_const_value;
+		opt_info->b_const_value = b_const_value;
+	}
+
+	return opt_flag;
+}
 
 
 

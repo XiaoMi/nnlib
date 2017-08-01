@@ -42,11 +42,11 @@ struct nn_pipe *nn_pipe_alloc_portable(struct nn_graph *nn, uint32_t pipe_elemen
 {
 	struct nn_pipe *pipe;
 	uint64_t *buf;
-	if ((buf = malloc(sizeof(uint64_t)*pipe_elements))  == NULL) {
+	if ((buf = (uint64_t *)malloc(sizeof(uint64_t)*pipe_elements))  == NULL) {
 		logmsg(nn,0,"nn_pipe_alloc:buf Fatal ERROR!!!");
 		return NULL;
 	}
-	if ((pipe = malloc(sizeof(struct nn_pipe))) == NULL) {
+	if ((pipe = (struct nn_pipe *)malloc(sizeof(struct nn_pipe))) == NULL) {
 		free(buf);
 		logmsg(nn,0,"nn_pipe_alloc:pipe Fatal ERROR!!!");
 		return NULL;

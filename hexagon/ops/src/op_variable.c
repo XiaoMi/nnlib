@@ -94,7 +94,7 @@ static struct nn_node *variable_ctor(
 	if ((self->opaque = memalign(128,data_size)) == NULL) {
 			errlog(nn,"tensor storage");
 	}
-	p = self->opaque;
+	p = (uint8_t *)self->opaque;
 	for (i = 0; i < num_outputs; i++) {
 		self->outputs[i]->data = p;
 		p += nn_align_up(128,outputs[i].max_size);
@@ -186,17 +186,17 @@ static int assign_check(struct nn_node *self, struct nn_graph *nn)
 
 
 struct nn_node_ops nn_ops_for_Assign = {
-	.execute = assign_execute,
-	.check = assign_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, assign_execute),
+	SFINIT(  .check, assign_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_Variable = {
-	.execute = variable_execute,
-	.check = variable_check,
-	.ctor = variable_ctor,
-	.dtor = variable_dtor,
+	SFINIT(.execute, variable_execute),
+	SFINIT(  .check, variable_check),
+	SFINIT(   .ctor, variable_ctor),
+	SFINIT(   .dtor, variable_dtor),
 };
 
 

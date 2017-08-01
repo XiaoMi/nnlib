@@ -40,7 +40,9 @@
  */
 
 #include <stdint.h>
+#if defined(__hexagon__)
 #include <hexagon_protos.h>
+#endif
 
 void avgpool_aligned_hvx(
 	uint8_t *out,
@@ -90,8 +92,10 @@ void quantize_asm(
 	uint8_t* out,
 	int n);
 
+#if defined(__hexagon__)
 void vmemcpy_asm(void *dst, const void *src, int len);
 void vmemset_asm(void *dst, int val, int len);
+#endif
 
 void gemacca_asm(const uint8_t * x, int N, int K, int *xsum, int y_offset);
 void gemaccb_asm(const uint8_t * y, int * ysum, int K, int);
@@ -113,7 +117,10 @@ void gvconv2dbbb_asm(const uint8_t * x, const uint8_t * y, uint8_t * z, int in_w
                      int * ptr_ysum, int * ptr_max, int * biasbuf, int relu_scale);
 void gvconvsum2dbbb_asm(const uint8_t * x, const uint8_t * y, uint8_t * z, int in_width, int out_width, int zstride, int istride,
                      int filt_width, int filt_height, int out_height, int * ptr_xsum, int * ptr_ysum, int * ptr_max,
-                     int in_offset, int zsum, int * biasbuf, int relu_scale);
+                     int in_offset, int zsum, int * biasbuf, int relu_scale, int maxsum_shift);
+void gvconv2dbbb_v66_asm(const uint8_t * x, const uint8_t * y, uint8_t * z, int in_width, int out_width, 
+                     int zstride, int istride, int filt_width, int filt_height, int out_height, int * ptr_xsum,
+                     int * ptr_ysum, int * ptr_max, int * biasbuf, int relu_scale);
 
 
 void gemvmpybbw_asm(
@@ -173,6 +180,21 @@ void pad2d(
 	int output_width,
 	int pad_value);
 
+void im2col_co(
+	uint8_t* input_data, 
+	int input_height,
+	int input_width,
+	int input_depth,
+	int input_offset, 
+	uint8_t* im2col_buffer,
+	int filter_height,
+	int filter_width,
+	int stride,
+	int output_height,
+	int output_width,
+	int filter_left_offset,
+	int filter_top_offset);
+
 void im2col_cn(
   uint8_t* input_data, int input_height, int input_width, int input_depth, int input_offset,
   uint8_t* im2col_buffer, int filter_height, int filter_width, int stride,
@@ -208,7 +230,9 @@ void fast_im2col_co(
 static inline void l2pref(void *p, uint32_t height, uint32_t width, uint32_t stride)
 {
 	uint64_t control = Q6_P_combine_RR(stride,Q6_R_combine_RlRl(width,height));
+#if defined(__hexagon__)
 	asm volatile (" l2fetch(%0,%1) " : :"r"(p),"r"(control));
+#endif
 }
 
 
@@ -274,5 +298,65 @@ void gvmaddvvm_asm(
 	int M,
 	int * minmax,
 	int reset);
+
+int32_t qlrn_acc_asm(
+		int32_t numelem,
+		const int16_t *ptr_xvec);
+
+void qmul_asm(
+		uint8_t *a,
+		uint8_t *b,
+		int32_t *out,
+		void *info,
+		int32_t elem,
+		int32_t aconst,
+		int32_t bconst);
+
+void qadd_asm(
+		uint8_t *a,
+		uint8_t *b,
+		int32_t *out,
+		void *info,
+		int32_t elem,
+		int32_t aconst,
+		int32_t bconst);
+
+void qsub_asm(
+		uint8_t *a,
+		uint8_t *b,
+		int32_t *out,
+		void *info,
+		int32_t elem,
+		int32_t aconst,
+		int32_t bconst);
+
+void qmaximum_asm(
+		uint8_t *a,
+		uint8_t *b,
+		uint8_t *out,
+		void *info,
+		int32_t elem,
+		int32_t aconst,
+		int32_t bconst);
+
+void qminimum_asm(
+		uint8_t *a,
+		uint8_t *b,
+		uint8_t *out,
+		void *info,
+		int32_t elem,
+		int32_t aconst,
+		int32_t bconst);
+
+void quant_add_spec_asm(
+	uint8_t *aq,
+	uint8_t *bq,
+	int ialpha,
+	int ikappa,
+	int offset,
+	int recip,
+	uint8_t *ptr_c,
+	int16_t *ptr_max,
+	int length);
 
 #endif

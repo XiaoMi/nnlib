@@ -52,23 +52,24 @@
  * 
  * But it's not so simple when striding.
  *
- * SAME size is ceil(float(size)/float(stride))
+ * SAME or SAME_CAFFE size is ceil(float(size)/float(stride))
  * VALID size is ceil(float(size - filt_size + 1) / float(stride))
  *
  * We can get the ciel of the float divide by adding (stride-1) 
  * and using integer (floor) division.
+ *
  */
 
-static inline uint32_t nn_pad_compute_outsize(
-	uint32_t in_size,
-	uint32_t filt_size,
-	uint32_t stride,
+static inline int32_t nn_pad_compute_outsize(
+	int32_t in_size,
+	int32_t filt_size,
+	int32_t stride,
 	padding_type padding)
 {
 	if (padding == NN_PAD_NA) {
 		return in_size / stride;
 	}
-	if (padding == NN_PAD_SAME) {
+	if ((padding == NN_PAD_SAME) || (padding == NN_PAD_SAME_CAFFE)) {
 		return (in_size + (stride - 1)) / stride;
 	}
 	if (padding == NN_PAD_VALID) {
@@ -90,32 +91,39 @@ static inline uint32_t nn_pad_compute_outsize(
  * padding_before is floor(half(padding)) and padding_after is the remainder.
  */
 
-static inline uint32_t nn_pad_compute_total(
-	uint32_t in_size,
-	uint32_t filt_size,
-	uint32_t stride,
+static inline int32_t nn_pad_compute_total(
+	int32_t in_size,
+	int32_t filt_size,
+	int32_t stride,
 	padding_type padding)
 {
-	if (padding == NN_PAD_SAME) {
+	if ((padding == NN_PAD_SAME) || (padding == NN_PAD_SAME_CAFFE)) {
 		//return nn_pad_compute_outsize(in_size,filt_size,stride,padding)*stride+filt_size-in_size-stride;
 		return filt_size - 1 - ((in_size + stride - 1) % stride);
 	}
 	return 0;
 }
 
-static inline uint32_t nn_pad_compute_before(
-	uint32_t in_size,
-	uint32_t filt_size,
-	uint32_t stride,
+/*
+ * SAME_CAFFE is different from SAME (TensorFlow) when there is asymmetrical padding.
+ * SAME_CAFFE the additional padding is on the left, in a sense it'll provide symmetrical padding.
+ * SAME the additional padding is on the right
+ */
+static inline int32_t nn_pad_compute_before(
+	int32_t in_size,
+	int32_t filt_size,
+	int32_t stride,
 	padding_type padding)
 {
-	return nn_pad_compute_total(in_size,filt_size,stride,padding)/2;
+	int round_up = 0;
+	if (padding == NN_PAD_SAME_CAFFE) round_up = 1;
+	return (nn_pad_compute_total(in_size,filt_size,stride,padding) + round_up)/2;
 }
 
-static inline uint32_t nn_pad_compute_after(
-	uint32_t in_size,
-	uint32_t filt_size,
-	uint32_t stride,
+static inline int32_t nn_pad_compute_after(
+	int32_t in_size,
+	int32_t filt_size,
+	int32_t stride,
 	padding_type padding)
 {
 	return nn_pad_compute_total(in_size,filt_size,stride,padding)

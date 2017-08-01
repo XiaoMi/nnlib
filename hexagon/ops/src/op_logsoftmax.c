@@ -48,8 +48,8 @@ static inline int logsoftmax_execute(struct nn_node *self, struct nn_graph *nn)
 	int batches = in_tensor->shape.batches;
 	int height = in_tensor->shape.height;
 	int width = in_tensor->shape.width;
-	const float *data = in_tensor->data;
-	float *out = out_tensor->data;
+	const float *data = (const float *)in_tensor->data;
+	float *out = (float *)out_tensor->data;
 	float maxval;
 	float sum_of_exps;
 	float log_sum_of_exps;
@@ -88,9 +88,9 @@ static int logsoftmax_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_LogSoftmax_f = {
-	.execute = logsoftmax_execute,
-	.check = logsoftmax_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	logsoftmax_execute,
+	logsoftmax_check,
+	node_alloc_common,
+	node_free_common,
 };
 

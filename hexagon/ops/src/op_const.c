@@ -119,10 +119,10 @@ static int const_dtor(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Const = {
-	.execute = const_execute,
-	.check = const_check,
-	.ctor = const_ctor,
-	.dtor = const_dtor,
+	SFINIT(.execute, const_execute),
+	SFINIT(  .check, const_check),
+	SFINIT(   .ctor, const_ctor),
+	SFINIT(   .dtor, const_dtor),
 };
 
 

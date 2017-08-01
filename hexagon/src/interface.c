@@ -78,7 +78,7 @@ nn_id_t hexagon_nn_init()
 	/* allocate new ID */
 	struct nn_graph *graph;
 	int ret;
-	if ((graph = calloc(1,sizeof(*graph))) == NULL) {
+	if ((graph = (struct nn_graph *)calloc(1,sizeof(*graph))) == NULL) {
 		return 0;
 	}
 	graph->state = NN_GRAPH_CONSTRUCTION;
@@ -87,7 +87,7 @@ nn_id_t hexagon_nn_init()
 		return 0;
 	}
 	graph->scratch_size = SCRATCH_SIZE;
-	if ((graph->logbuf = calloc(1,LOGBUF_SIZE)) == NULL) {
+	if ((graph->logbuf = (char *)calloc(1,LOGBUF_SIZE)) == NULL) {
 		free(graph->scratch);
 		free(graph);
 		return 0;
@@ -296,7 +296,7 @@ int hexagon_nn_reset_perfinfo(nn_id_t id, uint32_t event)
 
 int hexagon_nn_version(int *ver)
 {
-	*ver = 90;
+	*ver = 92;
 	return 0;
 }
 

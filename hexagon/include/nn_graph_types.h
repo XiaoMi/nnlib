@@ -53,6 +53,7 @@ typedef enum padding_type_enum {
 	NN_PAD_VALID,
 	NN_PAD_MIRROR_REFLECT,
 	NN_PAD_MIRROR_SYMMETRIC,
+	NN_PAD_SAME_CAFFE,
 } padding_type;
 
 struct shape {
@@ -98,28 +99,28 @@ static inline int tensor_copy(struct tensor *dst, const struct tensor *src)
 
 static inline float tensor_get_float(const struct tensor *src, int index)
 {
-	float *data = src->data;
+	float *data = (float *)src->data;
 	// assert dst->data_size >= sizeof(float)?
 	return data[index];
 }
 
 static inline void tensor_set_float(struct tensor *dst, int index, float val)
 {
-	float *data = dst->data;
+	float *data = (float *)dst->data;
 	// assert dst->data_size >= sizeof(float)?
 	data[index] = val;
 }
 
 static inline int32_t tensor_get_int32(const struct tensor *src, int index)
 {
-	const int32_t *data = src->data;
+	const int32_t *data = (int32_t *)src->data;
 	// assert dst->data_size >= sizeof(float)?
 	return data[index];
 }
 
 static inline void tensor_set_int32(struct tensor *dst, int index, int32_t val)
 {
-	int32_t *data = dst->data;
+	int32_t *data = (int32_t *)dst->data;
 	// assert dst->data_size >= sizeof(float)?
 	data[index] = val;
 }
@@ -131,6 +132,15 @@ static inline void tensor_set_shape(struct tensor *dst,
 	dst->shape.width = w;
 	dst->shape.height = h;
 	dst->shape.batches = b;
+}
+
+static inline void tensor_get_shape(const struct tensor *src,
+	uint32_t *b, uint32_t *h, uint32_t *w, uint32_t *d)
+{
+	*d= src->shape.depth;
+	*w = src->shape.width;
+	*h = src->shape.height;
+	*b = src->shape.batches;
 }
 
 #endif

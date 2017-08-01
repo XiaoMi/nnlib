@@ -58,26 +58,34 @@ static int slice_impl(
 	int d_in,d_start,d_size;
 	uint32_t total_bytes;
 	uint32_t offset;
-	const char *data = input_tensor->data;
+	const char *data = (const char *)input_tensor->data;
 	const char *in;
-	char *out = out_tensor->data;
+	char *out = (char *)out_tensor->data;
+	int order_skip = 4-start_tensor->shape.depth;
 	logmsg(nn,2,"slice node %p execute",self);
 	b_in = input_tensor->shape.batches;
 	h_in = input_tensor->shape.height;
 	w_in = input_tensor->shape.width;
 	d_in = input_tensor->shape.depth;
-	b_start = start_tensor->shape.batches;
-	h_start = start_tensor->shape.height;
-	w_start = start_tensor->shape.width;
-	d_start = start_tensor->shape.depth;
-	b_size = size_tensor->shape.batches;
-	h_size = size_tensor->shape.height;
-	w_size = size_tensor->shape.width;
-	d_size = size_tensor->shape.depth;
+	b_start = (order_skip > 0) ? 0 : tensor_get_int32(start_tensor,0-order_skip);
+	h_start = (order_skip > 1) ? 0 : tensor_get_int32(start_tensor,1-order_skip);
+	w_start = (order_skip > 2) ? 0 : tensor_get_int32(start_tensor,2-order_skip);
+	d_start = (order_skip > 3) ? 0 : tensor_get_int32(start_tensor,3-order_skip);
+	b_size = (order_skip > 0) ? -1 : tensor_get_int32(size_tensor,0-order_skip);
+	h_size = (order_skip > 1) ? -1 : tensor_get_int32(size_tensor,1-order_skip);
+	w_size = (order_skip > 2) ? -1 : tensor_get_int32(size_tensor,2-order_skip);
+	d_size = (order_skip > 3) ? -1 : tensor_get_int32(size_tensor,3-order_skip);
 	if (b_size == -1) b_size = b_in - b_start;
 	if (h_size == -1) h_size = h_in - h_start;
 	if (w_size == -1) w_size = w_in - w_start;
 	if (d_size == -1) d_size = d_in - d_start;
+
+	logmsg(nn,2,"in/start/size: b: %d/%d/%d h: %d/%d/%d w: %d/%d/%d d: %d/%d/%d order_skip=%d",
+		b_in,b_start,b_size,
+		h_in,h_start,h_size,
+		w_in,w_start,w_size,
+		d_in,d_start,d_size,
+		order_skip);
 
 	total_bytes = b_size * h_size * w_size * d_size * element_size;
 
@@ -86,10 +94,10 @@ static int slice_impl(
 	if (h_size <= 0) return errlog(nn,"bad h_size");
 	if (w_size <= 0) return errlog(nn,"bad w_size");
 	if (d_size <= 0) return errlog(nn,"bad d_size");
-	if ((b_start+b_size) >= b_in) return errlog(nn,"in b too small");
-	if ((h_start+h_size) >= h_in) return errlog(nn,"in h too small");
-	if ((w_start+w_size) >= w_in) return errlog(nn,"in w too small");
-	if ((d_start+d_size) >= d_in) return errlog(nn,"in d too small");
+	if ((b_start+b_size) > b_in) return errlog(nn,"in b too small");
+	if ((h_start+h_size) > h_in) return errlog(nn,"in h too small");
+	if ((w_start+w_size) > w_in) return errlog(nn,"in w too small");
+	if ((d_start+d_size) > d_in) return errlog(nn,"in d too small");
 
 	tensor_set_shape(out_tensor,b_size,h_size,w_size,d_size);
 	out_tensor->data_size = total_bytes;
@@ -121,6 +129,11 @@ static int slice_execute_8(struct nn_node *self, struct nn_graph *nn)
 	return slice_impl(self,nn,sizeof(uint8_t));
 }
 
+static int slice_execute_int32(struct nn_node *self, struct nn_graph *nn)
+{
+	return slice_impl(self,nn,sizeof(int32_t));
+}
+
 static int slice_execute_q8(struct nn_node *self, struct nn_graph *nn)
 {
 	tensor_copy(self->outputs[1],self->inputs[3]);
@@ -144,6 +157,14 @@ static int slice_check_8(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
+static int slice_check_int32(struct nn_node *self, struct nn_graph *nn)
+{
+	logmsg(nn,2,"checking slice node %p",self);
+	if (self->n_inputs != 3) return errlog(nn,"num inputs");
+	if (self->n_outputs != 1) return errlog(nn,"num outputs");
+	return 0;
+}
+
 static int slice_check_q8(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"checking slice node %p",self);
@@ -154,23 +175,30 @@ static int slice_check_q8(struct nn_node *self, struct nn_graph *nn)
 
 
 struct nn_node_ops nn_ops_for_Slice_f = {
-	.execute = slice_execute_f,
-	.check = slice_check_f,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, slice_execute_f),
+	SFINIT(  .check, slice_check_f),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_Slice_8 = {
-	.execute = slice_execute_8,
-	.check = slice_check_8,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, slice_execute_8),
+	SFINIT(  .check, slice_check_8),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
+};
+
+struct nn_node_ops nn_ops_for_Slice_int32 = {
+	SFINIT(.execute, slice_execute_int32),
+	SFINIT(  .check, slice_check_int32),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedSlice_8 = {
-	.execute = slice_execute_q8,
-	.check = slice_check_q8,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, slice_execute_q8),
+	SFINIT(  .check, slice_check_q8),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 

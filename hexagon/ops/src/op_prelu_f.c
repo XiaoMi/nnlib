@@ -48,19 +48,32 @@ static int prelu_execute(struct nn_node *self, struct nn_graph *nn)
 		* in_tensor->shape.width
 		* in_tensor->shape.depth;
 	size_t bytes = elements * sizeof(float);
-	const float alpha = tensor_get_float(in_alpha_tensor,0);
-	const float *in_data = in_tensor->data;
-	float *out_data = out_tensor->data;
-	uint32_t i;
+	size_t alpha_depth = in_alpha_tensor->shape.depth;
+	float *alpha = (float *)nn->scratch; 
+	const float *in_data = (const float *)in_tensor->data;
+	float *out_data = (float *)out_tensor->data;
+	uint32_t i,j,idx;
 
 	logmsg(nn,2,"prelu execute. self=%p ",self);
-	if (alpha < 0.0f) return errlog(nn,"negative alpha");
+	for(j =0; j <  alpha_depth; j++) {
+		alpha[j] = tensor_get_float(in_alpha_tensor,j);
+		if (alpha[j] < 0.0f) return errlog(nn,"negative alpha %f, %d", alpha[j],j);
+		if (alpha[j] > 1.0f) return errlog(nn,"alpha %f, %d, greater than 1.0f", alpha[j],j);
+		//errlog(nn,"alpha %f, %d, ", alpha[j],j);
+		
+
+	}
+
 	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
+	if ((alpha_depth > 1) && (alpha_depth != in_tensor->shape.depth)) return errlog(nn,"Input depth mismatch ");
 	out_tensor->shape = in_tensor->shape;
 	out_tensor->data_size = bytes;
 
-	for (i = 0; i < elements; i++) {
-		out_data[i] = fmaxf(in_data[i],0.0f) + fminf(in_data[i] * alpha,0.0f);
+	for (i = 0; i < elements/alpha_depth; i++) {
+		for(j =0; j <  alpha_depth; j++) {
+			idx = i*alpha_depth +j;
+			out_data[idx] = fmaxf(in_data[idx],0.0f) + fminf(in_data[idx] * alpha[j],0.0f);
+		}
 	}
 
 	logmsg(nn,2,"prelu %p done",self);
@@ -77,9 +90,9 @@ static int prelu_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_PRelu_f = {
-	.execute = prelu_execute,
-	.check = prelu_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	prelu_execute,
+	prelu_check,
+	node_alloc_common,
+	node_free_common,
 };
 

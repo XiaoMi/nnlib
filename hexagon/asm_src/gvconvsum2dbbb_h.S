@@ -109,6 +109,7 @@ gvconvsum2dbbb_asm:
 #define zsum          r6    //8
 #define ptr_biasbuf   r14   //9
 #define recip_level   r15   //10
+#define max_shr       r0    //11
 #define PREFETCH      r21   //640 //256
 /*=============================================================================*/
 #define sel           r8
@@ -277,6 +278,7 @@ gvconvsum2dbbb_asm:
            PREFETCH = asl(stride_depth, #2)       //mpyi(filt_width, #3)       //used for line prefetch
        } {
            if(!p3) memw(sp+#68) = PREFETCH
+           out_height = memw(sp+#23<<2)           //
        } {
            stride3_1 = add(stride3_1, #16)        //used for line prefetch
            stride4= asl(stride_depth, #1)         //4-2*stride
@@ -300,11 +302,14 @@ gvconvsum2dbbb_asm:
        } {
            PREFETCH = memw(sp+#68)
            dcfetch(ptr_x+#64)                     //
+       } {
+           p1 = cmp.eq(out_height, #0)            //
+           if(p1.new) jump:t .L_height_end        //
        }
 /*============================================================================*/
         .balign 32
 .L_height:
-       { 
+	   {
            ptr_x0 = memw(sp+#48)                  //
            memw(sp+#23<<2) -= #1                  //out_height = add(out_height, #-1)      //
        } {
@@ -483,10 +488,14 @@ gvconvsum2dbbb_asm:
            q0 = vand(vpreds, sel0)                // 
            sum2 += mpyi(in_offset, sum3)          //#1
        } {
+           max_shr = memw(sp+#31<<2)		  // 20<<2+11<<2
+       } {
            one = mux(p0, #1, #16)                 //#1
            x1 = vsplat(sum2)                      //#1
            y1 = rndvec                            //#1y1 = 0x8000
            p1 = cmp.gt(col_count, #2)             //#2
+       } {
+           z0.w = vasr(z0.w, max_shr)
        } {
            pre_x = add(ptr_x0, PREFETCH)          //pre_x, next_outputs)      // 
            y0.w += vmpyie(z0.w, recipvec.uh)      //
@@ -502,6 +511,8 @@ gvconvsum2dbbb_asm:
            maxe.w = vmax(maxe.w, z1.w)            //#1
            sum4 += mpyi(in_offset, sum5)          //#2
            y2 = rndvec                            //#2y2 = 0x8000
+       } {
+           x1.w = vasr(x1.w, max_shr)
        } {
            y1.w += vmpyie(x1.w, recipvec.uh)      //#1
            if(p1)memw(ptr_datasum++#1<<2) = sum4  //#2
@@ -528,6 +539,8 @@ gvconvsum2dbbb_asm:
            sum7 = add(sum6, sum7)                 //#3
            sel1 = vsplatb(sel1)                   //#102 -> 02020202
        } {
+           x2.w = vasr(x2.w, max_shr)
+       } {
            maxe.w = vmax(maxe.w, z2.w)            //#2
            y2.w += vmpyie(x2.w, recipvec.uh)      //#2
            sum6 += mpyi(in_offset, sum7)          //#3
@@ -546,6 +559,8 @@ gvconvsum2dbbb_asm:
            if(p2)memw(ptr_datasum++#1<<2) = sum6  //#3
            x3.w = vadd(z3.w, biasvec.w)           //#3
            y2.h = vpacko(y2.w, y2.w)              //#2>>16
+       } {
+           x3.w = vasr(x3.w, max_shr)
        } {
            sel2 = extractu(tmp_ptr_z, #2, #5)         //#2
            y3.w += vmpyie(x3.w, recipvec.uh)      //#3
@@ -584,6 +599,7 @@ gvconvsum2dbbb_asm:
            p1 = cmp.eq(out_height, #0)            //
            if(!p1.new) jump:t .L_height           //
        }//end lines per block
+.L_height_end:
        {
            loop0(.L_peak, #5)                     //[P, 0]
            c4 = #4                                //

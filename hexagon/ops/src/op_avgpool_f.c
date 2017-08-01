@@ -67,8 +67,8 @@ static int avgpool_execute(struct nn_node *self, struct nn_graph *nn)
 	int32_t in_x;
 	int32_t in_y;
 	int32_t in_z;
-	const float *in = in_tensor->data;
-	float *out = out_tensor->data;
+	const float *in = (const float *)in_tensor->data;
+	float *out = (float *)out_tensor->data;
 
 	int32_t adj_x = ((out_width-1) * stride_width + window_width - in_width) / 2;
 	int32_t adj_y = ((out_height-1) * stride_height + window_height - in_height) / 2;
@@ -155,10 +155,10 @@ static int avgpool_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_AvgPool_f = {
-	.execute = avgpool_execute,
-	.check = avgpool_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, avgpool_execute),
+	SFINIT(  .check, avgpool_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 

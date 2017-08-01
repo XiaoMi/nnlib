@@ -77,9 +77,9 @@ static int conv2d_f_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	int32_t in_y_base;
 	int32_t in_x_base;
 
-	const float *in = in_tensor->data;
-	const float *filt = filt_tensor->data;
-	float *out = out_tensor->data;
+	const float *in = (const float *)in_tensor->data;
+	const float *filt = (const float *)filt_tensor->data;
+	float *out = (float *)out_tensor->data;
 
 	const float *instripe;
 	const float *filtstripe;
@@ -172,10 +172,10 @@ static int conv2d_check_ref(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Conv2d_f = {
-	.execute = conv2d_f_execute_ref,
-	.check = conv2d_check_ref,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	conv2d_f_execute_ref,
+	conv2d_check_ref,
+	node_alloc_common,
+	node_free_common,
 };
 
 

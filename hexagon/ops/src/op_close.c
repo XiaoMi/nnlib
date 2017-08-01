@@ -76,8 +76,8 @@ static int close_execute_f(struct nn_node *self, struct nn_graph *nn)
 	const struct tensor *dut = self->inputs[0];
 	const struct tensor *ref = self->inputs[1];
 	const struct tensor *eps;
-	float *a = dut->data;
-	float *b = ref->data;
+	float *a = (float *)dut->data;
+	float *b = (float *)ref->data;
 	float fudge;
 	int count = ref->data_size/sizeof(float);
 	int i;
@@ -111,15 +111,25 @@ static int close_execute_f(struct nn_node *self, struct nn_graph *nn)
 			max_diff = cur_diff;
 			max_diff_idx = i;
 		}
+
 	}
 	range = ref_max - ref_min;
 	epsilon = range*fudge;
 
 	if (max_diff > epsilon) {
 		i = max_diff_idx;
-		return errlog(nn,"data not close. Worst offender: i: %d/%d a[i]: %a %f b[i]: %a %f max_diff=%f range=%f epsilon=%f",
+		errlog(nn,"data not close. Worst offender: i: %d/%d a[i]: %a %f b[i]: %a %f max_diff=%f range=%f epsilon=%f",
 			max_diff_idx,count,a[i],a[i],b[i],b[i],
 			max_diff,range,epsilon);
+
+		errlog(nn,"\t\tActual\t\tExpected\tDiff");
+		for (i = 0; i < count; i++) {
+			if (i == max_diff_idx)
+				errlog(nn,"%d)\t%f\t%f\t%f <====",i,a[i],b[i],a[i]-b[i]);
+			else
+				errlog(nn,"%d)\t%f\t%f\t%f",i,a[i],b[i],a[i]-b[i]);
+		}
+		return 1;
 	}
 	logmsg(nn,2,"close node %p OK",self);
 	return 0;
@@ -127,8 +137,8 @@ static int close_execute_f(struct nn_node *self, struct nn_graph *nn)
 
 static inline int check_i32vals(struct nn_graph *nn, void *av, void *bv, uint32_t size)
 {
-	int32_t *a = av;
-	int32_t *b = bv;
+	int32_t *a = (int32_t *)av;
+	int32_t *b = (int32_t *)bv;
 	int count = size/sizeof(int32_t);
 	int i;
 	uint32_t max = 0;
@@ -149,8 +159,8 @@ static inline int check_i32vals(struct nn_graph *nn, void *av, void *bv, uint32_
 
 static inline int check_u8vals(struct nn_graph *nn, void *av, void *bv, uint32_t size)
 {
-	uint8_t *a = av;
-	uint8_t *b = bv;
+	uint8_t *a = (uint8_t *)av;
+	uint8_t *b = (uint8_t *)bv;
 	uint32_t max = 0;
 	int count = size/sizeof(uint8_t);
 	int i;
@@ -199,11 +209,12 @@ static int close_execute_q_u8(struct nn_node *self, struct nn_graph *nn)
 	float ref_range = (ref_max_float - ref_min_float);
 	float dut_stepsize = dut_range / 255.0f;
 	float ref_stepsize = ref_range / 255.0f;
-	const uint8_t *dutdata = dut->data;
-	const uint8_t *refdata = ref->data;
+	const uint8_t *dutdata = (const uint8_t *)dut->data;
+	const uint8_t *refdata = (const uint8_t *)ref->data;
 	float dutval,refval;
 	int count = ref->data_size / sizeof(uint8_t);
 	int i;
+	int err = 0;
 
 	logmsg(nn,2,"close q execute. self=%p ",self);
 	CHECK(shape.batches);
@@ -224,10 +235,10 @@ static int close_execute_q_u8(struct nn_node *self, struct nn_graph *nn)
 				dutdata[i],
 				refdata[i]);
 			logmsg(nn,1,"i: %d/%d dut: %f ref %f",i,count,dutval,refval);
-			return errlog(nn,"data mismatch");
+			err++;
 		}
 	}
-
+	if (err) return errlog(nn,"data mismatch");
 	logmsg(nn,2,"close q node %p OK",self);
 	return 0;
 }
@@ -261,37 +272,37 @@ static int close_check_q(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Close_f = {
-	.execute = close_execute_f,
-	.check = close_check_f,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, close_execute_f),
+	SFINIT(  .check, close_check_f),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_Close_int32 = {
-	.execute = close_execute_i32,
-	.check = close_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, close_execute_i32),
+	SFINIT(  .check, close_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_Close_qint32 = {
-	.execute = close_execute_i32,
-	.check = close_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, close_execute_i32),
+	SFINIT(  .check, close_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_Close_quint8 = {
-	.execute = close_execute_u8,
-	.check = close_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, close_execute_u8),
+	SFINIT(  .check, close_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_Close_q_quint8 = {
-	.execute = close_execute_q_u8,
-	.check = close_check_q,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, close_execute_q_u8),
+	SFINIT(  .check, close_check_q),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 

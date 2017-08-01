@@ -156,7 +156,7 @@ static int prefree(struct nn_graph *nn, struct freelist_node **ptr, void *basept
 		/* Well, need to make a new node for this */
 		break;
 	}
-	if ((newnode = malloc(sizeof(*newnode))) == NULL) {
+	if ((newnode = (struct freelist_node *)malloc(sizeof(*newnode))) == NULL) {
 		return errlog(nn,"prefree malloc fail");
 	}
 	newnode->base = base;

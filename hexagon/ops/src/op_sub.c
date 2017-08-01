@@ -36,33 +36,13 @@
 
 #include <nn_graph.h>
 #include <string.h>
+#include <stdio.h>
 #include <quantize.h>
 #include <math.h>
 #include <nn_broadcast.h>
+#include <op_add_sub.h>
+#if defined(__hexagon__)
+#include "hexagon_types.h"
+#endif
 
-static inline int32_t sub_helper(int32_t a, int32_t b)
-{
-	return a-b;
-}
-
-static int sub_int32_execute(struct nn_node *self, struct nn_graph *nn)
-{
-	return broadcast_elementwise_execute_int32(self,nn,sub_helper);
-}
-
-static int sub_int32_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"sub node %p",self);
-	if (self->n_inputs != 2) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"sub %p check OK",self);
-	return 0;
-}
-
-struct nn_node_ops nn_ops_for_Sub_int32 = {
-	.execute = sub_int32_execute,
-	.check = sub_int32_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
-};
-
+CREATE_OP_ADD_SUB(sub, Sub, -)

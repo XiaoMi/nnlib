@@ -40,7 +40,12 @@
 #include <stdlib.h>
 struct nn_graph;
 typedef qurt_pipe_t nn_pipe_t;
+typedef qurt_mutex_t nn_mutex_t;
 typedef qurt_sem_t nn_sem_t;
+static inline void nn_mutex_init(nn_mutex_t *mutex) { qurt_mutex_init(mutex); }
+static inline void nn_mutex_lock(nn_mutex_t *mutex) { qurt_mutex_lock(mutex); }
+static inline void nn_mutex_unlock(nn_mutex_t *mutex) { qurt_mutex_unlock(mutex); }
+#define NN_MUTEX_INIT QURT_MUTEX_INIT
 static inline void nn_sem_init(nn_sem_t *sem, int val) { qurt_sem_init_val(sem,val); }
 static inline void nn_sem_post(nn_sem_t *sem) { qurt_sem_up(sem); }
 static inline void nn_sem_wait(nn_sem_t *sem) { qurt_sem_down(sem); }

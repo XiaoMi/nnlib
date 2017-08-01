@@ -78,9 +78,9 @@ static int output_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_OUTPUT = {
-	.execute = output_execute,
-	.check = output_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, output_execute),
+	SFINIT(  .check, output_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 

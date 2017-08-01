@@ -460,8 +460,10 @@ gemmpybbw_asm:
            z7 = #0
            x17x14x13x10 = memd(ptr_x++kk)    //[0, 3]
            loop0(.L_loopK, ki)               //[P, 9]ki is k1/4 - 2
-       } {
+#ifdef TOOL_V_8_0_X_ASSEMBLER_ISSUE_WORKAROUND_EXTRA_NOP
+		   } {
            nop  //NOTE: THIS EXTRA NOP PACKET ADDED TO WORK AROUND TOOL V.8.0.X ISSUE (JIRA) [QTOOL-27821] - NOP NOT NEEDED FOR TOOLS V.7.2 & V8.1
+#endif
        }:endloop1
 /*=============================================================================*/
        {   r17:16 = memd(sp+#0)              //restore stack

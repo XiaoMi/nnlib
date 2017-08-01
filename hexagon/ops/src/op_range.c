@@ -50,7 +50,7 @@ static int range_execute(struct nn_node *self, struct nn_graph *nn)
 	struct tensor *out_tensor = self->outputs[0];
 	size_t elements = 0;
 	size_t bytes;
-	int32_t *out_data = out_tensor->data;
+	int32_t *out_data = (int32_t *)out_tensor->data;
 	int i;
 
 	logmsg(nn,2,"range execute. self=%p ",self);
@@ -84,9 +84,9 @@ static int range_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Range_int32 = {
-	.execute = range_execute,
-	.check = range_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, range_execute),
+	SFINIT(  .check, range_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 

@@ -56,7 +56,7 @@ static int input_execute(struct nn_node *self, struct nn_graph *nn)
 		out = self->outputs[i];
 		in = &nn->inputs[i];
 		/* Warning! Inputs come in as max_size not data_size! */
-		if (out->max_size < in->max_size) return errlog(nn,"out too small");
+		if (out->max_size < in->max_size) return errlog(nn,"out too small: %d < %d",out->max_size,in->max_size);
 		out->shape = in->shape;
 		out->data_size = in->max_size;
 		vmemcpy_asm(out->data,in->data,in->max_size);
@@ -79,9 +79,9 @@ static int input_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_INPUT = {
-	.execute = input_execute,
-	.check = input_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, input_execute),
+	SFINIT(  .check, input_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 

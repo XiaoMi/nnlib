@@ -59,7 +59,7 @@ static int split_impl(
 	int32_t batches = data_tensor->shape.batches;
 	int32_t out_depth = depth / n_outs;
 	uint32_t out_bytes = data_tensor->data_size / n_outs;
-	const char *in_data = data_tensor->data;
+	const char *in_data = (const char *)data_tensor->data;
 	const char *inptr;
 	char *outptr;
 	int i;
@@ -89,7 +89,7 @@ static int split_impl(
 
 	for (j = 0; j < n_outs; j++) {
 		inptr = in_data + j*bytestride;
-		outptr = outs[j]->data;
+		outptr = (char *)outs[j]->data;
 		for (i = 0; i < batches*height*width*out_depth; i++) {
 			memcpy(outptr,inptr,bytestride);
 			outptr += bytestride;
@@ -131,23 +131,23 @@ static int qsplit_check(struct nn_node *self, struct nn_graph *nn)
 
 
 struct nn_node_ops nn_ops_for_Split_f = {
-	.execute = split_execute_f,
-	.check = split_check_f,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, split_execute_f),
+	SFINIT(  .check, split_check_f),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_Split_int32 = {
-	.execute = split_execute_f,
-	.check = split_check_f,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, split_execute_f),
+	SFINIT(  .check, split_check_f),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedSplit_8 = {
-	.execute = qsplit_execute_8,
-	.check = qsplit_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, qsplit_execute_8),
+	SFINIT(  .check, qsplit_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 

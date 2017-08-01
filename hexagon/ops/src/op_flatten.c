@@ -108,16 +108,16 @@ static int qflatten_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Flatten = {
-	.execute = flatten_execute,
-	.check = flatten_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, flatten_execute),
+	SFINIT(  .check, flatten_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedFlatten = {
-	.execute = qflatten_execute,
-	.check = qflatten_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, qflatten_execute),
+	SFINIT(  .check, qflatten_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 

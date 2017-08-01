@@ -69,8 +69,8 @@ struct tdata {
 
 static void maxpool_execute_slice_ref(struct nn_graph *nn, void *vinfo)
 {
-	struct tdata *info = vinfo;
-	struct nn_node *self = info->self;
+	struct tdata *info = (struct tdata *)vinfo;
+	struct nn_node *self = (struct nn_node *)info->self;
 	int whoami = info->whoami;
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *window_tensor = self->inputs[3];
@@ -107,8 +107,8 @@ static void maxpool_execute_slice_ref(struct nn_graph *nn, void *vinfo)
 	int32_t end_y;
 	int32_t next_y;
 
-	uint8_t *in = in_tensor->data;
-	uint8_t *out = out_tensor->data;
+	uint8_t *in = (uint8_t *)in_tensor->data;
+	uint8_t *out = (uint8_t *)out_tensor->data;
 
 	int32_t adj_x = ((out_width-1) * stride_width + window_width - in_width) / 2;
 	int32_t adj_y = ((out_height-1) * stride_height + window_height - in_height) / 2;
@@ -170,8 +170,8 @@ static void maxpool_execute_slice_ref(struct nn_graph *nn, void *vinfo)
 
 static void maxpool_execute_slice_asm(struct nn_graph *nn, void *vinfo)
 {
-	struct tdata *info = vinfo;
-	struct nn_node *self = info->self;
+	struct tdata *info = (struct tdata *)vinfo;
+	struct nn_node *self = (struct nn_node *)info->self;
 	int whoami = info->whoami;
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *window_tensor = self->inputs[3];
@@ -208,8 +208,8 @@ static void maxpool_execute_slice_asm(struct nn_graph *nn, void *vinfo)
 	int32_t end_y;
 	int32_t next_y;
 
-	uint8_t *in = in_tensor->data;
-	uint8_t *out = out_tensor->data;
+	uint8_t *in = (uint8_t *)in_tensor->data;
+	uint8_t *out = (uint8_t *)out_tensor->data;
 
 	int32_t adj_x = ((out_width-1) * stride_width + window_width - in_width) / 2;
 	int32_t adj_y = ((out_height-1) * stride_height + window_height - in_height) / 2;
@@ -294,12 +294,12 @@ static int maxpool_execute(struct nn_node *self, struct nn_graph *nn,
 	size_t bytes = out_batches * out_width * out_height * out_depth;
 
 	struct tdata my_info = {
-		.self = self,
-		.whoami = 0,
+		self,
+		0,
 	};
 	struct tdata worker_info = {
-		.self = self,
-		.whoami = 1,
+		self,
+		1,
 	};
 	nn_sem_init(&worker_info.donesem,0);
 	nn_sem_init(&my_info.donesem,0);
@@ -383,17 +383,17 @@ static int maxpool_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_QuantizedMaxPool_8 = {
-	.execute = maxpool_execute_asm,
-	.check = maxpool_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, maxpool_execute_asm),
+	SFINIT(  .check, maxpool_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedMaxPool_8_ref = {
-	.execute = maxpool_execute_ref,
-	.check = maxpool_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, maxpool_execute_ref),
+	SFINIT(  .check, maxpool_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 

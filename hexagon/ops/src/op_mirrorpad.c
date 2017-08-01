@@ -51,8 +51,8 @@ static inline void do_mirrorpad(
 	const int32_t depth_byte_size,
 	const int32_t reflect)
 {
-	const char *inp = inpv;
-	char *outp = outpv;
+	const char *inp = (const char *)inpv;
+	char *outp = (char *)outpv;
 	const int32_t in_w_size = depth_byte_size * w_in;
 	const int32_t out_w_size = depth_byte_size * (w_in + pre_w + post_w);
 	//const int32_t pre_w_skip = pre_w * depth_byte_size;
@@ -105,7 +105,7 @@ static int mirrorpad_f_execute(struct nn_node *self, struct nn_graph *nn)
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *pads_tensor = self->inputs[1];
 	struct tensor *out_tensor = self->outputs[0];
-	const int32_t *pads = pads_tensor->data;
+	const int32_t *pads = (const int32_t *)pads_tensor->data;
 	const int32_t pad_d_before = pads[0+0];
 	const int32_t pad_d_after = pads[0+1];
 	const int32_t pad_w_before = pads[2+0];
@@ -125,8 +125,8 @@ static int mirrorpad_f_execute(struct nn_node *self, struct nn_graph *nn)
 	const uint32_t elements_out = d_out * w_out * h_out * b_out;
 	const uint32_t element_size = sizeof(float);
 	const uint32_t bytes_out = elements_out * element_size;
-	const float *in_base = in_tensor->data;
-	float *out_base = out_tensor->data;
+	const float *in_base = (const float *)in_tensor->data;
+	float *out_base = (float *)out_tensor->data;
 	const float *inp;
 	float *outp;
 	int b;
@@ -176,9 +176,9 @@ static int mirrorpad_f_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_MirrorPad_f = {
-	.execute = mirrorpad_f_execute,
-	.check = mirrorpad_f_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, mirrorpad_f_execute),
+	SFINIT(  .check, mirrorpad_f_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 

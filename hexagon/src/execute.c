@@ -44,6 +44,13 @@
 #define ITERS 1
 //#define ITERS (50*120)
 
+/*
+ * Since QuRT (especially) isn't very POSIX, we have a tricky time setting up a mutex.
+ * We can't use PTHREAD_MUTEX_INITIALIZER
+ * We can't use pthread_once to safely have an initialization hook.
+ * So... we're going to assume that zero-initialized mutex means unlocked. 
+ */
+
 int do_execute(struct nn_graph *nn,
 	const struct tensor *inputs,
 	uint32_t n_inputs,
@@ -51,16 +58,18 @@ int do_execute(struct nn_graph *nn,
 	uint32_t n_outputs)
 {
 	struct nn_node *node;
-	int err;
+	int err = 0;
 	uint64_t perf_start;
 	uint64_t perf_stop;
 	uint64_t pcycle_start;
 	uint64_t pcycle_stop;
 	int i;
+	static nn_mutex_t exec_mutex = NN_MUTEX_INIT;
 	nn->inputs = inputs;
 	nn->n_inputs = n_inputs;
 	nn->outputs = outputs;
 	nn->n_outputs = n_outputs;
+	nn_mutex_lock(&exec_mutex);
 	nn_os_hvx_power_on(nn);
 	nn_os_vector_workers_acquire(nn);
 	pcycle_start = nn_os_get_cycles(nn);
@@ -77,6 +86,7 @@ int do_execute(struct nn_graph *nn,
 	nn->execution_total_cycles = pcycle_stop - pcycle_start;
 	nn_os_vector_workers_release(nn);
 	nn_os_hvx_power_off(nn);
+	nn_mutex_unlock(&exec_mutex);
 	return err;
 }
 

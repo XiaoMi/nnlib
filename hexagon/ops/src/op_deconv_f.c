@@ -79,9 +79,9 @@ static int deconv_f_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	int32_t in_y;
 	int32_t in_x;
 
-	const float *in = in_tensor->data;
-	const float *filt = filt_tensor->data;
-	float *out = out_tensor->data;
+	const float *in = (const float *)in_tensor->data;
+	const float *filt = (const float *)filt_tensor->data;
+	float *out = (float *)out_tensor->data;
 
 	const float *instripe;
 	const float *filtstripe;
@@ -191,10 +191,10 @@ static int deconv_check_ref(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Deconv_f = {
-	.execute = deconv_f_execute_ref,
-	.check = deconv_check_ref,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, deconv_f_execute_ref),
+	SFINIT(  .check, deconv_check_ref),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 
 

@@ -44,9 +44,11 @@
 
 #include <nn_graph_ops.h>
 #include <nn_graph_types.h>
+#include <nn_graph_im2col.h>
 #include <nn_graph_if.h>
 #include <nn_asm_ops.h>
 #include <nn_graph_os.h>
+#include <platform.h>
 
 #define likely(cond)	(__builtin_expect(!!(cond), 1))
 #define unlikely(cond)	(__builtin_expect(!!(cond), 0))
@@ -105,14 +107,24 @@ struct nn_graph {
 	nn_pipe_t *vec_work;
 	nn_pipe_t *nonvec_work;
 	uint64_t execution_total_cycles;
+	void *os_opaque;		// data for the OS layer
+	uint32_t internal_node_id;	// Internal Node ID
+	uint32_t const_inf_id;		// ID for infinity
+	uint32_t const_ninf_id;		// ID for -infinity
+	uint32_t const_zero_id;		// ID for -infinity
 };
+
+static inline uint32_t nn_graph_new_internal_node_id(struct nn_graph *nn)
+{
+	return --(nn->internal_node_id);
+}
 
 static inline void record_usertime(struct nn_graph *nn, struct nn_node *op, uint32_t type, uint64_t time)
 {
 	if (nn->perf_event == type) op->perfcounter = time;
 }
 
-#define SCRATCH_SIZE (1024*1024*32)
+#define SCRATCH_SIZE (1024*1024*192)
 #define LOGBUF_SIZE (1024*1024*2)
 
 struct nn_node_ops {
@@ -186,21 +198,6 @@ struct nn_node* find_first_consumer(
 	struct nn_graph *nn, 
 	struct nn_node *producer, 
 	int out_idx);
-
-void im2col_co(
-	uint8_t* input_data, 
-	int input_height,
-	int input_width,
-	int input_depth,
-	int input_offset, 
-	uint8_t* im2col_buffer,
-	int filter_height,
-	int filter_width,
-	int stride,
-	int output_height,
-	int output_width,
-	int filter_left_offset,
-	int filter_top_offset);
 
 
 

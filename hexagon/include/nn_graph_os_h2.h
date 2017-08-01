@@ -38,10 +38,12 @@
 /*
  */
 
+#if defined(__hexagon__)
 #define RESET_PMU() __asm__ __volatile__ (" r0 = #0x48 ; trap0(#0); \n" : : : "r0","r1","r2","r3","r4","r5","r6","r7","memory")
 #define DUMP_PMU() __asm__ __volatile__ (" r0 = #0x4a ; trap0(#0); \n" : : : "r0","r1","r2","r3","r4","r5","r6","r7","memory")
 
 #include <h2.h>
+#endif
 struct nn_graph;
 typedef h2_sem_t nn_sem_t;
 typedef h2_mutex_t nn_mutex_t;
@@ -52,6 +54,7 @@ typedef struct nn_pipe nn_pipe_t;
 static inline void nn_mutex_init(nn_mutex_t *mutex) { h2_mutex_init_type(mutex,H2_MUTEX_PLAIN); }
 static inline void nn_mutex_lock(nn_mutex_t *mutex) {h2_mutex_lock(mutex); }
 static inline void nn_mutex_unlock(nn_mutex_t *mutex) {h2_mutex_unlock(mutex); }
+#define NN_MUTEX_INIT H2_MUTEX_T_INIT
 static inline void nn_sem_init(nn_sem_t *sem, int val) { h2_sem_init_val(sem,val); }
 static inline void nn_sem_post(nn_sem_t *sem) { h2_sem_up(sem); }
 static inline void nn_sem_wait(nn_sem_t *sem) { h2_sem_down(sem); }

@@ -83,7 +83,8 @@
 /*        Data is 128byte aligned                                       */
 /************************************************************************/
 
-#ifdef __hexagon__
+//#ifdef __hexagon__
+#if 1
 #include <nn_graph.h>
 
 //void vmemcpy_asm(void *dst, void *src, int len);
@@ -314,8 +315,10 @@ void gemm_asm(uint8_t * x, int x_offset,
 }
 #endif
 
+#if defined(__hexagon__)
 static int max(int a, int b) { return((a>b) ? a : b); }
 static int min(int a, int b) { return((a<b) ? a : b); }
+#endif
 
 #define HPAD 16
 #define VPAD 8
@@ -455,6 +458,7 @@ void im2col_cn(
     int filter_area = filter_width * input_depth;
     int filter_value_count = filter_area * filter_height; //will need to be padded 
     int filter_value_count_pad = (filter_value_count + HPAD - 1) & ~(HPAD-1);
+    filter_value_count_pad = max(filter_value_count_pad,32);
     int pad_x = filter_value_count_pad - filter_value_count;
     int patches_pad = (output_width * output_height + VPAD - 1) & ~(VPAD-1);
     int pad_y = patches_pad - output_width * output_height;

@@ -40,7 +40,7 @@
 #include <math.h>
 #include <nn_broadcast.h>
 
-static inline float mul_helper(float a, float b)
+static inline float mul_helper(float a, float b, void *u)
 {
 	return a*b;
 }
@@ -48,7 +48,7 @@ static inline float mul_helper(float a, float b)
 static int mul_f_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"mul_f node %p",self);
-	return broadcast_elementwise_execute_f(self,nn,mul_helper);
+	return broadcast_elementwise_execute_f(self,nn,mul_helper, NULL);
 }
 
 static int mul_f_check(struct nn_node *self, struct nn_graph *nn)
@@ -61,9 +61,9 @@ static int mul_f_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Mul_f = {
-	.execute = mul_f_execute,
-	.check = mul_f_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	mul_f_execute,
+	mul_f_check,
+	node_alloc_common,
+	node_free_common,
 };
 

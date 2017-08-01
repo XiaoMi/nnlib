@@ -48,8 +48,8 @@ static int neg_f_execute(struct nn_node *self, struct nn_graph *nn)
 		* in_tensor->shape.width
 		* in_tensor->shape.depth;
 	size_t bytes = elements * sizeof(float);
-	const float *in_data = in_tensor->data;
-	float *out_data = out_tensor->data;
+	const float *in_data = (const float *)in_tensor->data;
+	float *out_data = (float *)out_tensor->data;
 	int i;
 	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
 	for (i = 0; i < elements; i++) {
@@ -70,9 +70,9 @@ static int neg_f_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Neg_f = {
-	.execute = neg_f_execute,
-	.check = neg_f_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	SFINIT(.execute, neg_f_execute),
+	SFINIT(  .check, neg_f_check),
+	SFINIT(   .ctor, node_alloc_common),
+	SFINIT(   .dtor, node_free_common),
 };
 

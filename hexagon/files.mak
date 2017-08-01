@@ -4,6 +4,7 @@ hexagon/src/execute.c \
 hexagon/src/interface.c \
 hexagon/src/log.c \
 hexagon/src/newnode.c \
+hexagon/src/im2col_full.c \
 hexagon/src/pprint.c \
 hexagon/src/prepare.c \
 hexagon/src/tensor.c \
@@ -13,6 +14,9 @@ hexagon/src/nn_os.c \
 hexagon/src/nn_pipe_portable.c \
 hexagon/src/pad2d.c \
 hexagon/src/im2col_o.c \
+hexagon/ops/src/op_resizebilinear.c \
+hexagon/ops/src/op_batchspace.c \
+hexagon/ops/src/op_pad.c \
 hexagon/ops/src/op_deconv.c \
 hexagon/ops/src/op_deconv_f.c \
 hexagon/ops/src/op_logsoftmax.c \
@@ -79,9 +83,12 @@ hexagon/ops/src/op_sub.c \
 hexagon/ops/src/op_prelu.c \
 hexagon/ops/src/op_prelu_f.c \
 hexagon/ops/src/op_sum_f.c \
+hexagon/ops/src/op_depthwiseconv.c \
+hexagon/ops/src/op_depthwiseconv_f.c \
 hexagon/ops/src/optab.c \
 
 HEXAGON_NN_ASM_SRCS := \
+hexagon/asm_src/quant_add_spec_h.S \
 hexagon/asm_src/gemacca_h.S \
 hexagon/asm_src/gemaccb_h.S \
 hexagon/asm_src/l2pref.S \
@@ -114,6 +121,7 @@ hexagon/asm_src/gvmsumb_h.S \
 hexagon/asm_src/gvconvsum2dbbw_h.S \
 hexagon/asm_src/gvconv2dbbw_h.S \
 hexagon/asm_src/gvconvsum2dbbb_h.S \
-hexagon/asm_src/gvconv2dbbb_h.S
-
-
+hexagon/asm_src/gvconv2dbbb_h.S \
+hexagon/asm_src/qlrn_acc_h.S \
+hexagon/asm_src/qelementwise_ops_h.S \
+hexagon/asm_src/relu_kernel_h.S

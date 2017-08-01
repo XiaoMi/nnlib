@@ -48,7 +48,7 @@ struct nn_node *alloc_node(uint32_t node_id,
 	op_type operation, padding_type padding)
 {
 	struct nn_node *newnode;
-	if ((newnode = malloc(sizeof(*newnode))) == NULL) {
+	if ((newnode = (struct nn_node *)malloc(sizeof(*newnode))) == NULL) {
 		return newnode;
 	}
 	newnode->node_id = node_id;
@@ -76,17 +76,18 @@ static inline int alloc_inputs(
 	unsigned int tmpsize;
 	int i;
 	newnode->n_inputs = n;
+	newnode->inputs = NULL;
+	newnode->input_refs = NULL;
 	if (n == 0) {
-		newnode->inputs = NULL;
-		newnode->input_refs = NULL;
 		return 0;
 	}
 	tmpsize = n*sizeof(newnode->input_refs[0]);
 	/* allocate inputs */
-	if ((newnode->input_refs = malloc(tmpsize)) == NULL) {
+	if ((newnode->input_refs = (struct input *)calloc(1,tmpsize)) == NULL) {
 		return errlog(nn,"input refs alloc failed");
 	}
-	if ((newnode->inputs = malloc(n*sizeof(void *))) == NULL) {
+	if ((newnode->inputs = (const struct tensor **)calloc(n,sizeof(void *))) == NULL) {
+		free(newnode->input_refs);
 		return errlog(nn,"input ptr storage alloc failed");
 	}
 
@@ -94,11 +95,12 @@ static inline int alloc_inputs(
 	for (i = 0; i < n; i++) {
 		if (inputs[i].src_id == 0) {
 			/* Or we could handle and dup tensor here */
+			free(newnode->input_refs);
+			free(newnode->inputs);
 			return errlog(nn,"fatal: const tensor in generic input");
 		}
 		newnode->input_refs[i] = inputs[i];
 	}
-
 	return 0;
 }
 
@@ -128,7 +130,7 @@ static inline int alloc_outputs(
 		return 0;
 	}
 	/* Allocate outputs */
-	if ((newnode->outputs = malloc(n*sizeof(void *))) == NULL) {
+	if ((newnode->outputs = (struct tensor **)calloc(n,sizeof(void *))) == NULL) {
 		return errlog(nn,"output ptr storage alloc failed");
 	}
 	/* Allocate outputs */
@@ -138,11 +140,17 @@ static inline int alloc_outputs(
 	 */
 	for (i = 0; i < n; i++) {
 		if ((newnode->outputs[i] = tensor_alloc(&tshape,0)) == NULL) {
-			return errlog(nn,"output tensor malloc failed");
+			goto err_free_allocated_outputs;
 		}
 		newnode->outputs[i]->max_size = outputs[i].max_size;
 	}
 	return 0;
+err_free_allocated_outputs:
+	for (i = 0; i < n; i++) {
+		if (newnode->outputs[i]) tensor_free(newnode->outputs[i]);
+	}
+	free(newnode->outputs);
+	return errlog(nn,"output tensor malloc failed");
 }
 
 struct nn_node *node_alloc_common(
@@ -162,13 +170,18 @@ struct nn_node *node_alloc_common(
 	}
 	if (alloc_inputs(nn, newnode, num_inputs, inputs) != 0) {
 		errlog(nn,"input alloc failed");
-		return NULL;
+		goto err_free_node;
 	}
 	if (alloc_outputs(nn, newnode, num_outputs, outputs) != 0) {
 		errlog(nn,"output alloc failed");
-		return NULL;
+		goto err_free_inputs;
 	}
 	return newnode;
+err_free_inputs:
+	free_inputs(newnode);
+err_free_node:
+	free(newnode);
+	return NULL;
 }
 
 int node_free_common(struct nn_node *node, struct nn_graph *nn)
@@ -273,6 +286,7 @@ int do_teardown(struct nn_graph *nn)
 	}
 	allocator_teardown(nn);
 	free(nn->scratch);
+	free(nn->logbuf);
 	free(nn);
 	return 0;
 }

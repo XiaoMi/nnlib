@@ -136,6 +136,7 @@ uint32_t graph_setup(int debug_level)
 		printf("Prepare %x success!\n",(unsigned int)id);
 	}
 	print_log(id);
+	print_graph(id);
 	return id;
 }
 
@@ -356,7 +357,7 @@ puts(" #####  #     # ######  ####### #     # #     # #     # ######  ####### ##
 }
 #endif
 
-#define MAX_NODES 2048
+#define MAX_NODES (2048*8)
 
 static inline unsigned long long int get_counter(hexagon_nn_perfinfo s)
 {

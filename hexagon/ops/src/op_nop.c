@@ -91,9 +91,9 @@ static int nop_dtor(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Nop = {
-	.execute = nop_execute,
-	.check = nop_check,
-	.ctor = nop_ctor,
-	.dtor = nop_dtor,
+	SFINIT(.execute, nop_execute),
+	SFINIT(  .check, nop_check),
+	SFINIT(   .ctor, nop_ctor),
+	SFINIT(   .dtor, nop_dtor),
 };
 

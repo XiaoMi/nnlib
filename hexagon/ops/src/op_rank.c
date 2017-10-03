@@ -38,21 +38,22 @@
 #include <string.h>
 #include <quantize.h>
 #include <math.h>
+//
+// copies one int from its second input to its output.
+//
+
 
 static int rank_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	//const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *true_rank_tensor = self->inputs[1];
 	struct tensor *out_tensor = self->outputs[0];
-	size_t bytes = sizeof(int32_t);
 	int rank = tensor_get_int32(true_rank_tensor,0);
 
 	logmsg(nn,2,"rank execute. self=%p ",self);
 
-	bytes = 1 * sizeof(int32_t);
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	tensor_set_shape(out_tensor,1,1,1,1);
-	out_tensor->data_size = bytes;
+	if( tensor_out_prepare_normal( out_tensor, 1,1,1,1, NN_TYPE_INT32)!= 0 )
+		return errlog(nn,"out too small");
 
 	tensor_set_int32(out_tensor,0,rank);
 
@@ -63,16 +64,17 @@ static int rank_execute(struct nn_node *self, struct nn_graph *nn)
 static int rank_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking rank node %p",self);
-	if (self->n_inputs != 2) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
+	int k = node_check_inputs_outputs_n( self,nn, "rank", 2,1);
+	if (k!=0)
+		return k;
 	logmsg(nn,2,"range rank %p check OK",self);
 	return 0;
 }
 
 struct nn_node_ops nn_ops_for_Rank_int32 = {
-	SFINIT(.execute, rank_execute),
-	SFINIT(  .check, rank_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = rank_execute,
+	.check = rank_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

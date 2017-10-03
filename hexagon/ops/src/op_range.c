@@ -48,26 +48,26 @@ static int range_execute(struct nn_node *self, struct nn_graph *nn)
 	int32_t limit = tensor_get_int32(limit_tensor,0);
 	int32_t delta = tensor_get_int32(delta_tensor,0);
 	struct tensor *out_tensor = self->outputs[0];
-	size_t elements = 0;
-	size_t bytes;
-	int32_t *out_data = (int32_t *)out_tensor->data;
+	int elements;
+	int32_t *out_data = out_tensor->data;
 	int i;
 
 	logmsg(nn,2,"range execute. self=%p ",self);
+	elements = 1;		// in case start == limit
 	if (start < limit) {
-		for (i = start; i < limit; i += delta) elements++;
-	} else {
-		for (i = start; i > limit; i += delta) elements++;
+		if( delta < 1) delta = 1;
+		// (limit-start)/delta, rounding up
+		elements = (unsigned)( limit-start-1)/(unsigned)delta + 1;
+	} else if( start > limit){
+		if( delta > -1) delta = -1;
+		elements = (unsigned)( start-limit-1)/(unsigned)(-delta) + 1;
 	}
-	bytes = elements * sizeof(int32_t);
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	tensor_set_shape(out_tensor,1,1,1,elements);
-	out_tensor->data_size = bytes;
 
-	if (start < limit) {
-		for (i = start; i < limit; i += delta) *out_data++ = i;
-	} else {
-		for (i = start; i > limit; i += delta) *out_data++ = i;
+	if( tensor_out_prepare_normal( out_tensor, 1,1,1,elements, NN_TYPE_INT32)!= 0)
+		return errlog(nn,"out too small");
+
+	for( i = 0; i < elements; i++ ){
+		out_data[i] = start + delta*i;
 	}
 
 	logmsg(nn,2,"range %p done",self);
@@ -84,9 +84,9 @@ static int range_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Range_int32 = {
-	SFINIT(.execute, range_execute),
-	SFINIT(  .check, range_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = range_execute,
+	.check = range_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

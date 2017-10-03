@@ -42,28 +42,49 @@ struct nn_graph;
 typedef qurt_pipe_t nn_pipe_t;
 typedef qurt_mutex_t nn_mutex_t;
 typedef qurt_sem_t nn_sem_t;
+typedef qurt_thread_t nn_thread_t;
+typedef qurt_thread_attr_t nn_thread_attr_t;
+
+static inline int nn_thread_join(nn_thread_t id, void **retval) {
+	int tmp;
+	int ret;
+	ret = qurt_thread_join(id,&tmp);
+	if (retval) *retval = (void *)(tmp);
+	return ret;
+}
+static inline int nn_thread_attr_init(nn_thread_attr_t *attrs) { qurt_thread_attr_init(attrs); return 0; }
+int nn_thread_create(
+	struct nn_graph *nn,
+	nn_thread_t *tid,
+	const nn_thread_attr_t *attrs,
+	void *(*f)(void *),
+	void *arg);
+static inline int nn_thread_attr_setstack(nn_thread_attr_t *attrs, void *stackaddr, size_t stacksize)
+{
+	qurt_thread_attr_set_stack_addr(attrs,stackaddr);
+	qurt_thread_attr_set_stack_size(attrs,stacksize);
+	return 0;
+}
+
+
 static inline void nn_mutex_init(nn_mutex_t *mutex) { qurt_mutex_init(mutex); }
 static inline void nn_mutex_lock(nn_mutex_t *mutex) { qurt_mutex_lock(mutex); }
 static inline void nn_mutex_unlock(nn_mutex_t *mutex) { qurt_mutex_unlock(mutex); }
 #define NN_MUTEX_INIT QURT_MUTEX_INIT
-static inline void nn_sem_init(nn_sem_t *sem, int val) { qurt_sem_init_val(sem,val); }
+static inline void nn_sem_init(nn_sem_t *sem, int val) { memset(sem,0,sizeof(*sem)); qurt_sem_init_val(sem,val); }
 static inline void nn_sem_post(nn_sem_t *sem) { qurt_sem_up(sem); }
 static inline void nn_sem_wait(nn_sem_t *sem) { qurt_sem_down(sem); }
 static inline void nn_pipe_send(nn_pipe_t *pipe, unsigned long long int val) { qurt_pipe_send(pipe,val); }
-static inline nn_pipe_t *nn_pipe_alloc(struct nn_graph *nn, uint32_t pipe_elements)
-{
-	qurt_pipe_attr_t pattr;
-	nn_pipe_t *ret;
-	qurt_pipe_attr_init(&pattr);
-	const unsigned int PIPESIZE_ELEMENTS = 4;
-	const unsigned int PIPESIZE_BYTES = PIPESIZE_ELEMENTS * 8;
-	qurt_pipe_attr_set_buffer(&pattr,malloc(PIPESIZE_BYTES));
-	qurt_pipe_attr_set_elements(&pattr,PIPESIZE_ELEMENTS);
-	qurt_pipe_create(&ret,&pattr);
-	return ret;
-}
+nn_pipe_t *nn_pipe_alloc(struct nn_graph *nn, uint32_t pipe_elements);
+static inline void nn_pipe_free(nn_pipe_t *pipe) { qurt_pipe_delete(pipe); } 
 static inline unsigned long long int nn_pipe_recv(nn_pipe_t *pipe) { return qurt_pipe_receive(pipe); }
-static inline uint64_t nn_os_get_cycles(struct nn_graph *nn) { return qurt_get_core_pcycles(); }
+static inline uint64_t nn_os_get_cycles(struct nn_graph *nn) {
+	uint64_t retval = 0;
+	asm volatile ("");
+	retval = qurt_get_core_pcycles();
+	asm volatile ("");
+	return retval;
+}
 int nn_os_vector_acquire();
 void nn_os_vector_release(int idx);
 static inline void nn_os_vector_init() {};

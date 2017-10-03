@@ -34,6 +34,28 @@
  *
  */
 /*
+ * This operation does a group copy and scale.
+ *  memconvert_hvx( uint8_t * dsto,
+ *                  uint8_t const *srco,
+ *                int depth,
+ *                int offset,
+ *				  int16_t gain,
+ *                int stride,
+ *                int iters.
+ * Input is iters*depth elements at 'srco', contiguous;
+ * Output is iters groups of depth elements each
+ *        group i starts at dsto + i*stride
+ *        each group is contiguous
+ *
+ * The scaling done in each group is
+ *     tmp =   ( in[i] + offset) * gain
+ *     out[i] = clip_to_u8(   tmp/32K (with rounding))
+ *
+ *   i.e.
+ *      for( int i = 0; i < iters; i++ )
+ *         for (int  j = 0; j< depth; j++ )
+ *             dsto[ i*stride + j ]  = scale( srco[i*depth + j], offset,gain)
+ *
  */
           .global memconvert_hvx
           .type   memconvert_hvx, @function

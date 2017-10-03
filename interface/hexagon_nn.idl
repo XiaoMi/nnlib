@@ -50,9 +50,15 @@ struct input {
 	unsigned long output_idx;	// used if src_id not reserved
 };
 
+
+#define HEXAGON_NN_MAX_DIMENSIONS 8
+
 struct output {
-	unsigned long max_size;
-	unsigned long unused;		// Please place 0 here for now
+	unsigned long rank;
+	unsigned long max_sizes[8];	// IDL doesn't work with #defines maybe?
+	unsigned long elementsize;
+	long zero_offset;		// FUTURE: static range.  Set to 0 for current ops.
+	float stepsize;			// FUTURE: static range.  Set to 0 for current ops.
 };
 
 struct perfinfo {
@@ -88,7 +94,7 @@ struct tensordef {
 long config();
 
 /* Initialize a new graph, returns a new nn_id or -1 on error */
-long init();
+long init(rout nn_id g);
 
 /* Set debug verbosity.  Default is 0, higher values are more verbose */
 long set_debug_level(in nn_id id, in long level);
@@ -157,6 +163,9 @@ long version(rout long ver);
 long op_name_to_id(in string name, rout unsigned long node_id);
 /* Given an ID, return the op name */
 long op_id_to_name(in unsigned long node_id, rout string name);
+/* Count the number of nodes in the graph right now */
+/*long count_nodes(in nn_id id, rout unsigned long n_items);*/
+
 
 /* The following are deprecated */
 

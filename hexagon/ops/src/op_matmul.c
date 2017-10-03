@@ -55,6 +55,12 @@
 static int min(int a, int b) { return((a<b)?a:b); }
 #endif
 
+struct tdata {
+	struct nn_node *self;
+	void (*f)(struct nn_node *self, struct nn_graph *nn, int32_t a_off, int32_t b_off);
+	int retval;
+	nn_sem_t donesem;
+};
 
 static inline int matmul_execute(struct nn_node *self, struct nn_graph *nn,
 		void (*f)(struct nn_node *self, struct nn_graph *nn, int32_t a_offset, int32_t b_offset))
@@ -83,9 +89,6 @@ static inline int matmul_execute(struct nn_node *self, struct nn_graph *nn,
 	uint32_t out_height = a_height;
 	uint32_t out_width = a_width;
 	uint32_t out_depth = b_depth;
-
-	uint32_t out_elements = out_batches*out_height*out_width*out_depth;
-	size_t out_size = out_elements*sizeof(int32_t);
 
 	float a_max_float = tensor_get_float(max_a_tensor,0);
 	float a_min_float = tensor_get_float(min_a_tensor,0);
@@ -118,28 +121,41 @@ static inline int matmul_execute(struct nn_node *self, struct nn_graph *nn,
 		b_batches,b_height,b_width,b_depth);
 	logmsg(nn,2,"matmul out dims: %lux%lux%lux%lu",
 			out_batches,out_height,out_width,out_depth);
-	if (a_height != 1) return errlog(nn,"oops, height != 1");
-	if (b_height != 1) return errlog(nn,"oops, height != 1");
-	if (a_batches != 1) return errlog(nn,"fixme: support batches");
-	if (b_batches != 1) return errlog(nn,"fixme: support batches");
-	if (out_size > (out_tensor->max_size)) return errlog(nn,"output too small");
-	if (out_min->max_size < sizeof(float)) return errlog(nn,"min too small");
-	if (out_max->max_size < sizeof(float)) return errlog(nn,"max too small");
+	if (a_height != 1  || b_height != 1) return errlog(nn,"oops, height != 1");
+	if (a_batches != 1 || b_batches != 1) return errlog(nn,"fixme: support batches");
 
-	tensor_set_shape(out_tensor,out_batches,out_height,out_width,out_depth);
-	out_tensor->data_size = out_size;
+	if( tensor_out_prepare_normal( out_tensor,out_batches,out_height,out_width,out_depth , NN_TYPE_INT32)!= 0){
+		return errlog(nn,"output too small");
+	}
 
-	tensor_set_shape(out_min,1,1,1,1);
-	tensor_set_float(out_min,0,out_min_val);
-	tensor_set_shape(out_max,1,1,1,1);
-	tensor_set_float(out_max,0,out_max_val);
-	out_min->data_size = sizeof(float);
-	out_max->data_size = sizeof(float);
+	tensor_set_single_float( out_min, out_min_val);
+	tensor_set_single_float( out_max, out_max_val);
 
 	f(self, nn, a_offset, b_offset);
 
 	logmsg(nn,2,"matmul execute done!");
 	return 0;
+}
+
+static void matmul_worker(struct nn_graph *nn, void *vtdata)
+{
+	struct tdata *td = vtdata;
+	td->retval = matmul_execute(td->self,nn,td->f);
+	nn_sem_post(&td->donesem);
+}
+
+static int matmul_launch(struct nn_node *self, struct nn_graph *nn,
+		void (*f)(struct nn_node *self, struct nn_graph *nn, int32_t a_offset, int32_t b_offset))
+{
+	struct tdata td = {
+		.f = f,
+		.self = self,
+		.retval = 0,
+	};
+	nn_sem_init(&td.donesem,0);
+	nn_os_work_for_vector(nn,matmul_worker,&td);
+	nn_sem_wait(&td.donesem);
+	return td.retval;
 }
 
 static inline void matmul_ref(
@@ -152,9 +168,9 @@ static inline void matmul_ref(
 	const struct tensor *b_tensor = self->inputs[1];
 	struct tensor *out_tensor = self->outputs[0];
 
-	uint8_t *a = (uint8_t *)a_tensor->data;
-	uint8_t *b = (uint8_t *)b_tensor->data;
-	int32_t *out = (int32_t *)out_tensor->data;
+	uint8_t *a = a_tensor->data;
+	uint8_t *b = b_tensor->data;
+	int32_t *out = out_tensor->data;
 
 	int32_t adata;
 	int32_t bdata;
@@ -197,8 +213,8 @@ static inline void matmul_asm(
 	const struct tensor *b_tensor = self->inputs[1];
 	struct tensor *out_tensor = self->outputs[0];
 
-	uint8_t *a = (uint8_t *)a_tensor->data;
-	int32_t *out = (int32_t *)out_tensor->data;
+	uint8_t *a = a_tensor->data;
+	int32_t *out = out_tensor->data;
 
 	uint32_t a_width = a_tensor->shape.width;
 	uint32_t a_depth = a_tensor->shape.depth;
@@ -242,12 +258,12 @@ static inline void matmul_asm(
 
 static int matmul_execute_ref(struct nn_node *self, struct nn_graph *nn)
 {
-	return matmul_execute(self,nn,matmul_ref);
+	return matmul_launch(self,nn,matmul_ref);
 }
 
 static int matmul_execute_asm(struct nn_node *self, struct nn_graph *nn)
 {
-	return matmul_execute(self,nn,matmul_asm);
+	return matmul_launch(self,nn,matmul_asm);
 }
 
 static inline void logmsg_input(
@@ -300,7 +316,7 @@ static int matmul_check_ref(struct nn_node *self, struct nn_graph *nn)
 	uint32_t filt_batches = filt_tensor->shape.filt_batches;
 	uint32_t filt_depth = filt_tensor->shape.filt_depth;
 	uint32_t out_depth = filt_batches;
-	uint8_t *filt = (uint8_t *)filt_tensor->data;
+	uint8_t *filt = filt_tensor->data;
 	float filt_max_float = tensor_get_float(max_filt_tensor,0);
 	float filt_min_float = tensor_get_float(min_filt_tensor,0);
 	int32_t filt_offset = quantize_uint8(0.0f,filt_min_float,filt_max_float);
@@ -311,18 +327,29 @@ static int matmul_check_ref(struct nn_node *self, struct nn_graph *nn)
 	uint32_t vecinfo;
 	filt_elements_pad = (filt_elements_pad < 32)?32:filt_elements_pad;
 	consts_size = filt_elements_pad * out_depth_pad;
-	if ((self->opaque = memalign(ALIGN_SIZE,consts_size)) == NULL) {
-		return errlog(nn,"couldn't allocate buffer for const rearrangement");
+	if (self->opaque == NULL) {
+		if ((self->opaque = nn_memalign(ALIGN_SIZE,consts_size)) == NULL) {
+			return errlog(nn,"couldn't allocate buffer for const rearrangement");
+		}
 	}
 	nn_os_hvx_power_on(nn);
 	vecinfo = nn_os_vector_acquire();
+	nn_scratch_grow(nn,filt_elements_pad*out_depth_pad+256);
 	logmsg(nn,2,"Pad B: filt_elements=%lu %lu,out_depth=%lu %d, filt_offset=%ld", filt_elements, out_depth, filt_elements_pad,out_depth_pad, filt_offset);
-	pad2d(filt,filt_elements,out_depth,(uint8_t*)nn->scratch,filt_elements_pad,out_depth_pad,filt_offset);
-	transpack((const uint8_t *)nn->scratch,filt_elements_pad,out_depth_pad,(uint8_t *)self->opaque);
+	pad2d(filt,filt_elements,out_depth,nn->scratch,filt_elements_pad,out_depth_pad,filt_offset);
+	transpack(nn->scratch,filt_elements_pad,out_depth_pad,self->opaque);
 	nn_os_vector_release(vecinfo);
 	nn_os_hvx_power_off(nn);
 	logmsg(nn,2,"matmul node %p check OK",self);
 	return 0;
+}
+
+static int matmul_dtor(struct nn_node *self, struct nn_graph *nn)
+{
+	if (self->opaque) nn_free(self->opaque);
+	else logmsg(nn,0,"Oops: opaque pointer already gone?");
+	self->opaque = NULL;
+	return node_free_common(self,nn);
 }
 
 
@@ -350,15 +377,15 @@ static struct nn_node *matmul_ctor(
 }
 
 struct nn_node_ops nn_ops_for_QuantizedMatMul_8x8to32 = {
-	SFINIT(.execute, matmul_execute_asm),
-	SFINIT(  .check, matmul_check_ref),
-	SFINIT(   .ctor, matmul_ctor),
-	SFINIT(   .dtor, node_free_common),
+	.execute = matmul_execute_asm,
+	.check = matmul_check_ref,
+	.ctor = matmul_ctor,
+	.dtor = matmul_dtor,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedMatMul_8x8to32_ref = {
-	SFINIT(.execute, matmul_execute_ref),
-	SFINIT(  .check, matmul_check_ref),
-	SFINIT(   .ctor, matmul_ctor),
-	SFINIT(   .dtor, node_free_common),
+	.execute = matmul_execute_ref,
+	.check = matmul_check_ref,
+	.ctor = matmul_ctor,
+	.dtor = matmul_dtor,
 };

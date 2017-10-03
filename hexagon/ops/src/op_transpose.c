@@ -61,7 +61,7 @@ static int transpose_execute(struct nn_node *self, struct nn_graph *nn)
 	int idx;
 	int nd_idx;
 	int32_t val;
-	int32_t *out_data = (int32_t *)out_tensor->data;
+	int32_t *out_data = out_tensor->data;
 
 	logmsg(nn,2,"transpose execute. self=%p ",self);
 	logmsg(nn,3,"transpose input = %dx%dx%dx%d",
@@ -73,16 +73,15 @@ static int transpose_execute(struct nn_node *self, struct nn_graph *nn)
 	if ((dims_tensor->shape.batches != 1) 
 		|| (dims_tensor->shape.height != 1)
 		|| (dims_tensor->shape.width != 1)) return errlog(nn,"dims !1d");
-	if (in_tensor->data_size > out_tensor->max_size) return errlog(nn,"out too small");
 	length = dims_tensor->data_size / sizeof(int32_t);
 	if (unlikely(length > 4)) return errlog(nn,"oops, too dimensional");
 
 	/* Transpose 1D data? */
 	if (unlikely(length == 1)) {
 		logmsg(nn,3,"dims length 1? I think that means do nothing.");
-		out_tensor->shape = in_tensor->shape;
-		out_tensor->data_size = in_tensor->data_size;
-		memcpy(out_tensor->data,in_tensor->data,in_tensor->data_size);
+		if( tensor_copy( out_tensor, in_tensor) != 0 ){
+			return errlog(nn,"out too small");
+		}
 		return 0;
 	}
 
@@ -106,7 +105,6 @@ static int transpose_execute(struct nn_node *self, struct nn_graph *nn)
 		nd_idx = tensor_get_int32(dims_tensor,i);
 		idxtab[i+length_delta] = nd_idx + length_delta;
 	}
-	out_tensor->data_size = in_tensor->data_size;
 	/* Compute strides */
 	bs = strides[idxtab[0]];
 	hs = strides[idxtab[1]];
@@ -117,11 +115,10 @@ static int transpose_execute(struct nn_node *self, struct nn_graph *nn)
 	oh = dims[idxtab[1]];
 	ow = dims[idxtab[2]];
 	od = dims[idxtab[3]];
-	tensor_set_shape(out_tensor,
-		dims[idxtab[0]],
-		dims[idxtab[1]],
-		dims[idxtab[2]],
-		dims[idxtab[3]]);
+	int typ = in_tensor->format.type == NN_TYPE_INT32 ? NN_TYPE_INT32 : NN_TYPE_FLOAT;
+	if( tensor_out_prepare_normal( out_tensor, ob,oh,ow,od, typ)!=0 ){
+		return errlog(nn,"out too small");
+	}
 	logmsg(nn,3,"stride idx = %d,%d,%d,%d strides=%d,%d,%d,%d dims=%d,%d,%d,%d",
 		(int)idxtab[0],
 		(int)idxtab[1],
@@ -161,16 +158,16 @@ static int transpose_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Transpose_int32 = {
-	SFINIT(.execute, transpose_execute),
-	SFINIT(  .check, transpose_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = transpose_execute,
+	.check = transpose_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_Transpose_f = {
-	SFINIT(.execute, transpose_execute),
-	SFINIT(.check, transpose_check),
-	SFINIT(.ctor, node_alloc_common),
-	SFINIT(.dtor, node_free_common),
+	.execute = transpose_execute,
+	.check = transpose_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

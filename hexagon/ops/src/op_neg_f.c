@@ -38,26 +38,21 @@
 #include <string.h>
 #include <quantize.h>
 
+static void negate_operator( float * pout, float const *pin, int elements, void *info)
+{
+	int i;
+	for (i = 0; i < elements; i++) {
+		pout[i] = -pin[i];
+	}
+}
 
 static int neg_f_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	const struct tensor *in_tensor = self->inputs[0];
-	struct tensor *out_tensor = self->outputs[0];
-	size_t elements = in_tensor->shape.batches 
-		* in_tensor->shape.height
-		* in_tensor->shape.width
-		* in_tensor->shape.depth;
-	size_t bytes = elements * sizeof(float);
-	const float *in_data = (const float *)in_tensor->data;
-	float *out_data = (float *)out_tensor->data;
-	int i;
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	for (i = 0; i < elements; i++) {
-		*out_data++ = -(*in_data++);
-	}
-	out_tensor->shape = in_tensor->shape;
-	out_tensor->data_size = bytes;
-	return 0;
+	logmsg(nn,2,"neg execute. self=%p ",self);
+	int res = nn_generic_unary_float_op( self,nn, negate_operator, NULL,0);
+	if (res == 0)
+		logmsg(nn,2,"neg %p done",self);
+	return res;
 }
 
 static int neg_f_check(struct nn_node *self, struct nn_graph *nn)
@@ -70,9 +65,9 @@ static int neg_f_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Neg_f = {
-	SFINIT(.execute, neg_f_execute),
-	SFINIT(  .check, neg_f_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = neg_f_execute,
+	.check = neg_f_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

@@ -43,6 +43,8 @@
  */
 #include <stdarg.h>
 
+//#ifndef USE_OS_QURT
+#if 1
 void logv(const char *filename, unsigned int line, struct nn_graph *nn, int level, const char *fmt, va_list ap);
 
 static inline void logmsg_function(const char *filename, unsigned int line, struct nn_graph *nn, int level, const char *fmt, ...)
@@ -62,8 +64,34 @@ static inline int errlog_function(const char *filename, unsigned int line, struc
 	va_end(ap);
 	return -1;
 }
+//  if NN_LOG_MAXLEV defined, all log(nn,lev,..) are disaabled at compile time, where lev < maxlev
+// NOTE: if there are side-effects in the parameters to logmsg, they will be not
+// be evaluated if the logging is disabled due to lev > NN_LOGMAX, but they wull be
+// evaluated if the call is disabled due to lev > nn->debug_level. So, avoid that.
+//
+#ifdef NN_LOG_MAXLEV
+#if NN_LOG_MAXLEV < 0
+// must pretend to expand the call, or you get unused variable warnings
+#define logmsg(...)  ({if(0)logmsg_function("",0,__VA_ARGS__);})
+#else
+#define logmsg(NN,LEVEL,...) ({ if( !__builtin_constant_p(LEVEL)|| (LEVEL) <= NN_LOG_MAXLEV)\
+	logmsg_function(__FILE__,__LINE__,NN,LEVEL,__VA_ARGS__);})
+#endif
 
+#else // no NN_LOG_MAXLEV
 #define logmsg(...) logmsg_function(__FILE__,__LINE__,__VA_ARGS__)
+
+#endif
+
 #define errlog(...) errlog_function(__FILE__,__LINE__,__VA_ARGS__)
+
+#else
+
+#include <HAP_farf.h>
+#define logmsg(NN,LEVEL,...) do { if (unlikely((LEVEL) <= (NN)->debug_level)) do { FARF(ALWAYS,__VA_ARGS__); } while (0); } while (0)
+/* EJP: statement expression allows me to preserve file/line numbers while using FARF macro */
+#define errlog(NN,...) ({do { FARF(ALWAYS,__VA_ARGS__); } while (0); -1;})
+
+#endif
 
 #endif

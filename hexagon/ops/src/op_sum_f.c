@@ -61,9 +61,9 @@ static int sum_f_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Sum_f = {
-	SFINIT(.execute, sum_f_execute),
-	SFINIT(  .check, sum_f_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = sum_f_execute,
+	.check = sum_f_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

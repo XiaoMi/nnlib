@@ -33,109 +33,14 @@
  *
  */
 
+#if !defined(USE_OS_H2) && !defined(USE_OS_QURT)
+
 #include <pthread.h>
 #include <semaphore.h>
+#include <nn_graph.h>
 
-#ifdef H2_H
-
-h2_vecaccess_state_t vecstate;
-// h2_mutex_t init_mutex;
-int vec_initted;
-
-int nn_os_vector_acquire()
-{
-	h2_vecaccess_ret_t ret = h2_vecaccess_acquire(&vecstate);
-	return ret.idx;
-}
-
-void nn_os_vector_release(int idx)
-{
-	h2_vecaccess_release(&vecstate,idx);
-}
+int nn_os_vtcm_acquire(struct nn_graph *nn) { return 0; }
+int nn_os_vtcm_release(struct nn_graph *nn) { return 0; }
 
 #endif
-
-
-struct nn_pipe {
-	uint64_t *data;
-	pthread_mutex_t mutex;
-	nn_sem_t howempty;
-	nn_sem_t howfull;
-	int elements;
-	int send_idx;
-	int recv_idx;
-};
-
-void nn_pipe_send(nn_pipe_t *pipe, uint64_t data)
-{
-	int oldidx;
-	nn_sem_wait(&pipe->howempty);
-	pthread_mutex_lock(&pipe->mutex);
-	oldidx = pipe->send_idx;
-	pipe->sendidx = ((oldidx == (pipe->elements-1)) ? 0 : oldidx+1);
-	pipe->data[oldidx] = data;
-	pthread_mutex_unlock(&pipe->mutex);
-	nn_sem_post(&pipe->howfull);
-}
-
-uint64_t nn_pipe_recv(nn_pipe_t *pipe)
-{
-	int oldidx;
-	uint64_t ret;
-	nn_sem_wait(&pipe->howfull);
-	pthread_mutex_lock(&pipe->mutex);
-	oldidx = pipe->recv_idx;
-	ret = pipe->data[oldidx];
-	pipe->recv_idx = ((oldidx == (pipe->elements-1)) ? 0 : oldidx+1);
-	pthread_mutex_unlock(&pipe->mutex);
-	nn_sem_post(&pipe->howempty);
-	return ret;
-}
-
-nn_pipe_t *nn_pipe_alloc(uint32_t pipe_elements)
-{
-	nn_pipe_t *pipe;
-	uint64_t buf;
-	if ((buf = malloc(sizeof(uint64_t)*pipe_elements);
-	if ((pipe = malloc(sizeof(nn_pipe_t))) == NULL) {
-		free(buf);
-		return NULL;
-	}
-	pipe->data = buf;
-	pthread_mutex_init(&pipe->mutex,NULL);
-	sem_init(&pipe->howfull,0,0);
-	sem_init(&pipe->howempty,0,pipe_elements);
-	pipe->elements = pipe_elements;
-	pipe->send_idx = 0;
-	pipe->recv_idx = 0;
-}
-
-int nn_os_workers_spawn(struct nn_graph *nn)
-{
-	pthread_t vec,scal1,scal2;
-	pthread_attr_t attrs;
-	pthread_attr_init(&attrs);
-	pthread_attr_setstacksize(&attrs,8192);
-	struct tinfo info;
-	if (!vec_initted) {
-		vec_initted = 1;
-		h2_vecaccess_init(&vecstate,H2_VECACCESS_HVX_128);
-	}
-	nn->vec_work = nn_pipe_alloc(16);
-	nn->nonvec_work = nn_pipe_alloc(16);
-	nn_sem_init(&info.sem,0);
-	info.nn = nn;
-
-	/* Create vector */
-	info.pipe = nn->vec_work;
-	pthread_create(&vec,&attrs,nn_os_worker,&info);
-	nn_sem_wait(&info.sem);
-	/* create scalar */
-	info.pipe = nn->nonvec_work;
-	pthread_create(&scal1,&attrs,nn_os_worker,&info);
-	nn_sem_wait(&info.sem);
-	pthread_create(&scal2,&attrs,nn_os_worker,&info);
-	nn_sem_wait(&info.sem);
-	return 0;
-}
 

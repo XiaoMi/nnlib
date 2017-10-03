@@ -1,39 +1,4 @@
 /*
- * Copyright (c) 2017, The Linux Foundation. All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted (subject to the limitations in the
- * disclaimer below) provided that the following conditions are met:
- *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *
- *    * Redistributions in binary form must reproduce the above
- *      copyright notice, this list of conditions and the following
- *      disclaimer in the documentation and/or other materials provided
- *      with the distribution.
- *
- *    * Neither the name of The Linux Foundation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
- *
- * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
- * GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
- * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
- * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
- * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
- * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- */
-
-/*
   Behavioral Model
   ----------------
   speculative add two streams with guess of max and min
@@ -145,7 +110,7 @@ quant_add_spec_asm:
        ptr_c = memw(sp+#0<<2)
        vc80 = vsplat(r11)
    } {
-       maxe.h = vsub(vzero.h, mine.h)
+       maxe = vnot(mine)                           //set to 0x8000
        xb1xb0.tmp = vmem(ptr_a++#1)                //[0, 0]
        xb1xb0 = vxor(xb1xb0, vc80)                 //[0, 0]
        length= memw(sp+#2<<2)                 
@@ -157,7 +122,7 @@ quant_add_spec_asm:
    } {
        vkappa = vsplat(kappa)
        yb1yb0.tmp = vmem(ptr_b++#1)                //[0, 2]
-       yh1yh0.b = vshuffoe(vzero.b, yb1yb0.b)      //[0, 2]
+       yh1yh0.uh = vzxt(yb1yb0.ub)                 //[0, 2]
        length = lsr(length, #7)                    // truncate off bits
    } {
        maxe0 = maxe
@@ -171,59 +136,60 @@ quant_add_spec_asm:
        zh0.h = vadd(xh0.h, wh0.h)                  //[0, 4]
    } {
        voffset = vsplat(offset)                    //[P, 5]
-       wh1.h = vadd(yh1.h, vkappa.h)               //[0, 5]
+       wh1.h = vadd(yh1.h, vkappa.h)               //[0, 3]
        maxe0.h = vmax(maxe0.h, zh0.h)              //[0, 5]
+   } {
+       zh1.h = vadd(xh1.h, wh1.h)                  //[0, 5]
        p0 = cmp.eq(length,#0) ; if (p0.new) jump:nt .Loopbot
    } 
 /* -------------------------------------------------------------*/
        .balign 32
 .L_quant:
    {   uh0.h = vmpy(zh0.h, recip.h):VEXP           //[0, 6]
-       zh1.h = vadd(xh1.h, wh1.h)                  //[0, 6]
+       mine.h = vmin(mine.h, zh0.h)                //[0, 6]
        xb1xb0.tmp = vmem(ptr_a++#1)                //[1, 0]
        xb1xb0 = vxor(xb1xb0, vc80)                 //[1, 0]
    } {
-       mine.h = vmin(mine.h, zh0.h)                //[0, 7]
-       uh0.h = vsub(uh0.h, voffset.h)             //[0, 7]
+       uh1.h = vmpy(zh1.h, recip.h):VEXP           //[0, 7]
        xh1xh0.b = vshuffoe(xb1xb0.b, vzero.b)      //[1, 1]
    } {
-       uh1.h = vmpy(zh1.h, recip.h):VEXP           //[0, 8]
+       uh0.h = vsub(uh0.h, voffset.h)              //[0, 8]
+       uh1.h = vsub(uh1.h, voffset.h)              //[0, 8]
        yb1yb0.tmp = vmem(ptr_b++#1)                //[1, 2]
-       yh1yh0.b = vshuffoe(vzero.b, yb1yb0.b)      //[1, 2]
+       yh1yh0.uh = vzxt(yb1yb0.ub)                 //[1, 2]
    } {
-       uh1.h = vsub(uh1.h, voffset.h)             //[0, 9]
        xh0.h = vmpy(xh0.h, alpha.h):VEXP           //[1, 3]
        wh0.h = vadd(yh0.h, vkappa.h)               //[1, 3]
+       wh1.h = vadd(yh1.h, vkappa.h)               //[1, 3]
    } {
-       zb1zb0.ub = vsat(uh1.h, uh0.h)              //[0,10]
-       vmem(ptr_c++#1) = zb1zb0.new                //[0,10]
+       zb1zb0.ub = vsat(uh1.h, uh0.h)              //[0, 9]
+       vmem(ptr_c++#1) = zb1zb0.new                //[0, 9]
        xh1.h = vmpy(xh1.h, alpha.h):VEXP           //[1, 4]
        zh0.h = vadd(xh0.h, wh0.h)                  //[1, 4]
    } {
-       maxe.h = vmax(maxe.h, zh1.h)                //[0,11]
-       mine.h = vmin(mine.h, zh1.h)                //[0,11]
-       wh1.h = vadd(yh1.h, vkappa.h)               //[1, 5]
+       maxe.h = vmax(maxe.h, zh1.h)                //[0,10]
+       mine.h = vmin(mine.h, zh1.h)                //[0,10]
        maxe0.h = vmax(maxe0.h, zh0.h)              //[1, 5]
+       zh1.h = vadd(xh1.h, wh1.h)                  //[1, 5]
    }:endloop0
 .Loopbot:
 /* -------------------------------------------------------------*/
    {   uh0.h = vmpy(zh0.h, recip.h):VEXP           //[1, 6]
-       zh1.h = vadd(xh1.h, wh1.h)                  //[1, 6]
+       mine.h = vmin(mine.h, zh0.h)                //[1, 6]
    } {
-       mine.h = vmin(mine.h, zh0.h)                //[1, 7]
-       maxe.h = vmax(maxe.h, zh1.h)                //[1,11]
-       uh0.h = vsub(uh0.h, voffset.h)             //[1, 7]
+       uh1.h = vmpy(zh1.h, recip.h):VEXP           //[1, 7]
+       maxe.h = vmax(maxe.h, zh1.h)                //[1,10]
+       uh0.h = vsub(uh0.h, voffset.h)              //[1, 8]
    } {
-       loop0(.L_minmax, #5)
-       uh1.h = vmpy(zh1.h, recip.h):VEXP           //[1, 8]
-       mine.h = vmin(mine.h, zh1.h)                //[1,11]
+       uh1.h = vsub(uh1.h, voffset.h)              //[1, 8]
+       mine.h = vmin(mine.h, zh1.h)                //[1,10]
    } {
-       ptr_minmax = memw(sp+#1<<2)                 //[E, 11]
-       uh1.h = vsub(uh1.h, voffset.h)             //[1, 9]
-       c2 = #-2
+       ptr_minmax = memw(sp+#1<<2)                 //
+       loop0(.L_minmax, #5)                        //
+       c2 = #-2                                    //
    } {
-       zb1zb0.ub = vsat(uh1.h, uh0.h)              //[1,10]
-       vmem(ptr_c++#1) = zb1zb0.new                //[1,10]
+       zb1zb0.ub = vsat(uh1.h, uh0.h)              //[1, 9]
+       vmem(ptr_c++#1) = zb1zb0.new                //[1, 9]
        maxe.h = vmax(maxe0.h, maxe.h)
    }
 /* -------------------------------------------------------------*/
@@ -251,4 +217,7 @@ quant_add_spec_asm:
 /* -------------------------------------------------------------*/
       .size quant_add_spec_asm, .L_end-quant_add_spec_asm
 
+/*
+ * Copyright (c) 2017, The Linux Foundation. All rights reserved.
+ */
 /*=============================================================================*/

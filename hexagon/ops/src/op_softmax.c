@@ -37,20 +37,156 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
-#if defined(__hexagon__)
-#include "hexagon_types.h"
-#endif
-#include <op_exp2.h>
-#include <op_non_lin_gen_hvx_common.h>
+#include <hexagon_types.h>
+#include <op_softmax.h>
+
+
+
 
 /*
- * 
+ *
  * Now that that's out of the way, let's get to the good stuff.
- * 
+ *
  * This contains min and max (floating) ops
  */
 //#define SOFTMAX_PERFORMANCE
 
+// expf approx, same domain as 'proper' expf, and
+// accurate enough for softmax with 8-bit output.
+//
+static inline float expf_approx(float x){
+	int xfrac = roundf_i32(x*(float)(16384.0/0.69314718056) );
+	// now we want 2^xfrac (which has 14 fractional bits).
+	float xf  = (xfrac & 0x3FFF) * (float)(1./16384.);
+	// approx for 2^x
+	// good to about 11 bits
+	// 4th order would be:
+	// 1.          0.69304423  0.24130777  0.0521633   0.0134847
+
+	float exp0 = 1.0f + xf*(0.69051585f + xf*(0.23793659f + xf*0.07154756f));
+	return flt_power2(xfrac>>14)*exp0;
+}
+
+// softmax on qu8 inputs
+// defined (over a set of inputs x[0..n-1]) as
+//
+//       t[i] = exp( beta * x[i])
+//       y[i] = t[i]/sum(t[i])
+//
+// All results are in range 0..1, and have the same ordering as the input values.
+// - sum of all outputs is 1.0 (ideally, mathematically..)
+// - if one value is distinctly greater than all the others, it will tend to be close to 1.0
+//    and the others close to 0.0
+//   The amount of margin needed for 'distinctly' depends on beta.
+//
+// Note that adding a constant amount to all inputs has no effect; and
+// scaling the inputs by some factor is equivalent to changing beta; so we  can
+// assume for the discussion that x[i] are 0..255  and beta has been thus scaled.
+//
+// To keep t[i] values in a manageable range this is typically done as
+//       t[i] = exp( beta * (x[i]  - K))
+//       y[i] = t[i]/sum(t[i])
+//
+// .. where K is max(x[i]), so that all the exp() parameters are <= 0, and
+//     at least one is zero.
+//
+// When using floats, expf(x) is good up to x = 79.0  (even allowing up to 16k
+// accumulations of the largest value); and is fully precise down to x = -87.
+// (but can only go down to x= -83 for reasons given below).
+// So, whenever beta *255 < 162, which is pretty much always, we can use K = 83/beta, and avoid the need to
+// find the actual maximum ('beta' here refers to the scaled beta, which is 'stepsize' in code below).
+// We need to ensure that 255.0/sum(expf) doesn't overflow; that gives the lower limit of -83.
+//
+static int qsoftmax_execute_ref(struct nn_node *self, struct nn_graph *nn)
+{
+	int i,j;
+	const struct tensor *in_tensor = self->inputs[0];
+	const struct tensor *in_min_tensor = self->inputs[1];
+	const struct tensor *in_max_tensor = self->inputs[2];
+	struct tensor *out_tensor = self->outputs[0];
+	struct tensor *out_min_tensor = self->outputs[1];
+	struct tensor *out_max_tensor = self->outputs[2];
+	int depth = in_tensor->shape.depth;
+	int batches = in_tensor->shape.batches;
+	int height = in_tensor->shape.height;
+	int width = in_tensor->shape.width;
+	float beta = (self->n_inputs < 4) ? 1.0f : tensor_get_float(self->inputs[3],0);
+	float in_min = tensor_get_float(in_min_tensor,0);
+	float in_max = tensor_get_float(in_max_tensor,0);
+	float stepsize = beta*(in_max-in_min)/255.0f;
+	const uint8_t *in = in_tensor->data;
+	uint8_t *out = out_tensor->data;
+	int maxval;
+	int inval;
+	float *temp_slice;
+	float sum;
+	float recip;
+	logmsg(nn,2,"qsoftmax ref in=%dx%dx%dx%d beta=%f stepsize=%f",batches,height,width,depth,beta,stepsize);
+
+#ifdef SOFTMAX_PERFORMANCE
+	int start_time, end_time;
+	start_time =  nn_os_get_cycles(nn);
+#endif
+
+	if ((temp_slice = nn_scratch_alloc(nn,depth*sizeof(float))) == NULL) {
+		return errlog(nn,"can't alloc temp buffer");
+	}
+	if (tensor_out_prepare_normal(out_tensor,batches,height,width,depth,NN_TYPE_QUINT8) != 0) {
+		return errlog(nn,"out too small");
+	}
+	if( tensor_set_single_float(out_min_tensor,0.0f) != 0
+	    || tensor_set_single_float(out_max_tensor,1.0f) != 0){
+		return errlog(nn,"can't prep min or max");
+	}
+
+	if( stepsize < 0.63529f){
+		// stepsize * 255 < 162
+		// so stepsize*255 - 83  <= 79, and we can do expf of the
+		// whole range of (stepsize * uint8 -  83). Avoids the need for
+		// a 'max' pass.
+		// Note that 255./expf(-83) does not overflow (as when depth =1
+		// and the only input is zero).
+		//
+		for (j = 0; j < batches*height*width; j++) {
+			float sum = 0.0f;
+			for (i = 0; i < depth; i++) {
+				inval = in[j*depth+i];
+				sum += (temp_slice[i] = expf_approx(stepsize*inval-83.0f));
+			}
+			recip = 255.0f/sum;
+			for (i = 0; i < depth; i++) {
+				out[j*depth+i] = saturate_u8(fast_roundf(recip*temp_slice[i]));
+			}
+		}
+	}else{
+		for (j = 0; j < batches*height*width; j++) {
+			maxval = 0;
+			sum = 0.0f;
+			for (i = 0; i < depth; i++) {
+				inval = in[j*depth+i];
+				if (maxval < inval) maxval = inval;
+			}
+			for (i = 0; i < depth; i++) {
+				inval = in[j*depth+i];
+				sum += (temp_slice[i] = expf_approx(stepsize*(inval-maxval)));
+			}
+			/* best temp_slice is 1.0. */
+			recip = 255.0f/sum;
+			for (i = 0; i < depth; i++) {
+				out[j*depth+i] = saturate_u8(fast_roundf(recip*temp_slice[i]));
+			}
+		}
+	}
+#ifdef SOFTMAX_PERFORMANCE
+	end_time =  nn_os_get_cycles(nn);
+	printf("qsoftmax ref cycles = %d\n",end_time-start_time);
+#endif
+
+	logmsg(nn,2,"qsoftmax ref done");
+	return 0;
+}
+
+#if 0
 /*
 	b**x = exp(x * log(b)
 	exp(x) = exp2(x * (1/log(2)))
@@ -77,26 +213,26 @@ static int qsoftmax_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	int height = in_tensor->shape.height;
 	int width = in_tensor->shape.width;
 	size_t elements = depth * batches * height * width;
-	size_t bytes = elements * sizeof(uint8_t);
-	float *expf_out = (float *)nn->scratch;								// Note: size(expf_out) = (depth * 4) bytes
+	float *expf_out = nn->scratch;								// Note: size(expf_out) = (depth * 4) bytes
 	float *outf = (float *)pad_and_align(expf_out, depth*4);	// Note: size(outf) = (depth * batches * height * width * 4) bytes
+	float beta = (self->n_inputs < 4) ? 1.0f : tensor_get_float(self->inputs[3],0);
 
-	const uint8_t *in_data = (const uint8_t *)in_tensor->data;
-	uint8_t *out_data = (uint8_t *)out_tensor->data;
+	const uint8_t *in_data = in_tensor->data;
+	uint8_t *out_data = out_tensor->data;
 	int i;
 	int j;
-	float in_min = tensor_get_float(in_min_tensor,0);
-	float in_max = tensor_get_float(in_max_tensor,0);
-	float inval, outval, outmax=-INFINITY, outmin=INFINITY;
+	float in_min = tensor_get_float(in_min_tensor,0) * beta;
+	float in_max = tensor_get_float(in_max_tensor,0) * beta;
+	float inval, outval, calcmaxx=-INFINITY, outmin=INFINITY;
 	float sum, sum_recip;
 	float const_fact = (in_max - in_min)/(255*0.69315); // 0.69315 - log(2)
 	float mant2;
 	int exp2;
 
 	logmsg(nn,2,"qsoftmax ref execute. self=%p ",self);
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	out_tensor->shape = in_tensor->shape;
-	out_tensor->data_size = bytes;
+	if( tensor_out_prepare_normal_fromshape( out_tensor, &in_tensor->shape, NN_TYPE_QUINT8)!=0){
+		return errlog(nn,"out too small");
+	}
 
 #ifdef SOFTMAX_PERFORMANCE
 	int start_time, end_time;
@@ -118,7 +254,7 @@ static int qsoftmax_execute_ref(struct nn_node *self, struct nn_graph *nn)
 		for (i = 0; i < depth; i++) {
 			outval = expf_out[i] * sum_recip;
 			//printf("outval=%f\n",outval);
-			outmax = fmaxf(outmax,outval);
+			calcmaxx = fmaxf(calcmaxx,outval);
 			outmin = fminf(outmin,outval);
 			outf[i] = outval;
 		}
@@ -128,16 +264,12 @@ static int qsoftmax_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	}
 
 	/* Quantize output */
-	out_data = (uint8_t *)out_tensor->data;
+	out_data = out_tensor->data;
 	outf = (float *)pad_and_align(expf_out, depth*4);
-	quant_u8(out_data, outf, elements, outmin, outmax);
+	quant_u8(out_data, outf, elements, outmin, calcmaxx);
 
-	tensor_set_shape(out_min_tensor,1,1,1,1);
-	tensor_set_float(out_min_tensor,0,outmin);
-	out_min_tensor->data_size = sizeof(float);
-	tensor_set_shape(out_max_tensor,1,1,1,1);
-	tensor_set_float(out_max_tensor,0,outmax);
-	out_max_tensor->data_size = sizeof(float);
+	tensor_set_single_float(out_min_tensor,outmin);
+	tensor_set_single_float(out_max_tensor,calcmaxx);
 
 #ifdef SOFTMAX_PERFORMANCE
 	end_time =  nn_os_get_cycles(nn);
@@ -148,75 +280,51 @@ static int qsoftmax_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-/* Following simplification is used in HVX implementation
-	b**x = exp(x * log(b))
-	exp(x) = exp2(x * (1/log(2)))
+#if 0
+struct tdata {
+	struct nn_node *self;
+	int whoami;
+	void *in_data;
+	void *out_data;
+	float in_min;
+	float in_max;
+	float *outputmax;
+	int bhw;
+	int depth;
+	nn_sem_t donesem;
+};
 
-	// After Quantization
-	x_i = in_i - 255 => Note: x_i will always be negative and max value of 0
-	S = (in_max - in_min)/255
-	const_fact = S*(1/log(2))
-	softmax(x_j) = exp(x_j*S)/sum_i(exp(x_i*S))
-	softmax(x_j) = exp2(x_j*const_fact)/sum_i(exp2(x_i*const_fact))
-
-	x_j * const_fact => can be split into mantissa and exponent for further simplification
-
-Steps followed in implementation:
-1. Find integer and fractional part of x_i = ((255 - in_i) * const_fact) where const_fact = (in_max - in_min)/(255 * log(2))
-   exp2_in_i = integer_part(x_i)
-   in_pad_i = frac_part(x_i)
-2. Use non-linear tool to find exp2_out_i = exp2(-in_pad_i)
-3. Find sum_fix and max_out_data on out_pad_i = (exp2_out_i >> exp2_in_i)
-4. Compute sum_recip_buf and outmax
-		sum_recip_buf[j] = 255.0/sum_fix;
-		outmax = max_out_data/(float)sum_fix;
-5. If bhw!= 1 then recompute out_pad[i] = out_pad[i] * factor where factor = sum_recip_buf[j]/outmax
-6. Copy out_pad to out_data
-*/
-static int qsoftmax_execute_hvx(struct nn_node *self, struct nn_graph *nn)
+static void qsoftmax_execute_hvx_td(struct nn_graph *nn, void *vtdata)
 {
-	const struct tensor *in_tensor = self->inputs[0];
-	const struct tensor *in_min_tensor = self->inputs[1];
-	const struct tensor *in_max_tensor = self->inputs[2];
-	struct tensor *out_tensor = self->outputs[0];
-	struct tensor *out_min_tensor = self->outputs[1];
-	struct tensor *out_max_tensor = self->outputs[2];
-	int depth = in_tensor->shape.depth;
-	int batches = in_tensor->shape.batches;
-	int height = in_tensor->shape.height;
-	int width = in_tensor->shape.width;
-	int bhw = batches * height * width;
-	int elements = depth * bhw;
-	int bytes = elements * sizeof(uint8_t);
-	int depth_pad = (depth+MAXPAD-1)&~(MAXPAD-1);
-
-	/* Scratch space allocation - temporary */
-	uint8_t *out_pad = (uint8_t *)nn->scratch;
-	uint8_t *in_pad = (uint8_t *)pad_and_align(out_pad, bhw*depth_pad);
-	float *outf = (float *)pad_and_align(in_pad, depth_pad);				// Note: size(outf) = (depth * batches * height * width * 4) bytes
-	int8_t *exp2_shift = (int8_t *)pad_and_align(outf, elements*sizeof(float));	// along depth dimension
-	float *sum_recip_buf = (float *)pad_and_align(exp2_shift, depth_pad);
-	uint8_t *exp2_out = (uint8_t *)pad_and_align(sum_recip_buf, depth_pad);
-
-	const uint8_t *in_data = (const uint8_t *)in_tensor->data;
-	uint8_t *out_data = (uint8_t *)out_tensor->data;
-	uint8_t max_out_data = 0;//, max_out_data_hvx=0;
+	/* Parameters */
+	struct tdata *td = vtdata;
+	const uint8_t *in_data = td->in_data;
+	uint8_t *out_data = td->out_data;
+	float in_min = td->in_min;
+	float in_max = td->in_max;
+	float *outputmax = td->outputmax;
+	int bhw = td->bhw;
+	int depth = td->depth;
+	
+	/* Scalar variables */
+	float factor;
+	float calcmax = -INFINITY;
+	float const_fact = (in_max - in_min)/(255*0.69315); // 0.69315 - log(2)
+	int const_fact_int = (const_fact) * 0x1.0p16f + 0.5;
+	int sum_fix;
+	int ival;
 	int i;
 	int j;
-	float in_min = tensor_get_float(in_min_tensor,0);
-	float in_max = tensor_get_float(in_max_tensor,0);
-	float outmax=-INFINITY;
-	float factor;
-	int sum_fix;
-	float const_fact = (in_max - in_min)/(255*0.69315); // 0.69315 - log(2)
-	int const_fact_int = (const_fact) * ((float)(1<<16))/*0x1.0p16f*/ + 0.5;
-
-	int ival;
-
-	logmsg(nn,2,"qsoftmax hvx execute. self=%p ",self);
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	out_tensor->shape = in_tensor->shape;
-	out_tensor->data_size = bytes;
+	int depth_pad = (depth+MAXPAD-1)&~(MAXPAD-1);
+	uint8_t max_out_data = 0;//, max_out_data_hvx=0;
+	
+	/* Scratch space allocation - temporary */
+	uint8_t *out_pad = nn->scratch;
+	uint8_t *in_pad = (uint8_t *)pad_and_align(out_pad, bhw*depth_pad);
+	float *outf = (float *)pad_and_align(in_pad, depth_pad);				// Note: size(outf) = (depth * batches * height * width * 4) bytes
+	int8_t *exp2_shift = (int8_t *)pad_and_align(outf, bhw*depth*sizeof(float));	// along depth dimension
+	float *sum_recip_buf = (float *)pad_and_align(exp2_shift, depth_pad);
+	uint8_t *exp2_out = (uint8_t *)pad_and_align(sum_recip_buf, depth_pad);
 
 #ifdef SOFTMAX_PERFORMANCE
 	int start_time, end_time;//, t1, t2, t3, t4, t5;
@@ -235,7 +343,26 @@ static int qsoftmax_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	HVX_Vector *ptr_out_data, *ptr_data;
 	HVX_Vector *ptr_exp2_in, *ptr_in_pad;
 
-	for (j = 0; j < (batches * height * width); j++){
+	//int start_time, end_time;//, t1, t2, t3, t4, t5;
+	//start_time = nn_os_get_cycles(nn);
+
+	for (j = 0; j < bhw; j++){
+		/*
+			b**x = exp(x * log(b)
+			exp(x) = exp2(x * (1/log(2)))
+
+			// After Quantization
+			x_i = in_i - 255 => Note: x_i will always be negative and max value of 0
+			S = (in_max - in_min)/255
+			const_fact = S*(1/log(2))
+			softmax(x_j) = exp(x_j*S)/sum_i(exp(x_i*S))
+			softmax(x_j) = exp2(x_j*const_fact)/sum_i(exp2(x_i*const_fact))
+
+			x_j * const_fact => can be split into mantissa and exponent for further simplification
+		*/
+
+		/* Compute Mantissa for exp2(x) */
+		/* Quantize input for non-linear function exp2 */
 
 		/* 1. Find integer and fractional part of x_i = ((255 - in_i) * const_fact) where const_fact = (in_max - in_min)/(255 * log(2))
 		   exp2_in_i = integer_part(x_i)
@@ -274,9 +401,9 @@ static int qsoftmax_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 		}
 		//t1 = nn_os_get_cycles(nn);
 
-		/* 2. Use non-linear tool to find exp2_out_i = exp2(-in_pad_i) */
-		/* y = exp2(x), x is in range [-1 0], y = [0.5 1] */
-		qnonlinear_execute_i(exp2_out,in_pad,depth_pad,lut_non_lin_asm_exp2);
+		/* Compute exp2(x) */
+		// y = exp2(x), x is in range [-1 0], y = [0.5 1]
+		non_lin_i_exp2_8((signed char *)exp2_out, (signed char *)in_pad, depth_pad);
 
 		//t2 = nn_os_get_cycles(nn);
 
@@ -337,35 +464,34 @@ static int qsoftmax_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 		max_out_data = Q6_R_vextract_VR(vmax_out_data,0) & 0xff;
 		sum_fix =  Q6_R_vextract_VR(vsum,0);
 
-		/* Find outmax */
-		/* 4. Compute sum_recip_buf and outmax
-				sum_recip_buf[j] = 255.0/sum_fix;
-				outmax = max_out_data/(float)sum_fix; */
+		/* Find calcmax */
 		sum_recip_buf[j] = 255.0/sum_fix;
-		outmax = max_out_data/(float)sum_fix;
+		calcmax = max_out_data/(float)sum_fix;
 		//t4 = nn_os_get_cycles(nn);
 
 		out_pad += depth_pad;
 		in_data += depth;
 	}
 
-	/* Convert quantized values based on outmax */
-	/* 5. If bhw!= 1 then recompute out_pad[i] = out_pad[i] * factor where factor = sum_recip_buf[j]/outmax */
+	/* Convert quantized values based on calcmax */
 	if(bhw != 1) {
 		//out_data = out_tensor->data;
-		out_pad = (uint8_t *)nn->scratch;
-		for (j = 0; j < (batches * height * width); j++){
+		out_pad = nn->scratch;
+		for (j = 0; j < bhw; j++){
 
 			/* Multiply exp2(x) with reciprocal of sum(exp2(x)) */
-			/* Intrinsic code below implements the following C code
-				factor = sum_recip_buf[j]/outmax;
-				for (i = 0; i < depth; i++) {
-					ival = out_data[i];
-					out_data[i] = out_data[i] * factor;
-				}
+			/*
+			factor = sum_recip_buf[j]/calcmax;
+			for (i = 0; i < depth; i++) {
+				ival = out_data[i];
+				out_data[i] = out_data[i] * factor;
+				//printf("2. ival=%d factor=%f out_data=%d\n",ival,sum_recip_buf[j]/calcmax,out_data[i]);
+				printf("C ref: In: %x out:%x HVX=%x\n", ival, out_data[i], out_pad[i]);
+			}
 			*/
-			factor = sum_recip_buf[j]/outmax;
-			int factor_int = (factor) * ((float)(1<<14))/*0x1.0p14f*/ + 0.5;
+
+			factor = sum_recip_buf[j]/calcmax;
+			int factor_int = (factor) * 0x1.0p14f + 0.5;
 			int factor_int_Rh = Q6_R_combine_RlRl(factor_int, factor_int);
 			ptr_out_data = (HVX_Vector *)out_pad;
 			for (i = 0; i < depth_pad; i+=128) {
@@ -385,20 +511,61 @@ static int qsoftmax_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 
 	/* 6. Copy out_pad to out_data */
 	/* Copy from aligned buffer to out_data */
-	out_pad = (uint8_t *)nn->scratch;
-	for (j = 0; j < (batches * height * width); j++){
+	out_pad = nn->scratch;
+	for (j = 0; j < bhw; j++){
 		vmemcpy_asm(out_data,out_pad,depth);
 		out_data += depth;
 		out_pad += depth_pad;
 	}
 	//t5 = nn_os_get_cycles(nn);
+	*outputmax = calcmax;
+	nn_sem_post(&td->donesem);
+}
 
-	tensor_set_shape(out_min_tensor,1,1,1,1);
-	tensor_set_float(out_min_tensor,0,0);
-	out_min_tensor->data_size = sizeof(float);
-	tensor_set_shape(out_max_tensor,1,1,1,1);
-	tensor_set_float(out_max_tensor,0,outmax);
-	out_max_tensor->data_size = sizeof(float);
+static int qsoftmax_execute_hvx(struct nn_node *self, struct nn_graph *nn)
+{
+	const struct tensor *in_tensor = self->inputs[0];
+	const struct tensor *in_min_tensor = self->inputs[1];
+	const struct tensor *in_max_tensor = self->inputs[2];
+	struct tensor *out_tensor = self->outputs[0];
+	struct tensor *out_min_tensor = self->outputs[1];
+	struct tensor *out_max_tensor = self->outputs[2];
+	int batches = in_tensor->shape.batches;
+	int height = in_tensor->shape.height;
+	int width = in_tensor->shape.width;
+	int depth = in_tensor->shape.depth;
+	int bhw = batches * height * width;
+	uint8_t *in_data = in_tensor->data;
+	uint8_t *out_data = out_tensor->data;
+	float beta = (self->n_inputs < 4) ? 1.0f : tensor_get_float(self->inputs[3],0);
+	float in_min = tensor_get_float(in_min_tensor,0) * beta;
+	float in_max = tensor_get_float(in_max_tensor,0) * beta;
+	float out_max = -INFINITY;
+	
+	logmsg(nn,2,"qsoftmax hvx execute. self=%p ",self);
+
+	if( tensor_out_prepare_normal_fromshape( out_tensor, &in_tensor->shape, NN_TYPE_QUINT8)!=0){
+		return errlog(nn,"out too small");
+	}
+
+	struct tdata td = {
+		.self = self,
+		.whoami = 0,
+		.in_data = in_data,
+		.out_data = out_data,
+		.in_min = in_min,
+		.in_max = in_max,
+		.outputmax = &out_max,
+		.bhw = bhw,
+		.depth = depth,
+	};
+
+	nn_sem_init(&td.donesem,0);
+	nn_os_work_for_vector(nn, qsoftmax_execute_hvx_td, &td);
+	nn_sem_wait(&td.donesem);
+
+	tensor_set_single_float(out_min_tensor, 0.0f);
+	tensor_set_single_float(out_max_tensor,out_max);
 
 
 #ifdef SOFTMAX_PERFORMANCE
@@ -415,27 +582,33 @@ static int qsoftmax_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	logmsg(nn,2,"qsoftmax %p done",self);
 	return 0;
 }
+#endif
+#endif
 
 static int qsoftmax_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking softmax node %p",self);
-	if (self->n_inputs != 3) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
+
+	int k = node_check_inputs_range( self,nn, "softmax",3,4);	// 3 or 4 inputs
+	if( k==0) k = node_check_outputs_n( self, nn, "softmax", 3);	// 3 outputs
+	if( k!=0)
+		return k;
 	logmsg(nn,2,"softmax node %p check OK",self);
 	return 0;
 }
 
 struct nn_node_ops nn_ops_for_QuantizedSoftmax_8_ref = {
-	SFINIT(.execute, qsoftmax_execute_ref),
-	SFINIT(  .check, qsoftmax_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = qsoftmax_execute_ref,
+	.check = qsoftmax_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedSoftmax_8 = {
-	SFINIT(.execute, qsoftmax_execute_hvx),
-	SFINIT(  .check, qsoftmax_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	//.execute = qsoftmax_execute_hvx,
+	.execute = qsoftmax_execute_ref,
+	.check = qsoftmax_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

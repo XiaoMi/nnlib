@@ -32,7 +32,7 @@
 # OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
 # IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
-#
+
 
 import Image
 import sys
@@ -50,6 +50,7 @@ data = im.getdata()
 
 for (r,g,b) in data:
 	outf.write(struct.pack('BBB',r,g,b))
+	#outf.write(struct.pack('fff',float(r)/128-1,float(g)/128-1,float(b)/128-1))
 
 outf.close()
 

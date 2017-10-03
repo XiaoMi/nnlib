@@ -61,7 +61,7 @@
 #ifdef __hexagon__
 #include <hexagon_protos.h>
 
-#ifdef HEXAGON_V66
+#if 0 && defined(HEXAGON_V66)
 #define GVCONV_ASM gvconv2dbbb_v66_asm
 #define GVCONVSUM_ASM(BUF,FILT,OUT,W,OW,OD,WD,FW,FH,NL,IMSUM,FSUM,MAXBUF,U0,U1,BIASBUF,RLEV) \
 	GVCONV_ASM(BUF,FILT,OUT,W,OW,OD,WD,FW,FH,NL,IMSUM,FSUM,MAXBUF,BIASBUF,RLEV)
@@ -112,7 +112,7 @@ struct supernode_info {
 //#define SUPERNODE_DEBUG
 
 #define ALIGN_SIZE 128
-#define ROUNDUP(X) (((X) + ALIGN_SIZE - 1) & (~((X)-1)))
+#define ROUNDUP(X) (((X) + ALIGN_SIZE - 1) & (~((ALIGN_SIZE)-1)))
 #define MAXPAD (ALIGN_SIZE)
 static inline void *pad_and_align(void *ptr, unsigned long minsize)
 {
@@ -168,7 +168,7 @@ static int supernode_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	const struct tensor *bias_tensor = self->inputs[7];
 	const struct tensor *bias_min_tensor = self->inputs[8];
 	const struct tensor *bias_max_tensor = self->inputs[9];
-	struct supernode_info *nodeinfo = (struct supernode_info *)self->opaque;
+	struct supernode_info *nodeinfo = self->opaque;
 	struct tensor *out_tensor = self->outputs[0];
 	struct tensor *out_min = self->outputs[1];
 	struct tensor *out_max = self->outputs[2];
@@ -202,10 +202,10 @@ static int supernode_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	int32_t in_y_base;
 	int32_t in_x_base;
 
-	uint8_t *in = (uint8_t *)in_tensor->data;
-	uint8_t *filt = (uint8_t *)filt_tensor->data;
-	uint8_t *bias = (uint8_t *)bias_tensor->data;
-	uint8_t *out = (uint8_t *)out_tensor->data;
+	uint8_t *in = in_tensor->data;
+	uint8_t *filt = filt_tensor->data;
+	uint8_t *bias = bias_tensor->data;
+	uint8_t *out = out_tensor->data;
 
 	uint8_t *instripe;
 	uint8_t *filtstripe;
@@ -223,8 +223,8 @@ static int supernode_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	size_t tmp_out_size = out_elements*sizeof(int32_t);
 	size_t biasbuf_size = out_depth*sizeof(int32_t);
 
-	int32_t *biasbuf = (int32_t *)nn->scratch;
-	int32_t *tmp_out = (int32_t *)pad_and_align(biasbuf,biasbuf_size);
+	int32_t *biasbuf = nn->scratch;
+	int32_t *tmp_out = pad_and_align(biasbuf,biasbuf_size);
 
 	float in_max_float = tensor_get_float(max_in_tensor,0);
 	float in_min_float = tensor_get_float(min_in_tensor,0);
@@ -433,15 +433,15 @@ static inline void __attribute__((unused)) biasadd_relu_requant_ref(
 
 static void __attribute__((unused)) biasadd_relu_requant_execute_hvx_slice(struct nn_graph *nn, void * vinfo) 
 {
-        struct tdata *info = (struct tdata *)vinfo;
+        struct tdata *info = vinfo;
         struct nn_node *self = info->self;
         int whoami = info->whoami;
-        int32_t *biasbuf = (int32_t *)nn->scratch;
+        int32_t *biasbuf = nn->scratch;
 	struct tensor *out_tensor = self->outputs[0];
-        uint8_t *out = (uint8_t *)out_tensor->data;
+        uint8_t *out = out_tensor->data;
 
         int length, offset, k;
-        int * tmp_out = (int *)info->iptr;
+        int * tmp_out = info->iptr;
         int patches = info->arg0;
         int depth = info->arg1;
         if(whoami == 0) l2prefetch(biasbuf, 1, depth, depth);
@@ -481,7 +481,7 @@ static void __attribute__((unused)) biasadd_relu_requant_execute_hvx_slice(struc
 
 static void __attribute__((unused)) gemsuma_execute_hvx_slice(struct nn_graph *nn, void * vinfo) 
 {
-        struct tdata *info = (struct tdata *)vinfo;
+        struct tdata *info = vinfo;
         //struct nn_node *self = info->self;
         //int whoami = info->whoami;
         int filt_y = info->arg0;
@@ -512,7 +512,7 @@ static void __attribute__((unused)) gemsuma_execute_hvx_slice(struct nn_graph *n
 
 static void supernode_execute_hvx_slice(struct nn_graph *nn, void * vinfo) 
 {
-	struct tdata *info = (struct tdata *)vinfo;
+	struct tdata *info = vinfo;
 	struct nn_node *self = info->self;
 	int whoami = info->whoami; //do i use the high half or the low half.
 
@@ -564,7 +564,7 @@ static void supernode_execute_hvx_slice(struct nn_graph *nn, void * vinfo)
 	//int32_t in_y_base;
 	//int32_t in_x_base;
 
-	uint8_t *in = (uint8_t *)in_tensor->data;
+	uint8_t *in = in_tensor->data;
 	//uint8_t *filt = filt_tensor->data;
 	//uint8_t *bias = bias_tensor->data;
 
@@ -573,7 +573,7 @@ static void supernode_execute_hvx_slice(struct nn_graph *nn, void * vinfo)
 	int32_t maxsum = 0;
 
 	struct tensor *out_tensor = self->outputs[0];
-	uint8_t *out = (uint8_t *)out_tensor->data;
+	uint8_t *out = out_tensor->data;
 	uint32_t fixed_recip_level_size = info->arg0;
 
 	uint32_t out_elements = out_batches*out_height*out_width*out_depth;
@@ -649,15 +649,15 @@ static void supernode_execute_hvx_slice(struct nn_graph *nn, void * vinfo)
 	} else {
 	   im2col_bufsize = (in_width+pad_x)*(2*pad_y+in_height+2*filt_height)*in_depth_pad;
 	}
-	struct supernode_info *nodeinfo = (struct supernode_info *)self->opaque;
-	uint8_t * filt_pad_trans = (uint8_t *)nodeinfo->filt_pad;
-	int32_t * biasbuf = (int32_t *)nn->scratch;
-	uint8_t * im2col_patch_buf = (uint8_t *)pad_and_align(biasbuf,biasbuf_size);
-	int     * max_buf = (int *)pad_and_align(im2col_patch_buf,im2col_bufsize);
-	int     * im2col_sum = (int *)pad_and_align(max_buf,max_size);
-	int     * filt_sum = (int *)pad_and_align(im2col_sum,suma_size);
-	uint8_t  * tmp_out = (uint8_t *)pad_and_align(filt_sum,sumb_size);
-	uint8_t   * out_pad = (uint8_t *)pad_and_align(tmp_out,tmp_out_size);
+	struct supernode_info *nodeinfo = self->opaque;
+	uint8_t * filt_pad_trans = nodeinfo->filt_pad;
+	int32_t * biasbuf = nn->scratch;
+	uint8_t * im2col_patch_buf = pad_and_align(biasbuf,biasbuf_size);
+	int     * max_buf = pad_and_align(im2col_patch_buf,im2col_bufsize);
+	int     * im2col_sum = pad_and_align(max_buf,max_size);
+	int     * filt_sum = pad_and_align(im2col_sum,suma_size);
+	uint8_t  * tmp_out = pad_and_align(filt_sum,sumb_size);
+	uint8_t   * out_pad = pad_and_align(tmp_out,tmp_out_size);
         //int     * sumb, * max;
 	if (skip_unpad_m) out_pad = out;
 	uint64_t start_cycles = nn_os_get_cycles(nn);
@@ -885,7 +885,7 @@ static void supernode_execute_hvx_slice(struct nn_graph *nn, void * vinfo)
                                   filt_sum+32*whoami,
                                   max_buf + 32*whoami, -filt_offset, input_offset*filt_offset*K,
                                   (int *)biasbuf,
-                                  fixed_recip_level_size,shr_val);
+                                  fixed_recip_level_size);
                else
                    GVCONV_ASM (  im2col_buf + start_line * stride_width * W,
                                   filt_pad_trans + weights*K,
@@ -941,7 +941,7 @@ static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	struct tensor *out_tensor = self->outputs[0];
 	struct tensor *out_min = self->outputs[1];
 	struct tensor *out_max = self->outputs[2];
-	struct supernode_info *nodeinfo = (struct supernode_info *)self->opaque;
+	struct supernode_info *nodeinfo = self->opaque;
 
 	int32_t in_batches = in_tensor->shape.batches;
 	int32_t in_width = in_tensor->shape.width;
@@ -975,7 +975,8 @@ static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 
 	//uint8_t *in = in_tensor->data;
 	//uint8_t *filt = filt_tensor->data;
-	uint8_t *bias = (uint8_t *)bias_tensor->data;
+	uint8_t *bias = bias_tensor->data;
+	int32_t *bias32 = bias_tensor->data;
 	//uint8_t *out = out_tensor->data;
 
 	//int32_t in_element;
@@ -989,16 +990,16 @@ static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	size_t tmp_out_size = out_elements*sizeof(int32_t);
 	size_t biasbuf_size = out_depth*sizeof(int32_t);
 
-	struct tdata worker_info = {
-			self,
-			0,
+	struct tdata worker0_info = {
+			.self = self,
+			.whoami = 0,
 	};
-	nn_sem_init(&worker_info.donesem,0);
-	struct tdata my_info = {
-			self,
-			1,
+	nn_sem_init(&worker0_info.donesem,0);
+	struct tdata worker1_info = {
+			.self = self,
+			.whoami = 1,
 	};
-	nn_sem_init(&my_info.donesem,0);
+	nn_sem_init(&worker1_info.donesem,0);
 
 	float in_max_float = tensor_get_float(max_in_tensor,0);
 	float in_min_float = tensor_get_float(min_in_tensor,0);
@@ -1022,10 +1023,11 @@ static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	 * Multiply the grade sizes for the output grade size.
 	 * output min/max == INT_MIN / INT_MAX * output grade size
 	 */
-
+	int is_bias32 = (self->node_type == OP_Supernode_8x8p32to8);
+	float bias_divisor = is_bias32 ? 0x1.0p32 : 255.0f;
 	float in_level_size = (in_max_float - in_min_float) / 255;
 	float filt_level_size = (filt_max_float - filt_min_float) / 255;
-	float bias_level_size = (bias_max_float - bias_min_float) / 255;
+	float bias_level_size = (bias_max_float - bias_min_float) / bias_divisor;
 	float out_level_size = in_level_size * filt_level_size;
 
 	float bias_mpy_amt = (bias_level_size / out_level_size);
@@ -1050,7 +1052,6 @@ static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 
 	//int i,j;
 	int i;
-	int shr=0;
 
 	/* intermediate buffer generation */
 	int patches = out_height*out_width;
@@ -1086,7 +1087,7 @@ static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 #if 0
 	uint8_t* filt_pad_trans = self->opaque->filt_pad;
 #endif
-	int32_t *biasbuf = (int32_t *)nn->scratch;
+	int32_t *biasbuf = nn->scratch;
 	//uint8_t *im2col_buf = pad_and_align(biasbuf,biasbuf_size);
 	//int *max_buf = pad_and_align(im2col_buf,im2col_bufsize);
 	//int *suma = pad_and_align(max_buf,max_size);
@@ -1172,45 +1173,41 @@ static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	 * This *could* be changed to fixed point and vectorized, but it shouldn't
 	 * impact performance that much, just traversing depth once. 
 	 */
-	if (bias_max_float > 1073741824.0f /*0x1.0p30*/ * out_level_size) return errlog(nn,"bias magnitude too large");
-	if (bias_min_float < -1073741824.0f /*0x1.0p30*/ * out_level_size) return errlog(nn,"bias magnitude too large");
-	for (i = 0; i < out_depth; i++) {
-		int32_t biasval = bias[i];
-		biasbuf[i] = (biasval - bias_offset) * bias_mpy_amt+minval_offset+0.5f;
+	if (!is_bias32) {
+		if (bias_max_float > 0x1.0p30f * out_level_size) return errlog(nn,"bias magnitude too large");
+		if (bias_min_float < -0x1.0p30f * out_level_size) return errlog(nn,"bias magnitude too large");
+		for (i = 0; i < out_depth; i++) {
+			int32_t biasval = bias[i];
+			biasbuf[i] = (biasval - bias_offset) * bias_mpy_amt+minval_offset+0.5f;
+		}
+	} else {
+		for (i = 0; i < out_depth; i++) {
+			int32_t biasval = bias32[i];
+			biasbuf[i] = (biasval) * bias_mpy_amt+minval_offset+0.5f;
+		}
 	}
-	maxsum = ((final_out_max_val-final_out_min_val) / out_level_size) + 0.5f;
-    // To handle max-sum > 2^24, we find a right shift value. All the  conv value are right shifted before 
-    //  multiplying with reciprocal.
-    // Before calculating the reciprocal, calculate a shift amount: 0, or 16-Q6_R_cl0_R(val))
-    //  Shift the max value right by shift amount before finding the reciprocal
-    // Shift all the sums in core asm loop, right by shift amount before multiplying by the reciprocal.
-	shr = get_shr_val(maxsum);
-
-	fixed_recip_level_size = 0x00ff0000/(maxsum >> shr);
-
-#ifdef SUPERNODE_DEBUG
-	printf("Initial values - HVX: fixed_recip_level_size = %lu, shr = %d outmin/max = [%f %f], maxsum = %ld, out_level=%f, bias_adder=%d\n", fixed_recip_level_size, shr, final_out_min_val, final_out_max_val, maxsum, out_level_size, bias_adder);
-#endif
-	worker_info.arg0 = fixed_recip_level_size;
-	my_info.arg0 = fixed_recip_level_size;
-	worker_info.arg1 = shr;
-	my_info.arg1 = shr;
+	maxsum = round((final_out_max_val-final_out_min_val) / out_level_size);
+	fixed_recip_level_size = 0x00FF0000U/maxsum;	// chosen to align at bit 16
+	worker0_info.arg0 = fixed_recip_level_size;
+	worker1_info.arg0 = fixed_recip_level_size;
 
 	//conv_start = HAP_perf_get_pcycles();
-	nn_os_work_for_vector(nn,supernode_execute_hvx_slice,&worker_info);
+	nn_os_work_for_vector(nn,supernode_execute_hvx_slice,&worker0_info);
+	nn_os_work_for_vector(nn,supernode_execute_hvx_slice,&worker1_info);
 	//nn_os_work_for_vector(nn,supernode_execute_hvx_slice,&my_info);
 	//supernode_execute_hvx_slice(nn,&worker_info);
-	supernode_execute_hvx_slice(nn,&my_info);
+	//supernode_execute_hvx_slice(nn,&my_info);
 
-	nn_sem_wait(&worker_info.donesem);
+	nn_sem_wait(&worker0_info.donesem);
+	nn_sem_wait(&worker1_info.donesem);
 	//nn_sem_wait(&my_info.donesem);
-	record_usertime(nn,self,NN_GRAPH_PERFEVENT_USER0,(my_info.cycles+worker_info.cycles)/2);
+	record_usertime(nn,self,NN_GRAPH_PERFEVENT_USER0,(worker0_info.cycles+worker1_info.cycles)/2);
 	//nonconv_start = HAP_perf_get_pcycles();
 
 
 	//return 0;
-	maxsum = my_info.mat_max;
-	if(worker_info.mat_max > maxsum) maxsum = worker_info.mat_max;
+	maxsum = worker0_info.mat_max;
+	if(worker1_info.mat_max > maxsum) maxsum = worker1_info.mat_max;
 
 	if ((!nodeinfo->maxval_precalculated) && 
 		(((maxsum+bias_adder) * out_level_size) > (final_out_max_val-final_out_min_val))) {
@@ -1256,7 +1253,7 @@ static int supernode_check_ref(struct nn_node *self, struct nn_graph *nn)
 {
 	int i;
 	logmsg(nn,2,"Checking supernode node %p",self);
-	if (self->n_inputs != 12) return errlog(nn,"supernode wrong # inputs (%d)",self->n_inputs);
+	if (self->n_inputs != 12) return errlog(nn,"supernode wrong # inputs");
 	if (self->n_outputs != 3) return errlog(nn,"supernode wrong # outputs");
 	if (self->inputs == NULL) return errlog(nn,"NULL inputs");
 	if (self->outputs == NULL) return errlog(nn,"NULL outputs");
@@ -1278,7 +1275,7 @@ static int supernode_check_ref(struct nn_node *self, struct nn_graph *nn)
 	int32_t filt_width = filt_tensor->shape.filt_width;
 	int32_t filt_depth = filt_tensor->shape.filt_depth;
 	uint32_t out_depth = filt_batches;
-	uint8_t *filt = (uint8_t *)filt_tensor->data;
+	uint8_t *filt = filt_tensor->data;
 	float filt_max_float = tensor_get_float(max_filt_tensor,0);
 	float filt_min_float = tensor_get_float(min_filt_tensor,0);
 	int32_t filt_offset = quantize_uint8(0.0f,filt_min_float,filt_max_float);
@@ -1288,7 +1285,7 @@ static int supernode_check_ref(struct nn_node *self, struct nn_graph *nn)
 	uint32_t consts_size = filt_elements_pad * out_depth_pad;
 	int vec_id;
 	struct supernode_info *info;
-	if ((info = (struct supernode_info *)malloc(sizeof(*info))) == NULL) {
+	if ((info = nn_malloc(sizeof(*info))) == NULL) {
 		return errlog(nn,"couldn't allocate info");
 	}
 	info->maxval_precalculated = 1;
@@ -1297,7 +1294,7 @@ static int supernode_check_ref(struct nn_node *self, struct nn_graph *nn)
 	info->minval = tensor_get_float(self->inputs[10],0);
 	if (info->maxval == INFINITY) {
 		info->maxval_precalculated = 0;
-		info->maxval = 0.5;
+		info->maxval = 1.0f/128.0f;
 	}
 	if (info->minval == -INFINITY) {
 		info->minval_precalculated = 0;
@@ -1313,12 +1310,13 @@ static int supernode_check_ref(struct nn_node *self, struct nn_graph *nn)
 	};
 #endif
 	self->opaque = info;
-	if ((info->filt_pad = memalign(ALIGN_SIZE,consts_size)) == NULL) {
+	if (consts_size == 0) logmsg(nn,0,"HEY: CONSTS SIZE ZERO: f_el_pad=%d od_pad=%d filt_tensor=%p filtshape_loc=%p",filt_elements_pad,out_depth_pad,filt_tensor,&filt_tensor->shape);
+	if ((info->filt_pad = nn_memalign(ALIGN_SIZE,consts_size)) == NULL) {
 		return errlog(nn,"couldn't allocate buffer for const rearrangement");
 	}
 	vec_id = nn_os_vector_acquire();
-	pad2d(filt,filt_elements,out_depth,(uint8_t*)nn->scratch,filt_elements_pad,out_depth_pad,filt_offset);
-	transpack((const uint8_t*)nn->scratch,filt_elements_pad,out_depth_pad,(uint8_t*)info->filt_pad);
+	pad2d(filt,filt_elements,out_depth,nn->scratch,filt_elements_pad,out_depth_pad,filt_offset);
+	transpack(nn->scratch,filt_elements_pad,out_depth_pad,info->filt_pad);
 	nn_os_vector_release(vec_id);
 	logmsg(nn,2,"supernode node %p check OK",self);
 	return 0;
@@ -1327,35 +1325,68 @@ static int supernode_check_ref(struct nn_node *self, struct nn_graph *nn)
 
 static int supernode_dtor(struct nn_node *self, struct nn_graph *nn)
 {
-	struct supernode_info *info = (struct supernode_info *)self->opaque;
+	struct supernode_info *info = self->opaque;
 	if (info != NULL) {
-		free(info->filt_pad);
-		free(info);
+		nn_free(info->filt_pad);
+		nn_free(info);
 	}
 	return node_free_common(self,nn);
 }
 
 #if 0
 struct nn_node_ops nn_ops_for_QuantizedConv2d_8x8to32 = {
-	SFINIT(.execute, conv2d_execute_hvx),
-	SFINIT(  .check, conv2d_check_ref),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = conv2d_execute_hvx,
+	.check = conv2d_check_ref,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 #endif
 
 struct nn_node_ops nn_ops_for_Supernode_8x8p8to8 = {
-	SFINIT(.execute, supernode_execute_hvx),
-	//supernode_execute_ref,
-	SFINIT(  .check, supernode_check_ref),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, supernode_dtor),
+	.execute = supernode_execute_hvx,
+	//.execute = supernode_execute_ref,
+	.check = supernode_check_ref,
+	.ctor = node_alloc_common,
+	.dtor = supernode_dtor,
 };
 
 struct nn_node_ops nn_ops_for_Supernode_8x8p8to8_ref = {
-	SFINIT(.execute, supernode_execute_ref),
-	SFINIT(  .check, supernode_check_ref),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = supernode_execute_ref,
+	.check = supernode_check_ref,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};
+
+struct nn_node_ops nn_ops_for_Supernode_8x8p32to8 = {
+	.execute = supernode_execute_hvx,
+	//.execute = supernode_execute_ref,
+	.check = supernode_check_ref,
+	.ctor = node_alloc_common,
+	.dtor = supernode_dtor,
+};
+
+static int dwise_unsup_nond32_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	return errlog(nn,"Non-D32 supernode not supported");
+}
+
+static int dwise_unsup_nond32_check(struct nn_node *self, struct nn_graph *nn)
+{
+	return errlog(nn,"Non-D32 supernode not supported");
+}
+
+
+struct nn_node_ops nn_ops_for_DepthwiseSupernode_8x8p8to8 = {
+	.execute = dwise_unsup_nond32_execute,
+	.check = dwise_unsup_nond32_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};
+
+struct nn_node_ops nn_ops_for_DepthwiseSupernode_8x8p32to8 = {
+	.execute = dwise_unsup_nond32_execute,
+	.check = dwise_unsup_nond32_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

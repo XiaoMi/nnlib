@@ -62,8 +62,8 @@ static int batchspace_s2b_execute(struct nn_node *self, struct nn_graph *nn)
 	int32_t in_pad_left = 0;
 	int32_t in_pad_right = 0;
 
-	const float *in_base = (const float *)in_tensor->data;
-	float *out = (float *)out_tensor->data;
+	const float *in_base = in_tensor->data;
+	float *out = out_tensor->data;
 
 	if (subsample_dims >= 3) return errlog(nn,"don't support that many space dimensions");
 	if (subsample_dims == 1) {
@@ -81,7 +81,6 @@ static int batchspace_s2b_execute(struct nn_node *self, struct nn_graph *nn)
 	int32_t out_height = (in_height + in_pad_top + in_pad_bottom) / h_stride;
 	int32_t out_width = (in_width + in_pad_left + in_pad_right) / w_stride;
 	int32_t out_depth = in_depth;
-	int32_t out_elements = out_batches * out_width * out_height * out_depth;
 
 	if (subsample_dims < 1) return errlog(nn,"bad stride shape");
 	if (strides_tensor->shape.width != 1) return errlog(nn,"bad stride shape");
@@ -96,6 +95,10 @@ static int batchspace_s2b_execute(struct nn_node *self, struct nn_graph *nn)
 	}
 	if (((in_width + in_pad_left + in_pad_right) % w_stride) != 0) {
 		return errlog(nn,"width not evenly divisible");
+	}
+
+	if( tensor_out_prepare_normal( out_tensor,out_batches,out_height,out_width,out_depth, NN_TYPE_FLOAT )!=0){
+		return errlog(nn,"failed to prepare output");
 	}
 	for (h_start = 0; h_start < h_stride; h_start++) {
 		int h_begin = h_start - in_pad_top;
@@ -121,8 +124,6 @@ static int batchspace_s2b_execute(struct nn_node *self, struct nn_graph *nn)
 			}
 		}
 	}
-	tensor_set_shape(out_tensor,out_batches,out_height,out_width,out_depth);
-	out_tensor->data_size = out_elements * sizeof(float);
 	return 0;
 }
 
@@ -153,8 +154,8 @@ static int batchspace_b2s_execute(struct nn_node *self, struct nn_graph *nn)
 	int32_t out_height;
 	int32_t out_width;
 
-	const float *in_base = (const float *)in_tensor->data;
-	float *out_base = (float *)out_tensor->data;
+	const float *in_base = in_tensor->data;
+	float *out_base = out_tensor->data;
 
 	if (subsample_dims >= 3) return errlog(nn,"don't support that many space dimensions");
 	if (subsample_dims == 1) {
@@ -170,7 +171,6 @@ static int batchspace_b2s_execute(struct nn_node *self, struct nn_graph *nn)
 	out_height = h_stride * in_height - in_pad_top - in_pad_bottom;
 	out_width = w_stride * in_width - in_pad_left - in_pad_right;
 	out_batches = in_batches / (h_stride * w_stride);
-	int32_t out_elements = out_batches * out_width * out_height * out_depth;
 
 	if (subsample_dims < 1) return errlog(nn,"bad stride shape");
 	if (strides_tensor->shape.width != 1) return errlog(nn,"bad stride shape");
@@ -182,6 +182,9 @@ static int batchspace_b2s_execute(struct nn_node *self, struct nn_graph *nn)
 	if (pad_tensor->shape.batches != 1) return errlog(nn,"bad pad shape");
 	if ((in_batches % (h_stride * w_stride)) != 0) {
 		return errlog(nn,"batches not evenly divisible");
+	}
+	if( tensor_out_prepare_normal( out_tensor,out_batches,out_height,out_width,out_depth, NN_TYPE_FLOAT )!=0){
+		return errlog(nn,"failed to prepare output");
 	}
 
 	for (b = 0; b < out_batches; b++) {
@@ -203,8 +206,6 @@ static int batchspace_b2s_execute(struct nn_node *self, struct nn_graph *nn)
 		}
 	}
 
-	tensor_set_shape(out_tensor,out_batches,out_height,out_width,out_depth);
-	out_tensor->data_size = out_elements * sizeof(float);
 	return 0;
 }
 
@@ -218,16 +219,16 @@ static int batchspace_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_BatchToSpaceND_f = {
-	SFINIT(.execute, batchspace_b2s_execute),
-	SFINIT(  .check, batchspace_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = batchspace_b2s_execute,
+	.check = batchspace_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_SpaceToBatchND_f = {
-	SFINIT(.execute, batchspace_s2b_execute),
-	SFINIT(  .check, batchspace_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = batchspace_s2b_execute,
+	.check = batchspace_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

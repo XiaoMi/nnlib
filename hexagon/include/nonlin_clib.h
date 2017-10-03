@@ -34,9 +34,6 @@
  */
 
 
-//===============================================================
-//  Q6Vect512 Intrinsic Code
-//===============================================================
 // NoteA: "nonlin_coef.h" header file used as a medium for passing macros computed by Python to intrinsic/ASM code.
 // - macros consist of parameters like coef_scale, remez_order, sature_max, sature_min, num_bits_lut_integral_part, num_bits_lut_fractional_part, Q format use etc. 
 // - macros also consist of defines to skip parts of code that are unused (for example skipping code based on cases of odd and even symmetry)
@@ -253,146 +250,201 @@
  * MACROS for Bytes
  *************************************************************************/
 
-#define LOG2_VECT_SIZE_BYT (7)		// VECT_SIZE_BYTES = 128
+#define LOG2_VECT_SIZE_BYT (7)        // VECT_SIZE_BYTES = 128
 
 // rngidx = (((x & rngidx_mask) >> rngidx_rshift) ^ rngsignbits)
 #define CALC_VRNGIDX_FROM_VIN_BYT(VRNGIDX, VIN, VRNGMASK, VRNGSIGNBITS, RNGIDX_RSHIFT_BYT) \
     VRNGIDX = Q6_V_vand_VV(VIN, VRNGMASK); \
-    VRNGIDX = Q6_Vuh_vlsr_VuhR(VRNGIDX, RNGIDX_RSHIFT_BYT); \
-    
+    VRNGIDX = Q6_Vuh_vlsr_VuhR(VRNGIDX, RNGIDX_RSHIFT_BYT);
+
 // deltax = ((x & deltax_mask)
 #define CALC_VDELTAX_FROM_VIN_BYT(VDELTAX,VIN,VDLTMASK,DELTAX_LSHIFT) \
     VDELTAX = Q6_V_vand_VV(VIN, VDLTMASK);\
-	VDELTAX = Q6_Vh_vasl_VhR(VDELTAX, DELTAX_LSHIFT);
-    
+    VDELTAX = Q6_Vh_vasl_VhR(VDELTAX, DELTAX_LSHIFT);
+
 // Read coeff from LUT
 #define GET_VCOEF_FROM_VLUT_VRNGIDX_BYT(VCOEF0,VCOEF1,VLUT0,VLUT1,VRNGIDX) \
     VCOEF1 = Q6_Vb_vlut32_VbVbR(VRNGIDX, VLUT1, 0); \
     VCOEF0 = Q6_Vb_vlut32_VbVbR(VRNGIDX, VLUT0, 0);
-    
+
 // compute output using lut_non_lin & rngidx & deltax
 #define CALC_VOUT_INTERPOLATE_BYT(VOUT, WTEMP, VCOEF1, VDELTAX, VCOEF0, VDLTMULT) \
     WTEMP = Q6_Wh_vmpy_VbVb(VDELTAX,VCOEF1); \
     WTEMP = Q6_Wh_vmpyacc_WhVubVb(WTEMP, VDLTMULT, VCOEF0); \
     VOUT = Q6_Vb_vasr_VhVhR_rnd_sat(Q6_V_hi_W(WTEMP),Q6_V_lo_W(WTEMP),LOG2_VECT_SIZE_BYT);
 
-#define LOAD_VIN_1VEC_BYT(IN) \
-    vin##IN = *ptr_vx++; \
+// convert vout to q8 from q7 byt vect
+#define CONVERT_VOUT_TO_Q8_FROM_Q7_OFFSET_BYT(IN) \
+    vout##IN = Q6_Vb_vadd_VbVb(vout##IN,vconvert);
 
+#define CONVERT_VOUT_TO_Q8_FROM_Q7_SHIFT_BYT(IN) \
+    wtemp = Q6_Wh_vmpy_VubVb(vout##IN,vconvert); \
+    vout##IN = Q6_Vub_vasr_VhVhR_rnd_sat(Q6_V_hi_W(wtemp),Q6_V_lo_W(wtemp),0);
+
+// load vin byt vect
+#define LOAD_VIN_1VEC_BYT(IN) \
+    vin##IN = *ptr_vx++;
+
+// store vin byt vect
 #define STORE_VOUT_1VEC_BYT(OUT) \
-    *ptr_vy++ = vout##OUT ; \
-    
+    *ptr_vy++ = vout##OUT ;
+
+// process byt vect
 #define CALC_VRNGIDX_1VEC_BYT(IN, RNGIDX_RSHIFT) \
-    CALC_VRNGIDX_FROM_VIN_BYT(vrngidx##IN, vin##IN, vrngmask, vrngsignbits, RNGIDX_RSHIFT) \
+    CALC_VRNGIDX_FROM_VIN_BYT(vrngidx##IN, vin##IN, vrngmask, vrngsignbits, RNGIDX_RSHIFT)
 
 #define CALC_VDELTAX_1VEC_BYT(IN,DELTAX_LSHIFT) \
-    CALC_VDELTAX_FROM_VIN_BYT(vdeltax##IN, vin##IN, vdltmask,DELTAX_LSHIFT) \
+    CALC_VDELTAX_FROM_VIN_BYT(vdeltax##IN, vin##IN, vdltmask,DELTAX_LSHIFT)
 
 #define GET_VCOEF_1VEC_BYT(IN) \
-    GET_VCOEF_FROM_VLUT_VRNGIDX_BYT(vcoef0_##IN, vcoef1_##IN, vlut_order0, vlut_order1, vrngidx##IN) \
+    GET_VCOEF_FROM_VLUT_VRNGIDX_BYT(vcoef0_##IN, vcoef1_##IN, vlut_order0, vlut_order1, vrngidx##IN)
 
 #define CALC_VOUT_1VEC_BYT(IN) \
-    CALC_VOUT_INTERPOLATE_BYT(vout##IN, wtemp, vcoef1_##IN, vdeltax##IN, vcoef0_##IN, vdltmult) \
+    CALC_VOUT_INTERPOLATE_BYT(vout##IN, wtemp, vcoef1_##IN, vdeltax##IN, vcoef0_##IN, vdltmult)
 
+#define CONVERT_VOUT_TO_Q8_FROM_Q7_OFFSET_1VEC_BYT(IN) \
+    CONVERT_VOUT_TO_Q8_FROM_Q7_OFFSET_BYT(IN)
+
+#define CONVERT_VOUT_TO_Q8_FROM_Q7_SHIFT_1VEC_BYT(IN) \
+    CONVERT_VOUT_TO_Q8_FROM_Q7_SHIFT_BYT(IN)
+
+#define CONVERT_VOUT_TO_Q8_FROM_Q7_1VEC_BYT(IN) \
+    if (OUT_Q7_VAL_IS_NEGATIVE_TO_POSITIVE == 1) {\
+        CONVERT_VOUT_TO_Q8_FROM_Q7_OFFSET_1VEC_BYT(IN) \
+    }\
+    else {\
+        CONVERT_VOUT_TO_Q8_FROM_Q7_SHIFT_1VEC_BYT(IN) \
+    }
+
+// load vin byt vects
 #define LOAD_VIN_2VEC_BYT(IN1, IN2) \
-	LOAD_VIN_1VEC_BYT(IN1) \
-	LOAD_VIN_1VEC_BYT(IN2)
-    
-#define STORE_VOUT_2VEC_BYT(OUT1, OUT2) \
-	STORE_VOUT_1VEC_BYT(OUT1) \
-	STORE_VOUT_1VEC_BYT(OUT2)
-    
-#define CALC_VRNGIDX_2VEC_BYT(IN1,IN2,RNGIDX_RSHIFT) \
-	CALC_VRNGIDX_1VEC_BYT(IN1,RNGIDX_RSHIFT) \
-	CALC_VRNGIDX_1VEC_BYT(IN2,RNGIDX_RSHIFT)
-    
-#define CALC_VDELTAX_2VEC_BYT(IN1,IN2,DELTAX_LSHIFT) \
-	CALC_VDELTAX_1VEC_BYT(IN1,DELTAX_LSHIFT) \
-	CALC_VDELTAX_1VEC_BYT(IN2,DELTAX_LSHIFT)
-    
-#define GET_VCOEF_2VEC_BYT(IN1,IN2) \
-	GET_VCOEF_1VEC_BYT(IN1) \
-	GET_VCOEF_1VEC_BYT(IN2)
-    
-#define CALC_VOUT_2VEC_BYT(IN1,IN2) \
-	CALC_VOUT_1VEC_BYT(IN1) \
-	CALC_VOUT_1VEC_BYT(IN2) \
+    LOAD_VIN_1VEC_BYT(IN1) \
+    LOAD_VIN_1VEC_BYT(IN2)
 
+// store vin byt vects
+#define STORE_VOUT_2VEC_BYT(OUT1, OUT2) \
+    STORE_VOUT_1VEC_BYT(OUT1) \
+    STORE_VOUT_1VEC_BYT(OUT2)
+
+// process byt vects
+#define CALC_VRNGIDX_2VEC_BYT(IN1,IN2,RNGIDX_RSHIFT) \
+    CALC_VRNGIDX_1VEC_BYT(IN1,RNGIDX_RSHIFT) \
+    CALC_VRNGIDX_1VEC_BYT(IN2,RNGIDX_RSHIFT)
+
+#define CALC_VDELTAX_2VEC_BYT(IN1,IN2,DELTAX_LSHIFT) \
+    CALC_VDELTAX_1VEC_BYT(IN1,DELTAX_LSHIFT) \
+    CALC_VDELTAX_1VEC_BYT(IN2,DELTAX_LSHIFT)
+
+#define GET_VCOEF_2VEC_BYT(IN1,IN2) \
+    GET_VCOEF_1VEC_BYT(IN1) \
+    GET_VCOEF_1VEC_BYT(IN2)
+
+#define CALC_VOUT_2VEC_BYT(IN1,IN2) \
+    CALC_VOUT_1VEC_BYT(IN1) \
+    CALC_VOUT_1VEC_BYT(IN2)
+
+#define CONVERT_VOUT_TO_Q8_FROM_Q7_OFFSET_2VEC_BYT(IN1,IN2) \
+    CONVERT_VOUT_TO_Q8_FROM_Q7_OFFSET_1VEC_BYT(IN1) \
+    CONVERT_VOUT_TO_Q8_FROM_Q7_OFFSET_1VEC_BYT(IN2)
+
+#define CONVERT_VOUT_TO_Q8_FROM_Q7_SHIFT_2VEC_BYT(IN1,IN2) \
+    CONVERT_VOUT_TO_Q8_FROM_Q7_SHIFT_1VEC_BYT(IN1) \
+    CONVERT_VOUT_TO_Q8_FROM_Q7_SHIFT_1VEC_BYT(IN2)
+
+#define CONVERT_VOUT_TO_Q8_FROM_Q7_2VEC_BYT(IN1,IN2) \
+    if (OUT_Q7_VAL_IS_NEGATIVE_TO_POSITIVE == 1) {\
+        CONVERT_VOUT_TO_Q8_FROM_Q7_OFFSET_2VEC_BYT(IN1,IN2) \
+    }\
+    else {\
+        CONVERT_VOUT_TO_Q8_FROM_Q7_SHIFT_2VEC_BYT(IN1,IN2) \
+    }
+
+// non-lin intrinsic code for 8bit/byt vects
 #define NON_LIN_I_8(OUT, IN, LUT, NUMELEMENTS, RNGIDX_MASK, RNGIDX_RSHIFT, RNGIDX_NBITS, DELTAX_MASK, DELTAX_LSHIFT) \
-	/*NOTE: lut_non_lin_asm array is pre-shuffled to be in the correct order for the vlut32 instruction */\
-	HVX_Vector *vptr_non_lin = (HVX_Vector *)LUT;\
-	HVX_Vector *ptr_vx = (HVX_Vector *)IN;\
-	HVX_Vector *ptr_vy = (HVX_Vector *)OUT;\
-	HVX_Vector vin1, vin2, vout1, vout2;\
-	HVX_Vector vrngidx1, vdeltax1, vrngidx2, vdeltax2;\
-	HVX_Vector vrngmask, vdltmask, vdltmult;\
-	HVX_Vector vlut_order0, vlut_order1;\
-	HVX_Vector vcoef0_1, vcoef1_1, vcoef0_2, vcoef1_2;\
-	HVX_VectorPair wcoef, wtemp;\
-	int elementcount;\
-	int rngmask, dltmask, dltmult;\
-	/* vrngmask example  : 0xf0f0f0f0 (int bits b7-b4) or 0x78787878 (int bits b6-b3) */\
-	rngmask = (((int32_t)RNGIDX_MASK<<8) & 0x0000FF00) | ((int32_t)RNGIDX_MASK & 0x000000FF);\
-	vrngmask = Q6_V_vsplat_R(Q6_R_combine_RlRl(rngmask,rngmask));\
-	\
-	/* vdltmask example  : 0x0f0f0f0f (frac bits b3-b0) or 0x07070707 (frac bits b2-b0) */\
-	dltmask = (((int32_t)DELTAX_MASK<<8) & 0x0000FF00) | ((int32_t)DELTAX_MASK & 0x000000FF);\
-	vdltmask = Q6_V_vsplat_R(Q6_R_combine_RlRl(dltmask,dltmask));\
-	\
-	/* vdltmult - Convert COEF0 to 16-bit, COEF0 << 7 */\
-	dltmult = (1<<LOG2_VECT_SIZE_BYT);\
-	dltmult = (((int32_t)(dltmult)<<8) & 0x0000FF00) | ((int32_t)(dltmult) & 0x000000FF);\
-	vdltmult = Q6_V_vsplat_R(Q6_R_combine_RlRl(dltmult,dltmult));\
-	\
-	/* set lut pointers based on polynomial n_order */\
-	vlut_order0 = *vptr_non_lin++;\
-	vlut_order1 = *vptr_non_lin;\
-	\
-	/*PROLOG */\
-	int odd_flag = 0;\
-	odd_flag = (numelements >> LOG2_VECT_SIZE_BYT) & 1;	/* set flag if odd number of 128B vectors */\
-	numelements = numelements >> (LOG2_VECT_SIZE_BYT+1);	/* loop counter multiple of 256 elements */\
-	\
-	/*LOOP */\
-	for (elementcount = 0; elementcount < NUMELEMENTS; elementcount++) {\
-	\
-		/* load input x */\
-		LOAD_VIN_2VEC_BYT(1,2)\
-		\
-		/* rngidx = ((x & rngidx_mask) >> rngidx_rshift) */\
-		CALC_VRNGIDX_2VEC_BYT(1,2,RNGIDX_RSHIFT)\
-		\
-		/* deltax = (x & deltax_mask) */\
-		CALC_VDELTAX_2VEC_BYT(1,2,DELTAX_LSHIFT)\
-		\
-		/* read lut_non_lin */\
-		GET_VCOEF_2VEC_BYT(1,2)\
-		\
-		/* compute output using lut_non_lin & rngidx & deltax */\
-		CALC_VOUT_2VEC_BYT(1,2)\
-		\
-		/* store output y */\
-		STORE_VOUT_2VEC_BYT(1,2)\
-	}\
-	\
-	/*EPILOG */\
-	if(odd_flag) {\
-		/* load input x */\
-		LOAD_VIN_1VEC_BYT(1)\
-		\
-		/* rngidx = ((x & rngidx_mask) >> rngidx_rshift) */\
-		CALC_VRNGIDX_1VEC_BYT(1,RNGIDX_RSHIFT)\
-		\
-		/* deltax = (x & deltax_mask) */\
-		CALC_VDELTAX_1VEC_BYT(1,DELTAX_LSHIFT)\
-		\
-		/* read lut_non_lin */\
-		GET_VCOEF_1VEC_BYT(1)\
-		\
-		/* compute output using lut_non_lin & rngidx & deltax */\
-		CALC_VOUT_1VEC_BYT(1)\
-		\
-		/* store output y */\
-		STORE_VOUT_1VEC_BYT(1)\
-	}
+    /*NOTE: lut_non_lin_asm array is pre-shuffled to be in the correct order for the vlut32 instruction */\
+    HVX_Vector *vptr_non_lin = (HVX_Vector *)LUT;\
+    HVX_Vector *ptr_vx = (HVX_Vector *)IN;\
+    HVX_Vector *ptr_vy = (HVX_Vector *)OUT;\
+    HVX_Vector vin1, vin2, vout1, vout2;\
+    HVX_Vector vrngidx1, vdeltax1, vrngidx2, vdeltax2;\
+    HVX_Vector vrngmask, vdltmask, vdltmult;\
+    HVX_Vector vlut_order0, vlut_order1;\
+    HVX_Vector vcoef0_1, vcoef1_1, vcoef0_2, vcoef1_2;\
+    HVX_Vector vconvert;\
+    HVX_VectorPair wtemp;\
+    int elementcount;\
+    int rngmask, dltmask, dltmult;\
+    if (OUT_Q7_VAL_IS_NEGATIVE_TO_POSITIVE == 1) {\
+        vconvert = Q6_V_vsplat_R(0x80808080);\
+    }\
+    else {\
+        vconvert = Q6_V_vsplat_R(0x02020202);\
+    }\
+    \
+    /* vrngmask example  : 0xf0f0f0f0 (int bits b7-b4) or 0x78787878 (int bits b6-b3) */\
+    rngmask = (((int32_t)RNGIDX_MASK<<8) & 0x0000FF00) | ((int32_t)RNGIDX_MASK & 0x000000FF);\
+    vrngmask = Q6_V_vsplat_R(Q6_R_combine_RlRl(rngmask,rngmask));\
+    \
+    /* vdltmask example  : 0x0f0f0f0f (frac bits b3-b0) or 0x07070707 (frac bits b2-b0) */\
+    dltmask = (((int32_t)DELTAX_MASK<<8) & 0x0000FF00) | ((int32_t)DELTAX_MASK & 0x000000FF);\
+    vdltmask = Q6_V_vsplat_R(Q6_R_combine_RlRl(dltmask,dltmask));\
+    \
+    /* vdltmult - Convert COEF0 to 16-bit, COEF0 << 7 */\
+    dltmult = (1<<LOG2_VECT_SIZE_BYT);\
+    dltmult = (((int32_t)(dltmult)<<8) & 0x0000FF00) | ((int32_t)(dltmult) & 0x000000FF);\
+    vdltmult = Q6_V_vsplat_R(Q6_R_combine_RlRl(dltmult,dltmult));\
+    \
+    /* set lut pointers based on polynomial n_order */\
+    vlut_order0 = *vptr_non_lin++;\
+    vlut_order1 = *vptr_non_lin;\
+    \
+    /*PROLOG */\
+    int odd_flag = 0;\
+    odd_flag = (numelements >> LOG2_VECT_SIZE_BYT) & 1;    /* set flag if odd number of 128B vectors */\
+    numelements = numelements >> (LOG2_VECT_SIZE_BYT+1);    /* loop counter multiple of 256 elements */\
+    \
+    /*LOOP */\
+    for (elementcount = 0; elementcount < NUMELEMENTS; elementcount++) {\
+    \
+        /* load input x */\
+        LOAD_VIN_2VEC_BYT(1,2)\
+        \
+        /* rngidx = ((x & rngidx_mask) >> rngidx_rshift) */\
+        CALC_VRNGIDX_2VEC_BYT(1,2,RNGIDX_RSHIFT)\
+        \
+        /* deltax = (x & deltax_mask) */\
+        CALC_VDELTAX_2VEC_BYT(1,2,DELTAX_LSHIFT)\
+        \
+        /* read lut_non_lin */\
+        GET_VCOEF_2VEC_BYT(1,2)\
+        \
+        /* compute output using lut_non_lin & rngidx & deltax */\
+        CALC_VOUT_2VEC_BYT(1,2)\
+        \
+        /* store output y */\
+        CONVERT_VOUT_TO_Q8_FROM_Q7_2VEC_BYT(1,2)\
+        STORE_VOUT_2VEC_BYT(1,2)\
+    }\
+    \
+    /*EPILOG */\
+    if(odd_flag) {\
+        /* load input x */\
+        LOAD_VIN_1VEC_BYT(1)\
+        \
+        /* rngidx = ((x & rngidx_mask) >> rngidx_rshift) */\
+        CALC_VRNGIDX_1VEC_BYT(1,RNGIDX_RSHIFT)\
+        \
+        /* deltax = (x & deltax_mask) */\
+        CALC_VDELTAX_1VEC_BYT(1,DELTAX_LSHIFT)\
+        \
+        /* read lut_non_lin */\
+        GET_VCOEF_1VEC_BYT(1)\
+        \
+        /* compute output using lut_non_lin & rngidx & deltax */\
+        CALC_VOUT_1VEC_BYT(1)\
+        \
+        /* store output y */\
+        CONVERT_VOUT_TO_Q8_FROM_Q7_1VEC_BYT(1)\
+        STORE_VOUT_1VEC_BYT(1)\
+    }
 

@@ -46,15 +46,6 @@
 #define MAX_THREAD (2)  // Thread <= 2 is supported
 #define MIN_COPY_SIZE (32)
 #define USE_HVX_FLAG  (1)
-#define BUF_PAD_SIZE (ALIGN_SIZE*4)
-
-static inline void *pad_and_align(void *ptr, unsigned long minsize)
-{
-	uintptr_t ptrval = (uintptr_t)(ptr);
-	ptrval += minsize + (MAXPAD-1);
-	ptrval &= ~(ALIGN_SIZE-1);
-	return (void *)ptrval;
-}
 
 
 static inline void fast_memcpy(void *out_ptr, void *in_ptr, uint32_t len)
@@ -64,19 +55,6 @@ static inline void fast_memcpy(void *out_ptr, void *in_ptr, uint32_t len)
 	else
 		vmemcpy_asm(out_ptr,in_ptr, len);
 
-}
-
-static inline void fill_pad(char *out_ptr, uint32_t out_len, char *pad_ptr, uint32_t pad_len) {
-    while (out_len > 0) {
-        if (out_len >= pad_len) {
-            fast_memcpy(out_ptr, pad_ptr, pad_len); out_ptr += pad_len;
-            out_len -= pad_len;
-        } else {
-            // done
-            fast_memcpy(out_ptr, pad_ptr, out_len);
-            out_len = 0;
-        }
-    }
 }
 
 struct tdata_pad {
@@ -114,8 +92,8 @@ static inline void do_pad(
 	const int32_t element_size,
 	const int32_t padval)
 {
-	const char *in = (const char *)inpv;
-	char *out = (char *)outpv;
+	const char *in = inpv;
+	char *out = outpv;
 	//int h_out = h_in + pre_h + post_h;
 	int w_out = w_in + pre_w + post_w;
 	int d_out = d_in + pre_d + post_d;
@@ -165,7 +143,7 @@ static inline void do_pad_edge_hvx(
 	const int32_t padval)
 */
 {
-	struct tdata_pad *td = (struct tdata_pad *)vinfo;
+	struct tdata_pad *td = vinfo;
 	void *inpv  =  td->iptr;
 	void *outpv =  td->optr;
 	int32_t h_in = td->h_in;
@@ -180,10 +158,8 @@ static inline void do_pad_edge_hvx(
 	int32_t element_size = td->element_size;
 	int32_t padval       = td->padval;
 
-	const char *in = (const char *)inpv;
-	char *out = (char *)outpv;
-	char buf_pad [ALIGN_SIZE*30];
-	char *buf_pad_ptr = (char *)pad_and_align(buf_pad, ALIGN_SIZE);
+	const char *in = inpv;
+	char *out = outpv;
 	//int h_out = h_in + pre_h + post_h;
 	int w_out = w_in + pre_w + post_w;
 	int d_out = d_in + pre_d + post_d;
@@ -198,33 +174,32 @@ static inline void do_pad_edge_hvx(
 	int in_d_size = d_in * element_size;
 	int h,w;
 
-	memset(buf_pad_ptr,padval,BUF_PAD_SIZE);
+	//memset(buf_pad_ptr,padval,ALIGN_SIZE*4); 
 	
-	fill_pad(out, pre_h_size, buf_pad_ptr, BUF_PAD_SIZE); out += pre_h_size;
+	vmemset_asm(out,padval,pre_h_size); out += pre_h_size;
 
 	if((pre_d_size == 0) && (post_d_size == 0))
 	{
 	    for (h = 0; h < h_in; h++) {
-		fill_pad(out, pre_w_size, buf_pad_ptr, BUF_PAD_SIZE); out += pre_w_size;
+		vmemset_asm(out,padval,pre_w_size); out += pre_w_size;
 		fast_memcpy(out,(void *)in,in_d_size*w_in); in += in_d_size*w_in; out += in_d_size*w_in;
-		fill_pad(out, post_w_size, buf_pad_ptr, BUF_PAD_SIZE); out += post_w_size;
+		vmemset_asm(out,padval,post_w_size); out += post_w_size;
 	    }
 
 	} else {
 	    for (h = 0; h < h_in; h++) {
-		fill_pad(out, pre_w_size, buf_pad_ptr, BUF_PAD_SIZE); out += pre_w_size;
+		vmemset_asm(out,padval,pre_w_size); out += pre_w_size;
 		for (w = 0; w < w_in; w++)
 		{
-			fill_pad(out, pre_d_size, buf_pad_ptr, BUF_PAD_SIZE); out += pre_d_size;
+			memset(out,padval,pre_d_size); out += pre_d_size;
 			fast_memcpy(out,(void *)in,in_d_size*w_in); in += in_d_size*w_in; out += in_d_size*w_in;
-			fill_pad(out, post_d_size, buf_pad_ptr, BUF_PAD_SIZE); out += post_d_size;
+			memset(out,padval,post_d_size); out += post_d_size;
 		}
-		fill_pad(out, post_w_size, buf_pad_ptr, BUF_PAD_SIZE); out += post_w_size;
+		vmemset_asm(out,padval,post_w_size); out += post_w_size;
 	    }
 	}
 
-	fill_pad(out, post_h_size, buf_pad_ptr, BUF_PAD_SIZE); out += post_h_size;
-
+	vmemset_asm(out,padval,post_h_size); out += post_h_size;
 	nn_sem_post(&td->donesem);
 
 }
@@ -235,13 +210,13 @@ static int pad_generic_execute(struct nn_node *self,
 	struct nn_graph *nn, 
 	const struct tensor *in_tensor, 
 	const struct tensor *pads_tensor, 
-	uint32_t element_size, 
+	uint32_t element_type,
 	int padval, int hvx_flag)
 {
 	//const struct tensor *in_tensor = self->inputs[0];
 	//const struct tensor *pads_tensor = self->inputs[1];
 	struct tensor *out_tensor = self->outputs[0];
-	const int32_t *pads = (const int32_t *)pads_tensor->data;
+	const int32_t *pads = pads_tensor->data;
 	const int32_t pad_b_before = (pads_tensor->shape.width >= 1) ? pads[0+0] : 0;
 	const int32_t pad_b_after = (pads_tensor->shape.width >= 1) ? pads[0+1] : 0;
 	const int32_t pad_h_before = (pads_tensor->shape.width >= 2) ? pads[2+0] : 0;
@@ -259,10 +234,11 @@ static int pad_generic_execute(struct nn_node *self,
 	const int32_t h_out = h_in + pad_h_before + pad_h_after;
 	const int32_t b_out = b_in + pad_b_before + pad_b_after;
 	const uint32_t elements_out = d_out * w_out * h_out * b_out;
+	const uint32_t element_size = tensor_type_size( element_type);
 	const uint32_t bytes_out = elements_out * element_size;
-	uint8_t *in_base = (uint8_t *)in_tensor->data;
+	uint8_t *in_base = in_tensor->data;
 	uint8_t *inp;
-	uint8_t *out_base = (uint8_t *)out_tensor->data;
+	uint8_t *out_base = out_tensor->data;
 	uint8_t *outp;
 	int b;
 	struct tdata_pad td;
@@ -273,15 +249,10 @@ static int pad_generic_execute(struct nn_node *self,
 		pad_h_before,pad_h_after,
 		pad_w_before,pad_w_after,
 		pad_d_before,pad_d_after);
-	//if (pads_tensor->shape.depth != 2) return errlog(nn,"bad pad shape");
-	//if (pads_tensor->shape.width > 4) return errlog(nn,"bad pad shape");
-	//if (pads_tensor->shape.width < 4) return errlog(nn,"bad pad shape");
-	//if (pads_tensor->shape.height != 1) return errlog(nn,"bad pad shape");
-	//if (pads_tensor->shape.batches != 1) return errlog(nn,"bad pad shape");
 	if (pad_b_before || pad_b_after) return errlog(nn,"can't pad batches");
-	if (bytes_out > out_tensor->max_size) return errlog(nn,"out too small");
-	tensor_set_shape(out_tensor,b_out,h_out,w_out,d_out);
-	out_tensor->data_size = bytes_out;
+
+	if( tensor_out_prepare_normal( out_tensor ,b_out,h_out,w_out,d_out, element_type)!=0)
+		 return errlog(nn,"out too small");
 
 	for (b = 0; b < b_out; b++) {
 		inp = in_base + b*h_in*w_in*d_in*element_size;
@@ -314,7 +285,10 @@ static int pad_generic_execute(struct nn_node *self,
 		    else
 			l2fetch(inp, 1 , NUM_BYT_PERVECTOR , (32*1024)/NUM_BYT_PERVECTOR);
 
-		    do_pad_edge_hvx(nn,  &td);
+		    nn_sem_init(&td.donesem,0);
+
+		    nn_os_work_for_vector(nn,do_pad_edge_hvx, &td);
+		    nn_sem_wait(&td.donesem);
 
 		} else {
 		    do_pad( outp,
@@ -342,7 +316,7 @@ static int pad_f_execute(struct nn_node *self, struct nn_graph *nn)
 	uint32_t start_time =  nn_os_get_cycles(nn);
 #endif
 	
-	ret = pad_generic_execute(self,nn,self->inputs[0],self->inputs[1],sizeof(float),0, 0);
+	ret = pad_generic_execute(self,nn,self->inputs[0],self->inputs[1],NN_TYPE_FLOAT,0, 0);
 #ifdef DEBUG_PRINT_GENERIC_PAD_REF_PERFORMANCE
 	uint32_t end_time =  nn_os_get_cycles(nn);
 	printf("Pad -f cycles = %ld (elements = %d)\n", (end_time-start_time), ret);
@@ -373,7 +347,7 @@ static int pad_q_execute(struct nn_node *self, struct nn_graph *nn)
 #ifdef	DEBUG_PRINT_EDGE_PAD_HVX_PERFORMANCE
 	uint32_t start_time =  nn_os_get_cycles(nn);
 #endif
-	ret = pad_generic_execute(self,nn,in_tensor,in_pads_tensor,sizeof(uint8_t),padval, USE_HVX_FLAG);
+	ret = pad_generic_execute(self,nn,in_tensor,in_pads_tensor, NN_TYPE_QUINT8,padval, USE_HVX_FLAG);
 #ifdef	DEBUG_PRINT_EDGE_PAD_HVX_PERFORMANCE
 	uint32_t end_time=  nn_os_get_cycles(nn);
 	printf("Pad  HVX cycles = %lu (elements = %d)\n",  (end_time-start_time), ret);
@@ -385,8 +359,9 @@ static int pad_q_execute(struct nn_node *self, struct nn_graph *nn)
 static int pad_f_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"pad node %p",self);
-	if (self->n_inputs != 2) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
+	int k = node_check_inputs_outputs_n( self,nn, "pad", 2,1);
+	if (k!=0)
+		return k;
 	logmsg(nn,2,"pad %p check OK",self);
 	return 0;
 }
@@ -394,24 +369,25 @@ static int pad_f_check(struct nn_node *self, struct nn_graph *nn)
 static int pad_q_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"qpad node %p",self);
-	if (self->n_inputs < 4) return errlog(nn,"wrong # inputs");
-	if (self->n_inputs > 5) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
+	int k = node_check_inputs_range( self, nn, "pad", 4, 5 );
+	if(k==0) k = node_check_outputs_n( self, nn, "pad", 3 );
+	if (k!=0)
+		return k;
 	logmsg(nn,2,"pad %p check OK",self);
 	return 0;
 }
 
 struct nn_node_ops nn_ops_for_Pad_f = {
-	SFINIT(.execute, pad_f_execute),
-	SFINIT(  .check, pad_f_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = pad_f_execute,
+	.check = pad_f_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedPad_8 = {
-	SFINIT(.execute, pad_q_execute),
-	SFINIT(  .check, pad_q_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = pad_q_execute,
+	.check = pad_q_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

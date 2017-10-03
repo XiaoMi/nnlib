@@ -9,4 +9,7 @@ DEF_OPTION(layer_reorder,string,NULL,"Reorder depth layers. (\"210\" changes RGB
 DEF_OPTION(pprint_floats,int,0,"Pretty-Print output as floats")
 DEF_OPTION(pprint_imagenet,int,1,"Pretty-print output, getting top 5 values and use imagenet categories")
 DEF_OPTION(debug,int,0,"Debug verbosity level. Higher numbers get more verbosity.")
-
+DEF_OPTION(benchmark,int,0,"Bechmark mode.  Reduce work at the end of execution.  Reduces messages.")
+DEF_OPTION(bus_bw,int,0,"Collect bus BW")
+DEF_OPTION(node_perf,int,0,"Show the cycles each node consumed in last execution")
+DEF_OPTION(graph_rebuild,int,0,"Number of times to build/destroy the graph")

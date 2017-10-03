@@ -75,9 +75,9 @@ static int check_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Check = {
-	SFINIT(.execute, check_execute),
-	SFINIT(  .check, check_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = check_execute,
+	.check = check_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

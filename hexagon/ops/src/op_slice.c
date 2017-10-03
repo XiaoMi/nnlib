@@ -58,9 +58,9 @@ static int slice_impl(
 	int d_in,d_start,d_size;
 	uint32_t total_bytes;
 	uint32_t offset;
-	const char *data = (const char *)input_tensor->data;
+	const char *data = input_tensor->data;
 	const char *in;
-	char *out = (char *)out_tensor->data;
+	char *out = out_tensor->data;
 	int order_skip = 4-start_tensor->shape.depth;
 	logmsg(nn,2,"slice node %p execute",self);
 	b_in = input_tensor->shape.batches;
@@ -175,30 +175,30 @@ static int slice_check_q8(struct nn_node *self, struct nn_graph *nn)
 
 
 struct nn_node_ops nn_ops_for_Slice_f = {
-	SFINIT(.execute, slice_execute_f),
-	SFINIT(  .check, slice_check_f),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = slice_execute_f,
+	.check = slice_check_f,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_Slice_8 = {
-	SFINIT(.execute, slice_execute_8),
-	SFINIT(  .check, slice_check_8),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = slice_execute_8,
+	.check = slice_check_8,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_Slice_int32 = {
-	SFINIT(.execute, slice_execute_int32),
-	SFINIT(  .check, slice_check_int32),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = slice_execute_int32,
+	.check = slice_check_int32,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedSlice_8 = {
-	SFINIT(.execute, slice_execute_q8),
-	SFINIT(  .check, slice_check_q8),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = slice_execute_q8,
+	.check = slice_check_q8,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

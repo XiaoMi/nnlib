@@ -81,15 +81,15 @@ static int prod_i32_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Prod_f = {
-	SFINIT(.execute, prod_f_execute),
-	SFINIT(  .check, prod_f_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = prod_f_execute,
+	.check = prod_f_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_Prod_int32 = {
-	SFINIT(.execute, prod_i32_execute),
-	SFINIT(  .check, prod_i32_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = prod_i32_execute,
+	.check = prod_i32_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };

@@ -88,16 +88,27 @@ static struct nn_node *variable_ctor(
 		errlog(nn,"alloc node");
 		return NULL;
 	}
+	// Compute the total memory we'll need for all outputs
 	for (i = 0; i < num_outputs; i++) {
-		data_size += nn_align_up(128,outputs[0].max_size);
+		uint32_t size_of_output = outputs[i].elementsize;
+		for (int j=0; j<outputs[i].rank; j++) {
+			size_of_output *= outputs[i].max_sizes[j];
+		}
+		data_size += nn_align_up(128, size_of_output);
 	}
-	if ((self->opaque = memalign(128,data_size)) == NULL) {
+	// Request the memory we'll need to store outputs consecutively
+	if ((self->opaque = nn_memalign(128,data_size)) == NULL) {
 			errlog(nn,"tensor storage");
 	}
-	p = (uint8_t *)self->opaque;
+	// Divide and assign the memory to the various outputs
+	p = self->opaque;
 	for (i = 0; i < num_outputs; i++) {
 		self->outputs[i]->data = p;
-		p += nn_align_up(128,outputs[i].max_size);
+		uint32_t size_of_output = outputs[i].elementsize;
+		for (int j=0; j<outputs[i].rank; j++) {
+			size_of_output *= outputs[i].max_sizes[j];
+		}
+		p += nn_align_up(128, size_of_output);
 	}
 	return self;
 }
@@ -105,7 +116,8 @@ static struct nn_node *variable_ctor(
 static int variable_dtor(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"variable node %p dtor",self);
-	if (self->opaque) free(self->opaque);
+	if (self->opaque) nn_free(self->opaque);
+	self->opaque = NULL;
 	return node_free_common(self,nn);
 }
 
@@ -186,17 +198,17 @@ static int assign_check(struct nn_node *self, struct nn_graph *nn)
 
 
 struct nn_node_ops nn_ops_for_Assign = {
-	SFINIT(.execute, assign_execute),
-	SFINIT(  .check, assign_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = assign_execute,
+	.check = assign_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_Variable = {
-	SFINIT(.execute, variable_execute),
-	SFINIT(  .check, variable_check),
-	SFINIT(   .ctor, variable_ctor),
-	SFINIT(   .dtor, variable_dtor),
+	.execute = variable_execute,
+	.check = variable_check,
+	.ctor = variable_ctor,
+	.dtor = variable_dtor,
 };
 
 

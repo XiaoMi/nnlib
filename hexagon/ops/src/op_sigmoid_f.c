@@ -39,30 +39,23 @@
 #include <quantize.h>
 #include <math.h>
 
-static int sigmoid_execute(struct nn_node *self, struct nn_graph *nn)
+
+
+static void sigmoid_operator( float * out_data, float const *in_data, int elements, void *info)
 {
-	const struct tensor *in_tensor = self->inputs[0];
-	struct tensor *out_tensor = self->outputs[0];
-	size_t elements = in_tensor->shape.batches 
-		* in_tensor->shape.height
-		* in_tensor->shape.width
-		* in_tensor->shape.depth;
-	size_t bytes = elements * sizeof(float);
-	const float *in_data = (const float *)in_tensor->data;
-	float *out_data = (float *)out_tensor->data;
-	uint32_t i;
-
-	logmsg(nn,2,"sigmoid execute. self=%p ",self);
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	out_tensor->shape = in_tensor->shape;
-	out_tensor->data_size = bytes;
-
+	int i;
 	for (i = 0; i < elements; i++) {
 		out_data[i] = (1.0f+tanhf(in_data[i] * 0.5f)) * 0.5f;
 	}
+}
 
-	logmsg(nn,2,"sigmoid %p done",self);
-	return 0;
+static int sigmoid_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	logmsg(nn,2,"sigmoid execute. self=%p ",self);
+	int res =  nn_generic_unary_float_op( self,nn, sigmoid_operator, NULL,0);
+	if (res == 0)
+		logmsg(nn,2,"sigmoid %p done",self);
+	return res;
 }
 
 static int sigmoid_check(struct nn_node *self, struct nn_graph *nn)
@@ -75,9 +68,9 @@ static int sigmoid_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Sigmoid_f = {
-	sigmoid_execute,
-	sigmoid_check,
-	node_alloc_common,
-	node_free_common,
+	.execute = sigmoid_execute,
+	.check = sigmoid_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

@@ -65,6 +65,13 @@ int graph_get_all_perf(
 	int depth,
 	int width,
 	int height);
+int graph_get_a_perf(
+	uint32_t id,
+	int elementsize,
+	int depth,
+	int width,
+	int height,
+	int event);
 int graph_execute(uint32_t id, 
 	void *output, 
 	uint32_t *output_size,
@@ -74,7 +81,8 @@ int graph_execute(uint32_t id,
 	int width,
 	int height,
 	float *msecs_out,
-	unsigned long long int *pcycles_out);
+	unsigned long long int *pcycles_out,
+	const struct options *options);
 void option_init(struct options *options);
 int is_option_flag(const char *flag);
 int do_option(struct options *options, int argc, const char **argv, int i);

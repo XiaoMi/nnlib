@@ -69,7 +69,12 @@ void imagenet_top5(float *data, int length)
 	qsort(tmp,length,sizeof(*tmp),indexed_data_sort);
 	printf("%s,%s,%s,%s\n","Rank","Softmax","index","string");
 	for (i = 0; i < 5; i++) {
-		printf("%d,%f,%d,%s\n",i,tmp[i].f,tmp[i].i,imagenet_categories[tmp[i].i]);
+		int index = tmp[i].i;
+		if ((index >= 0) && (index < 1024)) {  // TODO - Hardcoded range (just like data in imagenet_categories[])
+			printf("%d,%f,%d,%s\n",i,tmp[i].f,index,imagenet_categories[index]);
+		} else {
+			printf("ERROR: Index %d is out of range\n",index);
+		}
 	}
 	free(tmp);
 }

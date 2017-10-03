@@ -53,17 +53,19 @@ static int mul_f_execute(struct nn_node *self, struct nn_graph *nn)
 
 static int mul_f_check(struct nn_node *self, struct nn_graph *nn)
 {
-	logmsg(nn,2,"mul node %p",self);
-	if (self->n_inputs != 2) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"mul %p check OK",self);
+	int k;
+	logmsg(nn,2,"mul_f node %p",self);
+
+	k = node_check_inputs_outputs_n( self,nn, "mul_f", 2, 1);
+	if( k!= 0) return k;
+	logmsg(nn,2,"mul_f %p check OK",self);
 	return 0;
 }
 
 struct nn_node_ops nn_ops_for_Mul_f = {
-	mul_f_execute,
-	mul_f_check,
-	node_alloc_common,
-	node_free_common,
+	.execute = mul_f_execute,
+	.check = mul_f_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

@@ -51,39 +51,84 @@
  * So... we're going to assume that zero-initialized mutex means unlocked. 
  */
 
-int do_execute(struct nn_graph *nn,
-	const struct tensor *inputs,
-	uint32_t n_inputs,
-	struct tensor *outputs,
-	uint32_t n_outputs)
+void execute_set_canaries(struct nn_graph *nn, struct nn_node *node)
+{
+	int i;
+	for (i = 0; i < node->n_outputs; i++) {
+		canary_mark(nn,node->outputs[i]);
+	}
+}
+
+void execute_check_src_canaries(struct nn_graph *nn, struct nn_node *node)
+{
+	int i;
+	for (i = 0; i < node->n_inputs; i++) {
+		if (canary_check(nn,node->inputs[i]) != 0) {
+			logmsg(nn,0,"src canary fail @ node=%p id=%x input=%d (%p @ %p)",node,node->node_id,i,node->inputs[i],&node->inputs[i]);
+		}
+	}
+}
+
+void execute_check_dst_canaries(struct nn_graph *nn, struct nn_node *node)
+{
+	int i;
+	for (i = 0; i < node->n_outputs; i++) {
+		if (canary_check(nn,node->outputs[i]) != 0) {
+			logmsg(nn,0,"dst canary fail @ node=%p id=%x output=%d (%p)",node,node->node_id,i,node->outputs[i],&node->outputs[i]);
+		}
+	}
+}
+
+int do_execute(struct nn_graph *nn)
 {
 	struct nn_node *node;
 	int err = 0;
 	uint64_t perf_start;
 	uint64_t perf_stop;
+	uint64_t pcycle_node;
 	uint64_t pcycle_start;
 	uint64_t pcycle_stop;
+	uint64_t pcycle_overhead;
 	int i;
+	int j;
 	static nn_mutex_t exec_mutex = NN_MUTEX_INIT;
-	nn->inputs = inputs;
-	nn->n_inputs = n_inputs;
-	nn->outputs = outputs;
-	nn->n_outputs = n_outputs;
+	struct nn_node *start_node = nn->head;
+	if (nn->nonconst_head_ptr && *nn->nonconst_head_ptr) start_node = *nn->nonconst_head_ptr;
 	nn_mutex_lock(&exec_mutex);
 	nn_os_hvx_power_on(nn);
 	nn_os_vector_workers_acquire(nn);
+	nn_os_vtcm_acquire(nn);
 	pcycle_start = nn_os_get_cycles(nn);
+	pcycle_overhead = nn_os_get_cycles(nn) - pcycle_start;
 	for (i = 0; i < ITERS; i++) {
-	for (node = nn->head; node != NULL; node = node->next) {
+	//print_tensors(inputs, n_inputs);
+	for (node = start_node; node != NULL; node = node->next) {
+		//execute_check_src_canaries(nn,node);
+		//execute_set_canaries(nn,node);
 		perf_start = nn_os_get_perfcount(nn);
+		pcycle_node = nn_os_get_cycles(nn);
+		nn_scratch_reset(nn);
+		for (j = 0; j < node->n_inputs; j++) {
+			//print_tensor(node->inputs[j],"in");
+		}
 		if ((err = node->ops->execute(node,nn)) != 0) break;
+		pcycle_stop = nn_os_get_cycles(nn);
 		perf_stop = nn_os_get_perfcount(nn);
+		if ((node->n_outputs > 0) && (node->outputs != NULL)) {
+			for (j = 0; j < node->n_outputs; j++) {
+				//print_tensor(node->outputs[j],"out");
+			}
+		}
+		//execute_check_dst_canaries(nn,node);
 		node->perfcounter += (perf_stop - perf_start);
 		node->executions += 1;
+		node->iter_cycles = pcycle_stop - pcycle_node - pcycle_overhead;
+		//print_node_checksum(nn, node);
 	}
 	}
 	pcycle_stop = nn_os_get_cycles(nn);
 	nn->execution_total_cycles = pcycle_stop - pcycle_start;
+	nn_os_vtcm_release(nn);
 	nn_os_vector_workers_release(nn);
 	nn_os_hvx_power_off(nn);
 	nn_mutex_unlock(&exec_mutex);

@@ -44,7 +44,7 @@
 #include <string.h>
 #include <quantize.h>
 
-static int autorequantize_execute(struct nn_node *self, struct nn_graph *nn)
+static int do_autorequantize_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *in_min_tensor = self->inputs[1];
@@ -52,12 +52,9 @@ static int autorequantize_execute(struct nn_node *self, struct nn_graph *nn)
 	struct tensor *out_tensor = self->outputs[0];
 	struct tensor *out_min_tensor = self->outputs[1];
 	struct tensor *out_max_tensor = self->outputs[2];
-	size_t elements = in_tensor->shape.batches 
-		* in_tensor->shape.height
-		* in_tensor->shape.width
-		* in_tensor->shape.depth;
-	const int32_t *in_data = (const int32_t *)in_tensor->data;
-	uint8_t *out_data = (uint8_t *)out_tensor->data;
+	size_t elements = tensor_element_count(in_tensor);
+	const int32_t *in_data = in_tensor->data;
+	uint8_t *out_data = out_tensor->data;
 	uint32_t i;
 	float in_min = tensor_get_float(in_min_tensor,0);
 	float in_max = tensor_get_float(in_max_tensor,0);
@@ -76,10 +73,10 @@ static int autorequantize_execute(struct nn_node *self, struct nn_graph *nn)
 	logmsg(nn,2,"autorequantize in min/max=%f/%f ",
 		tensor_get_float(in_min_tensor,0),
 		tensor_get_float(in_max_tensor,0));
-	if (out_tensor->max_size < elements) return errlog(nn,"out too small");
 
-	out_tensor->shape = in_tensor->shape;
-	out_tensor->data_size = elements;
+	if( tensor_out_prepare_normal_fromshape(out_tensor, &in_tensor->shape, NN_TYPE_QUINT8)!=0){
+		return errlog(nn,"out too small");
+	}
 
 	/* Find min and max quantized 32 bit val */
 	in_max_val = INT32_MIN;
@@ -116,12 +113,8 @@ static int autorequantize_execute(struct nn_node *self, struct nn_graph *nn)
 		int offseti = out_min / in_level_size;
 		quantize_asm(in_data, offseti, gaini, out_data, elements);
 	}
-	tensor_set_shape(out_min_tensor,1,1,1,1);
-	tensor_set_float(out_min_tensor,0,out_min);
-	out_min_tensor->data_size = sizeof(float);
-	tensor_set_shape(out_max_tensor,1,1,1,1);
-	tensor_set_float(out_max_tensor,0,out_max);
-	out_max_tensor->data_size = sizeof(float);
+	tensor_set_single_float(out_min_tensor,out_min);
+	tensor_set_single_float(out_max_tensor,out_max);
 
 	logmsg(nn,2,"autorequantize out min/max=%f/%f ",
 		tensor_get_float(out_min_tensor,0),
@@ -130,7 +123,7 @@ static int autorequantize_execute(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-static int requantize_execute(struct nn_node *self, struct nn_graph *nn)
+static int do_requantize_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *in_min_tensor = self->inputs[1];
@@ -140,12 +133,9 @@ static int requantize_execute(struct nn_node *self, struct nn_graph *nn)
 	struct tensor *out_tensor = self->outputs[0];
 	struct tensor *out_min_tensor = self->outputs[1];
 	struct tensor *out_max_tensor = self->outputs[2];
-	size_t elements = in_tensor->shape.batches 
-		* in_tensor->shape.height
-		* in_tensor->shape.width
-		* in_tensor->shape.depth;
-	const int32_t *in_data = (const int32_t *)in_tensor->data;
-	uint8_t *out_data = (uint8_t *)out_tensor->data;
+	size_t elements = tensor_element_count(in_tensor);
+	const int32_t *in_data = in_tensor->data;
+	uint8_t *out_data = out_tensor->data;
 	float in_min = tensor_get_float(in_min_tensor,0);
 	float in_max = tensor_get_float(in_max_tensor,0);
 	float out_min = tensor_get_float(min_val_tensor,0);
@@ -160,10 +150,10 @@ static int requantize_execute(struct nn_node *self, struct nn_graph *nn)
 	logmsg(nn,2,"autorequantize in min/max=%f/%f ",
 		tensor_get_float(in_min_tensor,0),
 		tensor_get_float(in_max_tensor,0));
-	if (out_tensor->max_size < elements) return errlog(nn,"out too small");
 
-	out_tensor->shape = in_tensor->shape;
-	out_tensor->data_size = elements;
+	if( tensor_out_prepare_normal_fromshape( out_tensor, &in_tensor->shape, NN_TYPE_QUINT8)!= 0 ){
+		return errlog(nn,"out too small");
+	}
 
 	quantize_adjust_range(
 		&out_min,&out_max,
@@ -188,12 +178,9 @@ static int requantize_execute(struct nn_node *self, struct nn_graph *nn)
 		int offseti = out_min / in_level_size;
 		quantize_asm(in_data, offseti, gaini, out_data, elements);
 	}
-	tensor_set_shape(out_min_tensor,1,1,1,1);
-	tensor_set_float(out_min_tensor,0,out_min);
-	out_min_tensor->data_size = sizeof(float);
-	tensor_set_shape(out_max_tensor,1,1,1,1);
-	tensor_set_float(out_max_tensor,0,out_max);
-	out_max_tensor->data_size = sizeof(float);
+
+	tensor_set_single_float(out_min_tensor,out_min);
+	tensor_set_single_float(out_max_tensor,out_max);
 
 	logmsg(nn,2,"requantize out min/max=%f/%f ",
 		tensor_get_float(out_min_tensor,0),
@@ -202,18 +189,15 @@ static int requantize_execute(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-static int requantrange_execute(struct nn_node *self, struct nn_graph *nn)
+static int do_requantrange_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *in_min_tensor = self->inputs[1];
 	const struct tensor *in_max_tensor = self->inputs[2];
 	struct tensor *out_min_tensor = self->outputs[0];
 	struct tensor *out_max_tensor = self->outputs[1];
-	size_t elements = in_tensor->shape.batches 
-		* in_tensor->shape.height
-		* in_tensor->shape.width
-		* in_tensor->shape.depth;
-	const int32_t *in_data = (const int32_t *)in_tensor->data;
+	size_t elements = tensor_element_count(in_tensor);
+	const int32_t *in_data = in_tensor->data;
 	uint32_t i;
 	float in_min = tensor_get_float(in_min_tensor,0);
 	float in_max = tensor_get_float(in_max_tensor,0);
@@ -243,17 +227,57 @@ static int requantrange_execute(struct nn_node *self, struct nn_graph *nn)
 	out_min = in_level_size * (float)in_min_val;
 	out_max = in_level_size * (float)in_max_val;
 	if (out_min > 0.0f) out_min = 0.0f;
-	tensor_set_shape(out_min_tensor,1,1,1,1);
-	tensor_set_float(out_min_tensor,0,out_min);
-	out_min_tensor->data_size = sizeof(float);
-	tensor_set_shape(out_max_tensor,1,1,1,1);
-	tensor_set_float(out_max_tensor,0,out_max);
-	out_max_tensor->data_size = sizeof(float);
+
+	tensor_set_single_float(out_min_tensor,out_min);
+	tensor_set_single_float(out_max_tensor,out_max);
+
 	logmsg(nn,2,"requantrange out min/max=%f/%f ",
 		tensor_get_float(out_min_tensor,0),
 		tensor_get_float(out_max_tensor,0));
 	logmsg(nn,2,"requantrange %p done",self);
 	return 0;
+}
+
+struct tdata {
+	int (*f)(struct nn_node *self, struct nn_graph *nn);
+	int retval;
+	struct nn_node *self;
+	nn_sem_t donesem;
+};
+
+void worker(struct nn_graph *nn, void *vtdata)
+{
+	struct tdata *td = vtdata;
+	td->retval = td->f(td->self,nn);
+	nn_sem_post(&td->donesem);
+}
+
+int launcher(struct nn_node *self, struct nn_graph *nn, 
+	int (*f)(struct nn_node *self, struct nn_graph *nn))
+{
+	struct tdata td = {
+		.f = f,
+		.self = self,
+		.retval = 0,
+	};
+	nn_sem_init(&td.donesem,0);
+	nn_os_work_for_vector(nn,worker,&td);
+	nn_sem_wait(&td.donesem);
+	return td.retval;
+}
+
+static int requantize_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	return launcher(self,nn,do_requantize_execute);
+}
+
+static int requantrange_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	return launcher(self,nn,do_requantrange_execute);
+}
+static int autorequantize_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	return launcher(self,nn,do_autorequantize_execute);
 }
 
 
@@ -289,46 +313,83 @@ static int requantrange_check(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
+//
+// QuantizeDownAndShrinkRange_32to8:
+// convert 32-bit quantized to 8-bit quantized, checking the actual
+// range of values to find the output range.
+//
+//  input 0:   qi32 tensor
+//  input 1,2:  scalar float, input min & max
+//
+//  output 0:   qu8 tensor
+//  output 1,2:  scalar float, output min & max
+//
 struct nn_node_ops nn_ops_for_QuantizeDownAndShrinkRange_32to8 = {
-	SFINIT(.execute, autorequantize_execute),
-	SFINIT(  .check, autorequantize_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = autorequantize_execute,
+	.check = autorequantize_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_QuantizeDownAndShrinkRange_32to8_ref = {
-	SFINIT(.execute, autorequantize_execute),
-	SFINIT(  .check, autorequantize_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = autorequantize_execute,
+	.check = autorequantize_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
+//
+// Requantize_32to8:
+// convert 32-bit quantized to 8-bit quantized, relying on
+// supplied range (inputs 3 & 4) to determine range.
+// The output range may be expanded slightly to produce a
+// a properly aligned zero code.
+//
+//  input 0:   qi32 tensor
+//  input 1,2:  scalar float, input min & max
+//  input 3,4:  scalar float, output min & max
+//
+//  output 0:   qu8 tensor
+//  output 1,2:  scalar float, input min & max
+//
 struct nn_node_ops nn_ops_for_Requantize_32to8 = {
-	SFINIT(.execute, requantize_execute),
-	SFINIT(  .check, requantize_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = requantize_execute,
+	.check = requantize_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_Requantize_32to8_ref = {
-	SFINIT(.execute, requantize_execute),
-	SFINIT(  .check, requantize_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = requantize_execute,
+	.check = requantize_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
+//
+// RequantizationRange_32
+// find the range of values in qi32 data, and produce this
+// range as min,max floats
+// Note that the range is expanded if needed so that min <=0,
+// but is not adjusted to have an integer zero point.
+//
+//  input 0:   qi32 tensor
+//  input 1,2:  scalar float, input min & max
+//
+//  output 0,1  scalar float, input actual min & max
+//
 
 struct nn_node_ops nn_ops_for_RequantizationRange_32 = {
-	SFINIT(.execute, requantrange_execute),
-	SFINIT(  .check, requantrange_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = requantrange_execute,
+	.check = requantrange_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_RequantizationRange_32_ref = {
-	SFINIT(.execute, requantrange_execute),
-	SFINIT(  .check, requantrange_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = requantrange_execute,
+	.check = requantrange_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 

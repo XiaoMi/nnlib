@@ -76,8 +76,9 @@ static int depthwiseconv2d_execute_ref(struct nn_node *self, struct nn_graph *nn
 	int32_t *outstripe;
 
 	int32_t out_batches = in_batches;
-	int32_t out_width = nn_pad_compute_outsize(in_width,filt_width,stride_width,self->padding);
-	int32_t out_height = nn_pad_compute_outsize(in_height,filt_height,stride_height,self->padding);
+	int32_t adj_x, adj_y;
+	int32_t out_width = nn_pad_compute_outsize_and_padbefore(in_width,filt_width,stride_width,self->padding, & adj_x);
+	int32_t out_height = nn_pad_compute_outsize_and_padbefore(in_height,filt_height,stride_height,self->padding, & adj_y);
 	int32_t out_depth = in_depth * filt_batches;
 
 	int32_t out_elements = out_batches*out_height*out_width*out_depth;
@@ -88,8 +89,6 @@ static int depthwiseconv2d_execute_ref(struct nn_node *self, struct nn_graph *nn
 	float filt_max_float = tensor_get_float(max_filt_tensor,0);
 	float filt_min_float = tensor_get_float(min_filt_tensor,0);
 
-	int32_t adj_x = nn_pad_compute_before(out_width,filt_width,stride_width,self->padding);
-	int32_t adj_y = nn_pad_compute_before(out_height,filt_height,stride_height,self->padding);
 
 	float in_level_size = (in_max_float - in_min_float) / 255;
 	float filt_level_size = (filt_max_float - filt_min_float) / 255;
@@ -116,29 +115,22 @@ static int depthwiseconv2d_execute_ref(struct nn_node *self, struct nn_graph *nn
 
 	logmsg(nn,2,"depthwiseconv2d execute. node=%p id=%x",self,self->node_id);
 	logmsg(nn,2,"depthwiseconv2d input %dx%dx%dx%d [%f..%f]",in_batches,in_height,in_width,in_depth,in_min_float,in_max_float);
-	logmsg(nn,2,"depthwiseconv2d filt %dx%dx%dx%d",filt_batches,filt_height,filt_width,filt_depth);
+	logmsg(nn,2,"depthwiseconv2d filt %dx%dx%dx%d [%f..%f]",filt_batches,filt_height,filt_width,filt_depth,filt_min_float,filt_max_float);
 	logmsg(nn,2,"depthwiseconv2d stride %dx%d",stride_height,stride_width);
 	logmsg(nn,2,"depthwiseconv2d padding %d",self->padding);
 	logmsg(nn,2,"expected out shape %dx%dx%dx%d",out_batches,out_height,out_width,out_depth);
 	logmsg(nn,2,"out_level_size: %f out_min=%f out_max=%f",out_level_size,out_max_val,out_min_val);
 	if (in_depth != filt_depth) return errlog(nn,"oops, depth != depth");
-	if (out_size > (out_tensor->max_size)) {
-		return errlog(nn,"output too small, %d < %d",out_tensor->max_size,out_size);
-	}
 	if (stride_tensor->shape.batches != 1) return errlog(nn,"bad stride batch");
 	if (stride_tensor->shape.depth != 1) return errlog(nn,"bad stride depth");
-	if (out_min->max_size < sizeof(float)) return errlog(nn,"min too small");
-	if (out_max->max_size < sizeof(float)) return errlog(nn,"max too small");
 
-	tensor_set_shape(out_tensor,out_batches,out_height,out_width,out_depth);
-	out_tensor->data_size = out_size;
-
-	tensor_set_shape(out_min,1,1,1,1);
-	tensor_set_float(out_min,0,out_min_val);
-	out_min->data_size = sizeof(float);
-	tensor_set_shape(out_max,1,1,1,1);
-	tensor_set_float(out_max,0,out_max_val);
-	out_max->data_size = sizeof(float);
+	if( tensor_out_prepare_normal(out_tensor,out_batches,out_height,out_width,out_depth, NN_TYPE_INT32)!=0 ){
+		return errlog(nn,"output too small, %d < %d",out_tensor->max_size,out_size);
+	}
+	if( tensor_set_single_float( out_min, out_min_val)!= 0
+		|| tensor_set_single_float( out_max, out_max_val) ){
+		return errlog(nn,"min or max too small");
+	}
 
 	for (batch = 0; batch < out_batches; batch++) {
 	  for (out_y = 0; out_y < out_height; out_y++) {

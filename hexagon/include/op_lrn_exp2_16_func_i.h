@@ -33,10 +33,7 @@
  *
  */
 
-/*======================================================================*/
-/*     ASSUMPTIONS                                                      */
-/*        output Data is 128byte aligned                                */
-/*======================================================================*/
+
 // NoteA: "nonlin_coef.h" header file used as a medium for passing macros computed by Python to intrinsic/ASM code.
 // - macros consist of parameters like coef_scale, remez_order, sature_max, sature_min, num_bits_lut_integral_part, num_bits_lut_fractional_part, Q format use etc. 
 // - macros also consist of defines to skip parts of code that are unused (for example skipping code based on cases of odd and even symmetry)

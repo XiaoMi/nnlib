@@ -336,6 +336,9 @@ gvconv2dbbb_asm:
        } {
            z0.uw += vrmpy(y3.ub, x0fx0c.ub)       //[0, 7]
            z1.uw += vrmpy(y3.ub, x1fx1c.ub)       //[0, 7]
+       } {
+           p0 = cmp.eq(filt_width,#0)
+           if (p0.new) jump:nt .L_skip
            x3fx3cx3bx38 = memd(ptr_x0+#8)         //[0, 7]
            x37x34x33x30 = memd(ptr_x0++M4STRIDE_1)//[0, 7]
        } 
@@ -386,6 +389,7 @@ gvconv2dbbb_asm:
            x3fx3cx3bx38 = memd(ptr_x0+#8)         //[1, 7]
            x37x34x33x30 = memd(ptr_x0++M4STRIDE_1)//[1, 7]
        }:endloop0 
+.L_skip:
        {
            z2.uw += vrmpy(y0.ub, x23x20.ub)       //[1, 8]
            z3.uw += vrmpy(y0.ub, x33x30.ub)       //[1, 8]

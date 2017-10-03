@@ -59,12 +59,14 @@ static int conv2d_f_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	int32_t stride_width = stride_tensor->shape.width;
 	int32_t stride_height = stride_tensor->shape.height;
 	int32_t out_batches = in_batches;
-	int32_t out_width = nn_pad_compute_outsize(in_width,filt_width,stride_width,self->padding);
-	int32_t out_height = nn_pad_compute_outsize(in_height,filt_height,stride_height,self->padding);
+	int32_t adj_x, adj_y;
+	int32_t out_width = nn_pad_compute_outsize_and_padbefore(in_width,filt_width,stride_width,self->padding, &adj_x);
+	int32_t out_height = nn_pad_compute_outsize_and_padbefore(in_height,filt_height,stride_height,self->padding, &adj_y);
 	int32_t out_depth = filt_batches;
 
-	int32_t adj_x = ((out_width-1) * stride_width + filt_width - in_width) / 2;
-	int32_t adj_y = ((out_height-1) * stride_height + filt_height - in_height) / 2;
+	if( out_width < 1 || out_height < 1){
+		return errlog(nn,"input too small for filter");
+	}
 
 	int32_t batch;
 	int32_t filt_x;
@@ -77,9 +79,9 @@ static int conv2d_f_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	int32_t in_y_base;
 	int32_t in_x_base;
 
-	const float *in = (const float *)in_tensor->data;
-	const float *filt = (const float *)filt_tensor->data;
-	float *out = (float *)out_tensor->data;
+	const float *in = in_tensor->data;
+	const float *filt = filt_tensor->data;
+	float *out = out_tensor->data;
 
 	const float *instripe;
 	const float *filtstripe;
@@ -105,9 +107,9 @@ static int conv2d_f_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	if (stride_tensor->shape.batches != 1) return errlog(nn,"bad stride batch");
 	if (stride_tensor->shape.depth != 1) return errlog(nn,"bad stride depth");
 
-	tensor_set_shape(out_tensor,out_batches,out_height,out_width,out_depth);
-	out_tensor->data_size = out_size;
-
+	if( tensor_out_prepare_normal( out_tensor, out_batches,out_height,out_width,out_depth, NN_TYPE_FLOAT)!=0){
+		return errlog(nn,"output too small");
+	}
 
 	for (batch = 0; batch < out_batches; batch++) {
 	  for (out_y = 0; out_y < out_height; out_y++) {
@@ -172,10 +174,10 @@ static int conv2d_check_ref(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Conv2d_f = {
-	conv2d_f_execute_ref,
-	conv2d_check_ref,
-	node_alloc_common,
-	node_free_common,
+	.execute = conv2d_f_execute_ref,
+	.check = conv2d_check_ref,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 

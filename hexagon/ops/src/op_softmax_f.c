@@ -55,12 +55,14 @@ static inline int softmax_execute(struct nn_node *self, struct nn_graph *nn)
 	int batches = in_tensor->shape.batches;
 	int height = in_tensor->shape.height;
 	int width = in_tensor->shape.width;
-	const float *data = (const float *)in_tensor->data;
-	float *out = (float *)out_tensor->data;
+	float beta = (self->n_inputs < 2) ? 1.0f : tensor_get_float(self->inputs[1],0);
+	const float *data = in_tensor->data;
+	float *out = out_tensor->data;
 	float maxval;
 	float sum;
 	float sum_recip;
-	if (out_tensor->max_size < in_tensor->data_size) {
+
+	if( tensor_out_prepare_normal_fromshape( out_tensor, &in_tensor->shape, NN_TYPE_FLOAT)!= 0){
 		return errlog(nn,"out too small");
 	}
 	for (j = 0; j < batches*height*width; j++) {
@@ -70,7 +72,7 @@ static inline int softmax_execute(struct nn_node *self, struct nn_graph *nn)
 			maxval = fmaxf(data[i],maxval);
 		}
 		for (i = 0; i < depth; i++) {
-			sum += (out[i] = expf(data[i] - maxval));
+			sum += (out[i] = expf(beta*(data[i] - maxval)));
 		}
 		sum_recip = 1.0f/sum;
 		for (i = 0; i < depth; i++) {
@@ -79,8 +81,6 @@ static inline int softmax_execute(struct nn_node *self, struct nn_graph *nn)
 		out += depth;
 		data += depth;
 	}
-	tensor_set_shape(out_tensor,batches,height,width,depth);
-	out_tensor->data_size = in_tensor->data_size;
 	return 0;
 }
 
@@ -88,20 +88,18 @@ static inline int softmax_execute(struct nn_node *self, struct nn_graph *nn)
 static int softmax_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking softmax node %p",self);
-	if (self->inputs == NULL) return errlog(nn,"NULL inputs");
-	if (self->outputs == NULL) return errlog(nn,"NULL outputs");
-	if (self->inputs[0] == NULL) return errlog(nn,"NULL input 0");
-	if (self->outputs[0] == NULL) return errlog(nn,"NULL output 0");
-	if (self->n_inputs != 1) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # inputs");
+	int k = node_check_inputs_range( self,nn, "softmax",1,2);	// 1 or 2 inputs
+	if( k==0) k = node_check_outputs_n( self, nn, "softmax", 1);	// 1 output
+	if( k!=0)
+		return k;
 	logmsg(nn,2,"softmax node %p check OK",self);
 	return 0;
 }
 
 struct nn_node_ops nn_ops_for_Softmax_f = {
-	softmax_execute,
-	softmax_check,
-	node_alloc_common,
-	node_free_common,
+	.execute = softmax_execute,
+	.check = softmax_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

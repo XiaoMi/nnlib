@@ -48,6 +48,7 @@
 #include "hexagon_types.h"
 #endif
 
+#define MAX_THREAD (2)   //Works only for thread 2 and less
 #define ALIGN_SIZE 128
 #define NUM_BYT_PERVECTOR (ALIGN_SIZE)
 #define NUM_BYT_PERVECTOR_MASK (NUM_BYT_PERVECTOR - 1)
@@ -66,11 +67,13 @@ struct tdata_prelu {
 	void * ptr1;
 	void * ptr2;
 	void * ptr3;
+	void * ptr4;
 	int    arg0;
 	int    arg1;
 	int    arg2;
 	int    arg3;
 	int    arg4;
+	float  arg_f;
 	nn_sem_t donesem;
 	uint64_t cycles;
 };
@@ -98,12 +101,12 @@ static int prelu_execute(struct nn_node *self, struct nn_graph *nn)
 		* in_tensor->shape.height
 		* in_tensor->shape.width
 		* in_tensor->shape.depth;
-	uint8_t *in_data = (uint8_t *)in_tensor->data;
-	uint8_t *out_data = (uint8_t *)out_tensor->data;
+	uint8_t *in_data = in_tensor->data;
+	uint8_t *out_data = out_tensor->data;
 	uint32_t i,j,idx;
 	float in_min = tensor_get_float(in_min_tensor,0);
 	float in_max = tensor_get_float(in_max_tensor,0);
-	float *alpha = (float *)nn->scratch;
+	float *alpha = nn->scratch;
 	uint8_t quantized_zero = quantize_uint8(0.0f,in_min,in_max);
 	//uint32_t alpha_frac = (1<<16) * alpha;
 	//uint32_t alpha_offset = quantized_zero - ((quantized_zero * alpha_frac + 0x08000) >> 16);
@@ -184,7 +187,7 @@ static int prelu_execute(struct nn_node *self, struct nn_graph *nn)
 
 
 
-inline HVX_Vector prelu_1d_intrinsic(HVX_Vector V_in_val, HVX_Vector V_frac, HVX_Vector V_offset, HVX_Vector V_round, HVX_Vector V_zero, int32_t Shift_R)
+static inline HVX_Vector prelu_1d_intrinsic(HVX_Vector V_in_val, HVX_Vector V_frac, HVX_Vector V_offset, HVX_Vector V_round, HVX_Vector V_zero, int32_t Shift_R)
 {
 	
 	HVX_Vector V_temp8, V_temp16, V_temp16_2;
@@ -215,81 +218,93 @@ inline HVX_Vector prelu_1d_intrinsic(HVX_Vector V_in_val, HVX_Vector V_frac, HVX
 // Common function which can be used in other OP.
 //		
 //uint32_t alpha_frac = (1<<16) * alpha;   << This part still not vectorized -TBD.  
-//uint32_t alpha_offset = quantized_zero - ((quantized_zero * alpha_frac + 0x08000) >> 16);
 
-// Additionally does ::   alpha_frac = alpha_frac >> 8
-	
+struct tdata_float2u16 {
+	struct nn_node *self;
+	void * iptr;
+	void * optr;
+	int    arg0;
+	nn_sem_t donesem;
+	uint64_t cycles;
+};
+
 void float_to_u16(struct nn_graph *nn, void *vinfo)
 {
-	struct tdata_prelu *info = (struct tdata_prelu *)vinfo;
+	struct tdata_float2u16 *info = vinfo;
 	int j;
 
 	float    *alpha     = (float *)info->iptr;
-	uint16_t *temp16_al = (uint16_t *)info->optr;
-	uint32_t alpha_depth = (uint32_t) info->arg0;
+	uint16_t *out_u16   = (uint16_t *)info->optr;
+	uint32_t elem       = (uint32_t) info->arg0;
 
 
-	for (j = 0; j < alpha_depth; j++) {
-		temp16_al[j] = alpha[j] * (1 << 16);
-		//printf("alpha float out %x %lx\n", temp16_al[j], fl_temp);
+	for (j = 0; j < elem; j++) {
+		out_u16[j] = alpha[j] * (1 << 16);
 	}
+
 	nn_sem_post(&info->donesem);
 }
 
-// Converts input  float Alpha, to fixed point alpha_frac (8 bit) and alpha_offset (8bit).
-// 	This function can be used in other modules.
-//	Needs intermediate buffer - aligned to 128
-static inline void hvx_compute_frac_offset_u8( float *alpha, uint32_t alpha_depth, uint16_t *temp16_al, uint8_t *alpha_frac, uint8_t * alpha_offset , uint32_t quantized_zero ,struct nn_node *self, struct nn_graph *nn)
+// Generic function : Converts input  float  , to fixed point u16
+//	out_u16[j] = inp_f[j] * (1 << 16);
+// 	This function can be used plugged in other modules.
+static inline void hvx_float2_u16( float *inp_f, uint16_t *out_u16, uint32_t elem, struct nn_node *self, struct nn_graph *nn)
 {
-	int      j,idx;
-	uint32_t quantized_zero32= quantized_zero;
-	struct tdata_prelu worker_info = {
-			self,
-	};
-	nn_sem_init(&worker_info.donesem,0);
-	struct tdata_prelu my_info = {
-			self,
-	};
+	int      idx, num_thread,thr;
+	struct   tdata_float2u16  td[MAX_THREAD];
 
-	if(alpha_depth < MIN_ELEM_MULTI_THRED)
-		idx = (alpha_depth); //Disable multi threading for small alpha depth. Its counter productive.
+	if(elem < MIN_ELEM_MULTI_THRED)
+		num_thread = 1;
 	else 
-		idx = alpha_depth/2+40; // Send extra to first thread - as second thread has other overheads.
-	my_info.iptr = alpha;
-	my_info.optr = temp16_al;
-	my_info.arg0 = idx;
+		num_thread = MAX_THREAD; 
 
-	worker_info.iptr = &alpha[idx];
-	worker_info.optr = &temp16_al[idx];
-	worker_info.arg0 = alpha_depth-idx;
-
-	if(worker_info.arg0 > 0){
-		nn_sem_init(&my_info.donesem,0);
-		nn_os_work_for_vector(nn,float_to_u16,  &worker_info);
-		float_to_u16(nn, &my_info);
-		nn_sem_wait(&worker_info.donesem);
-	} else {
-		float_to_u16(nn, &my_info);
+	idx =0;
+	for(thr=0;thr < num_thread; thr++){
+		td[thr].self = self;
+		td[thr].iptr = &inp_f[idx];
+		td[thr].optr = &out_u16[idx];
+		if(thr == (num_thread -1) )
+			idx = elem - idx;
+		else
+			idx += elem/num_thread; 
+		td[thr].arg0 = idx;
+		nn_sem_init(&td[thr].donesem,0);
+		nn_os_work_for_vector(nn,float_to_u16,  &td[thr]);
 	}
+	for(thr=0;thr < num_thread; thr++){
+		nn_sem_wait(&td[thr].donesem);
+	}
+}
 
-#if 0
+/*
 	for(j=0;j < alpha_depth;j++){
 		alpha_offset[j] = quantized_zero - ((quantized_zero * temp16_al[j] + 0x08000) >> 16);
 		alpha_frac[j] = temp16_al[j] >> 8;
 	}
-#else	
-	{
-		uint32_t quantized_zero_16 = quantized_zero << 16 | quantized_zero;
+*/
+void do_hvx_quant_frac_offst(struct nn_graph *nn, void *vinfo)
+{
+		struct tdata_prelu *info = vinfo;
+
+		uint8_t  *alpha_frac    = (uint8_t *)info->ptr1;
+		uint8_t  *alpha_offset  = (uint8_t *)info->ptr2;
+		uint8_t  *temp16_al     = (uint8_t *)info->ptr3;
+		//uint32_t bytes          = (uint32_t) info->arg0;
+		uint32_t alpha_depth    = (uint32_t) info->arg1;
+		uint32_t quantized_zero = (uint32_t) info->arg2;
+
+
+		uint32_t quantized_zero_16 = quantized_zero << 16 | quantized_zero, quantized_zero32, j;
 		HVX_Vector  V_round;
 		V_round        = Q6_V_vsplat_R(0x00008000);
 		
-		quantized_zero32 = quantized_zero32 << 8 | quantized_zero32;
+		quantized_zero32 = quantized_zero << 8    | quantized_zero;
 		quantized_zero32 = quantized_zero32 << 16 | quantized_zero32;
 
-		HVX_Vector *frac = (HVX_Vector *)&alpha_frac[0];
-		HVX_Vector *offt = (HVX_Vector *)&alpha_offset[0];
+		HVX_Vector *frac = (HVX_Vector *)alpha_frac;
+		HVX_Vector *offt = (HVX_Vector *)alpha_offset;
 		HVX_Vector quant_zero = Q6_V_vsplat_R(quantized_zero32);
-		HVX_Vector *in_alpha = (HVX_Vector *)&temp16_al[0];
+		HVX_Vector *in_alpha = (HVX_Vector *)temp16_al;
 		HVX_Vector temp16,temp16_1, temp32_1, temp32_2, frac_16_1, frac_16_2, temp8;
 		HVX_VectorPair temp_pair;
 
@@ -316,12 +331,7 @@ static inline void hvx_compute_frac_offset_u8( float *alpha, uint32_t alpha_dept
 			*offt++   = Q6_Vb_vsub_VbVb(quant_zero , temp8); 			  //quantized_zero - ((quantized_zero * temp16_al[j] + 0x08000) >> 16)
 			*frac++   = Q6_Vb_vpacko_VhVh(frac_16_2, frac_16_1); 		  // alpha_frac[j] = temp16_al[j] >> 8;
 		}
-	}
-#endif	
-	
-	
-
-	
+	nn_sem_post(&info->donesem);
 }
 
 // Main function which works on quantized - alpha of depth > 1.
@@ -331,7 +341,7 @@ static inline void hvx_compute_frac_offset_u8( float *alpha, uint32_t alpha_dept
 void hvx_intr_prelu_circ(struct nn_graph *nn, void *vinfo)
 {
 
-	struct tdata_prelu *info = (struct tdata_prelu *)vinfo;
+	struct tdata_prelu *info = vinfo;
 
 	uint8_t  *in_data       = (uint8_t *)info->iptr;
 	uint8_t  *out_data      = (uint8_t *)info->optr;
@@ -463,7 +473,6 @@ void hvx_intr_prelu_circ(struct nn_graph *nn, void *vinfo)
 	nn_sem_post(&info->donesem);
 }
 
-
 //   Prelu function - to handle Alpha > 1 depth.
 //  Convert float alpha to quantized (8 bit) , alpha_frac & alpha_offset.
 //  	   Float to fixed 16 bit is - multi threaded inside hvx_compute_frac_offset.
@@ -472,18 +481,38 @@ void hvx_intr_prelu_circ(struct nn_graph *nn, void *vinfo)
 void prelu_1D_alpha(uint8_t *in_data, uint8_t *out_data, float *alpha, uint32_t quantized_zero,size_t bytes , size_t alpha_depth ,struct nn_node *self, struct nn_graph *nn)
 {
 
-	uint8_t  *alpha_frac1   = (uint8_t *)pad_and_align(alpha, sizeof(float)*alpha_depth+2*NUM_BYT_PERVECTOR);
-	uint8_t  *alpha_frac2   = (uint8_t *)pad_and_align(alpha_frac1,   alpha_depth+2*NUM_BYT_PERVECTOR);
-	uint8_t  *alpha_offset1 = (uint8_t *)pad_and_align(alpha_frac2,   alpha_depth+2*NUM_BYT_PERVECTOR);
-	uint8_t  *alpha_offset2 = (uint8_t *)pad_and_align(alpha_offset1, alpha_depth+2*NUM_BYT_PERVECTOR);
-	uint8_t  *buf_pad1      = (uint8_t *)pad_and_align(alpha_offset2,  alpha_depth+2*NUM_BYT_PERVECTOR);
-	uint8_t  *buf_pad2      = (uint8_t *)pad_and_align(buf_pad1     ,  2*NUM_BYT_PERVECTOR);
-	uint16_t *temp16_al     = (uint16_t *)pad_and_align(buf_pad2, 2*NUM_BYT_PERVECTOR);
+	uint8_t  *alpha_frac1   = pad_and_align(alpha, sizeof(float)*alpha_depth+2*NUM_BYT_PERVECTOR);
+	uint8_t  *alpha_frac2   = pad_and_align(alpha_frac1,   alpha_depth+2*NUM_BYT_PERVECTOR);
+	uint8_t  *alpha_offset1 = pad_and_align(alpha_frac2,   alpha_depth+2*NUM_BYT_PERVECTOR);
+	uint8_t  *alpha_offset2 = pad_and_align(alpha_offset1, alpha_depth+2*NUM_BYT_PERVECTOR);
+	uint8_t  *buf_pad1      = pad_and_align(alpha_offset2,  alpha_depth+2*NUM_BYT_PERVECTOR);
+	uint8_t  *buf_pad2      = pad_and_align(buf_pad1     ,  2*NUM_BYT_PERVECTOR);
+	uint16_t *temp16_al     = pad_and_align(buf_pad2, 2*NUM_BYT_PERVECTOR);
 	uint32_t idx;
 
+	struct tdata_prelu  td[MAX_THREAD];
+	td[0].self = self;
+	td[1].self = self;
 
 
-	hvx_compute_frac_offset_u8(alpha, alpha_depth, temp16_al, alpha_frac1, alpha_offset1,quantized_zero, self, nn);
+
+
+	hvx_float2_u16(alpha, temp16_al, alpha_depth, self, nn);
+
+	td[0].iptr = in_data;
+	td[0].optr = out_data;
+	td[0].ptr1 = alpha_frac1;
+	td[0].ptr2 = alpha_offset1;
+	td[0].ptr3 = temp16_al;
+	//td[0].ptr4 = alpha_offset2;
+	td[0].arg1 = alpha_depth;
+	td[0].arg2 = quantized_zero;
+
+
+
+	nn_sem_init(&td[0].donesem,0);
+	nn_os_work_for_vector(nn,do_hvx_quant_frac_offst,  &td[0]);
+	nn_sem_wait(&td[0].donesem);
 
 	if(bytes < 32*1024)
 		l2fetch(in_data, 1 , NUM_BYT_PERVECTOR , bytes/NUM_BYT_PERVECTOR);
@@ -495,57 +524,49 @@ void prelu_1D_alpha(uint8_t *in_data, uint8_t *out_data, float *alpha, uint32_t 
 		uint32_t res;
 		idx = (4+bytes/256)*128;
 		res = idx % alpha_depth;
+
+		memcpy(alpha_frac2,         &alpha_frac1[res], alpha_depth-res);
+		memcpy(&alpha_frac2[alpha_depth-res],   &alpha_frac1[0], res);
 		
-		//printf("alpha_depth %lu, idx %lu, res %lu", (uint32_t) alpha_depth, idx, res);
+		memcpy(alpha_offset2,       &alpha_offset1[res], alpha_depth-res);
+		memcpy(&alpha_offset2[alpha_depth-res], &alpha_offset1[0]  , res);	
+
 		
-		vmemcpy_asm(alpha_frac2,         &alpha_frac1[res], alpha_depth-res);
-		vmemcpy_asm(&alpha_frac2[alpha_depth-res],   &alpha_frac1[0], res);
-		
-		vmemcpy_asm(alpha_offset2,       &alpha_offset1[res], alpha_depth-res);
-		vmemcpy_asm(&alpha_offset2[alpha_depth-res], &alpha_offset1[0]  , res);	
 	}	
 	else {
 		idx = bytes;   //Disable multi threading for small input_data sizes.
 	}
 	
-	struct tdata_prelu my_info = {
-			self,
-	};
-	struct tdata_prelu worker_info = {
-			self,
-	};
+	//all other arg remain same
+	td[0].iptr = in_data;
+	td[0].optr = out_data;
+	td[0].ptr1 = alpha_frac1;
+	td[0].ptr2 = alpha_offset1;
+	td[0].ptr3 = buf_pad1;
+	td[0].arg0 = idx;
+	td[0].arg1 = alpha_depth;
+	td[0].arg2 = quantized_zero;
 
 
-	
-	my_info.iptr = in_data;
-	my_info.optr = out_data;
-	my_info.ptr1 = alpha_frac1;
-	my_info.ptr2 = alpha_offset1;
-	my_info.ptr3 = buf_pad1;
-	my_info.arg0 = idx;
-	my_info.arg1 = alpha_depth;
-	my_info.arg2 = quantized_zero;
+
+	td[1].iptr = &in_data[idx];
+	td[1].optr = &out_data[idx];
+	td[1].ptr1 = alpha_frac2;
+	td[1].ptr2 = alpha_offset2;
+	td[1].ptr3 = buf_pad2;
+	td[1].arg0 = bytes - idx;
+	td[1].arg1 = alpha_depth;
+	td[1].arg2 = quantized_zero;
 
 
-	worker_info.iptr = &in_data[idx];
-	worker_info.optr = &out_data[idx];
-	worker_info.ptr1 = alpha_frac2;
-	worker_info.ptr2 = alpha_offset2;
-	worker_info.ptr3 = buf_pad2;
-	worker_info.arg0 = bytes - idx;
-	worker_info.arg1 = alpha_depth;
-	worker_info.arg2 = quantized_zero;
-
-	if(worker_info.arg0) {
-		nn_sem_init(&my_info.donesem,0);
-		nn_sem_init(&worker_info.donesem,0);
-		nn_os_work_for_vector(nn,hvx_intr_prelu_circ,  &worker_info);
-		hvx_intr_prelu_circ(nn, &my_info);
-		nn_sem_wait(&worker_info.donesem);
-		nn_sem_wait(&my_info.donesem);
-	} else {
-		hvx_intr_prelu_circ(nn, &my_info);
-	}
+	nn_sem_init(&td[0].donesem,0);
+	nn_os_work_for_vector(nn,hvx_intr_prelu_circ,  &td[0]);
+	if(td[1].arg0) {
+		nn_sem_init(&td[1].donesem,0);
+		nn_os_work_for_vector(nn,hvx_intr_prelu_circ,  &td[1]);
+		nn_sem_wait(&td[1].donesem);
+	} 
+	nn_sem_wait(&td[0].donesem);
 	
 
 
@@ -553,8 +574,17 @@ void prelu_1D_alpha(uint8_t *in_data, uint8_t *out_data, float *alpha, uint32_t 
 
 
 //   Prelu function - to handle Alpha == 1 depth.
-static inline void prelu_scalar_alpha(uint8_t *in_data, uint8_t *out_data, float alpha, uint32_t quantized_zero,size_t bytes  )
+static void hvx_prelu_scalar_alpha(struct nn_graph *nn, void *vinfo)
 {
+	struct tdata_prelu *info = vinfo;
+
+	float    alpha     = (float )info->arg_f;
+	uint32_t bytes       = (uint32_t) info->arg1;
+	uint8_t *in_data    = (uint8_t *) info->iptr;
+	uint8_t *out_data   = (uint8_t *) info->optr;
+	uint32_t quantized_zero = (uint32_t) info->arg0;
+
+
 		int bhw;
 		int32_t Shift_R =8;
 		uint32_t alpha_offset_v;
@@ -638,8 +668,31 @@ static inline void prelu_scalar_alpha(uint8_t *in_data, uint8_t *out_data, float
 			}
 		}
 
+	nn_sem_post(&info->donesem);
 
 }
+
+
+static inline void prelu_scalar_alpha(uint8_t *in_data, uint8_t *out_data, float alpha, uint32_t quantized_zero,size_t bytes ,struct nn_node *self, struct nn_graph *nn )
+{
+
+	struct tdata_prelu  td[2];
+
+	td[0].self = self;
+
+	td[0].iptr = in_data;
+	td[0].optr = out_data;
+	td[0].arg0 = quantized_zero;
+	td[0].arg1 = bytes;
+	td[0].arg_f = alpha;
+
+	nn_sem_init(&td[0].donesem,0);
+	nn_os_work_for_vector(nn, hvx_prelu_scalar_alpha,  &td[0]);
+	nn_sem_wait(&td[0].donesem);
+
+
+}
+
 
 
 //	Prelu fixed-pt- HVX  module.
@@ -659,11 +712,11 @@ static int prelu_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 		* in_tensor->shape.height
 		* in_tensor->shape.width
 		* in_tensor->shape.depth;
-	uint8_t *in_data = (uint8_t *)in_tensor->data;
-	uint8_t *out_data = (uint8_t *)out_tensor->data;
+	uint8_t *in_data = in_tensor->data;
+	uint8_t *out_data = out_tensor->data;
 	float in_min = tensor_get_float(in_min_tensor,0);
 	float in_max = tensor_get_float(in_max_tensor,0);
-	float *alpha = (float *)nn->scratch;
+	float *alpha = nn->scratch;
 	uint8_t quantized_zero = quantize_uint8(0.0f,in_min,in_max);
 	uint32_t j;
 	/* Assert min and max are size 1,1,1,1 ? */
@@ -678,6 +731,7 @@ static int prelu_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 
 	for(j =0; j <  alpha_depth; j++) {
 		alpha[j] = tensor_get_float(in_alpha_tensor,j);
+		printf("Check Alpha \n");
 		if (alpha[j] < 0.0f) return errlog(nn,"negative alpha %f, %d", alpha[j],j);
 		if (alpha[j] > 1.0f) return errlog(nn,"alpha must be <= 1.0f");
 	}
@@ -693,7 +747,7 @@ static int prelu_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	int start_time =  nn_os_get_cycles(nn);
 #endif
 	if(alpha_depth == 1 )
-		prelu_scalar_alpha(in_data, out_data, alpha[0], quantized_zero, bytes);
+		prelu_scalar_alpha(in_data, out_data, alpha[0], quantized_zero, bytes, self, nn);
 	else
 		prelu_1D_alpha(in_data, out_data, alpha, quantized_zero, bytes, alpha_depth, self,  nn);
 
@@ -727,16 +781,16 @@ static int prelu_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_QuantizedPRelu_8_ref = {
-	prelu_execute,
-	prelu_check,
-	node_alloc_common,
-	node_free_common,
+	.execute = prelu_execute,
+	.check = prelu_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedPRelu_8 = {
-	prelu_execute_hvx,
-	prelu_check,
-	node_alloc_common,
-	node_free_common,
+	.execute = prelu_execute_hvx,
+	.check = prelu_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

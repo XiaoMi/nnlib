@@ -68,7 +68,12 @@
 
 #define ALIGN_AMT 128
 
-#define STARTUP_OFFSET ALIGN_AMT
+#ifndef CANARY_VECTORS
+//#define CANARY_VECTORS 0
+#define CANARY_VECTORS 1
+#endif
+
+#define STARTUP_OFFSET ((1+CANARY_VECTORS)*ALIGN_AMT)
 #define MAX_ALLOC_SIZE (3*512*1024*1024)
 
 static inline unsigned long round_up(unsigned long size)
@@ -93,7 +98,7 @@ static void *rechunk(
 	offset = me->base;
 	if (me->size == size) {
 		*ptr = me->next;
-		free(me);
+		nn_free(me);
 	} else {
 		me->base += size;
 		me->size -= size;
@@ -102,7 +107,7 @@ static void *rechunk(
 			logmsg(nn,3,"[[Pre-Allocation]]: Watermark now 0x%x",me->base);
 		}
 	}
-	return (void *)offset;
+	return (void *)(offset+CANARY_VECTORS*ALIGN_AMT);
 }
 
 static void *prealloc(
@@ -112,6 +117,7 @@ static void *prealloc(
 {
 	struct freelist_node *tmp;
 	size = round_up(size);
+	size += CANARY_VECTORS*ALIGN_AMT*2;
 	for ( ; (*ptr) != NULL; ptr = &((*ptr)->next)) {
 		tmp = *ptr;
 		if (tmp->size < size) continue;
@@ -127,16 +133,17 @@ static void try_coalesce(struct freelist_node *left)
 	if ((left->base + left->size) == right->base) {
 		left->size += right->size;
 		left->next = right->next;
-		free(right);
+		nn_free(right);
 	}
 }
 
 static int prefree(struct nn_graph *nn, struct freelist_node **ptr, void *baseptr, unsigned long size)
 {
-	unsigned long base = (unsigned long)baseptr;
+	unsigned long base = (unsigned long)baseptr-(CANARY_VECTORS*ALIGN_AMT);
 	struct freelist_node *tmp;
 	struct freelist_node *newnode;
 	size = round_up(size);
+	size += CANARY_VECTORS*ALIGN_AMT*2;
 	for ( ; (*ptr) != NULL; ptr = &((*ptr)->next)) {
 		tmp = *ptr;
 		/* Is it lower and not contiguous? */
@@ -156,7 +163,7 @@ static int prefree(struct nn_graph *nn, struct freelist_node **ptr, void *basept
 		/* Well, need to make a new node for this */
 		break;
 	}
-	if ((newnode = (struct freelist_node *)malloc(sizeof(*newnode))) == NULL) {
+	if ((newnode = nn_malloc(sizeof(*newnode))) == NULL) {
 		return errlog(nn,"prefree malloc fail");
 	}
 	newnode->base = base;
@@ -181,16 +188,15 @@ static int count_freelist_nodes(struct freelist_node *p)
 
 static void pprint_freelist(struct nn_graph *nn, struct freelist_node *p)
 {
-	logmsg(nn,3,"freelist node @ %p: base=%lx size=%x",p,p->base,p->size);
+	for (; p != NULL; p = p->next) logmsg(nn,3,"freelist node @ %p: base=%lx size=%x",p,p->base,p->size);
 }
 
 static int check_allocations(struct nn_graph *nn)
 {
 	pprint_freelist(nn,nn->root);
 	if (count_freelist_nodes(nn->root) != 1) return errlog(nn,"too chunky");
-	if (nn->root->size != MAX_ALLOC_SIZE) {
-		return errlog(nn,"wrong size: %x vs %x",
-			nn->root->size,MAX_ALLOC_SIZE);
+	if (nn->root->size != (MAX_ALLOC_SIZE + CANARY_VECTORS*ALIGN_AMT*2)) {
+		return errlog(nn,"wrong size: %x vs %x", nn->root->size,MAX_ALLOC_SIZE);
 	}
 	logmsg(nn,2,"Watermark says: we used %d bytes",nn->watermark_offset);
 	return 0;
@@ -201,7 +207,7 @@ static int allocate_storage(struct nn_graph *nn)
 	unsigned long bulk_i;
 	if (check_allocations(nn) != 0) return errlog(nn,"check");
 	if (nn->bulk) return errlog(nn,"bulk already allocated!?");
-	if ((nn->bulk = malloc(nn->watermark_offset)) == NULL) {
+	if ((nn->bulk = nn_malloc(nn->watermark_offset)) == NULL) {
 		return errlog(nn,"bulk malloc fail");
 	}
 	logmsg(nn,2,"Allocated %d bytes @ %p.  Hope that's enough!",
@@ -302,7 +308,7 @@ static int allocate_and_free(struct nn_graph *nn)
 				/* Pre-Allocate data */
 				if ((t->data = prealloc(nn,&nn->root,t->max_size))
 					== NULL) {
-					return errlog(nn,"alloc failed");
+					return errlog(nn,"alloc failed.  %p is output from node %p, requesting %d bytes", t, tmp, t->max_size);
 				}
 				logmsg(nn,3,"alloc %d bytes @ %p",
 					t->max_size,
@@ -317,6 +323,7 @@ static void reset_allocated_pointers(struct nn_graph *nn)
 {
 	struct nn_node *tmp;
 	/* Go back and NULL out all the input pointers */
+	/* Since we point output0 to output tensors, this resets data pointers */
 	for (tmp = nn->head; tmp != NULL; tmp = tmp->next) {
 		if (tmp->node_type == OP_PreFree) {
 			tmp->outputs[0]->data = NULL;
@@ -353,15 +360,58 @@ static void freelist_teardown(struct nn_graph *nn)
 	struct freelist_node *next;
 	while (tmp != NULL) {
 		next = tmp->next;
-		free(tmp);
+		nn_free(tmp);
 		tmp = next;
 	}
 	nn->root = NULL;
 }
 
+static inline int is_bulk_data(struct nn_graph *nn, void *p)
+{
+	unsigned long longp = (unsigned long)p;
+	unsigned long bulk_i = (unsigned long)nn->bulk;
+	unsigned long last_bulk_i = (unsigned long)(nn->watermark_offset);
+	int is_bulk = ((longp >= bulk_i) && (longp < last_bulk_i));
+	logmsg(nn,9,"p=%p longp=%lx bulk_i=%lx last_bulk_i=%lx is_bulk=%d",
+		p,longp,bulk_i,last_bulk_i,is_bulk);
+	return is_bulk;
+}
+
 void allocator_teardown(struct nn_graph *nn)
 {
 	freelist_teardown(nn);
-	if (nn->bulk) free(nn->bulk);
+	if (nn->bulk) nn_free(nn->bulk);
+}
+
+void canary_mark(struct nn_graph *nn, struct tensor *t)
+{
+	if (!is_bulk_data(nn,t->data)) return;
+	if (CANARY_VECTORS == 0) return;
+	uint32_t *start = t->data;
+	uint32_t *end = (uint32_t *)((long)t->data + round_up(t->max_size));
+	int i;
+	for (i = -32; i < 0; i++) {
+		start[i] = 0xCAFEBABE;
+	}
+	for (i = 0; i < 32; i++) {
+		end[i] = 0xDEADBEEF;
+	}
+}
+
+int canary_check(struct nn_graph *nn, const struct tensor *t)
+{
+	if (((unsigned long)t) & 0x3) return errlog(nn,"tensor %p is corrupted",t);
+	if (!is_bulk_data(nn,t->data)) return 0;
+	if (CANARY_VECTORS == 0) return 0;
+	uint32_t *start = t->data;
+	uint32_t *end = (uint32_t *)((long)t->data + round_up(t->max_size));
+	int i;
+	for (i = -32; i < 0; i++) {
+		if (start[i] != 0xCAFEBABE) return errlog(nn,"tensor %p dead canary",t);
+	}
+	for (i = 0; i < 32; i++) {
+		if (end[i] != 0xDEADBEEF) return errlog(nn,"tensor %p dead canary",t);
+	}
+	return 0;
 }
 

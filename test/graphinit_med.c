@@ -52,6 +52,10 @@ void info_for_debug(unsigned int id, const char *name, const char *opname);
 
 #define NN_PAD_ANY NN_PAD_NA
 
+#define OUTPUT_4D(B,H,W,D,ES) \
+	{ .rank = 4, .max_sizes = {B,H,W,D}, .elementsize = ES, \
+	.zero_offset = 0, .stepsize = 0.0f, }
+	
 
 
 
@@ -138,7 +142,7 @@ static float32 data_for_op_10012[] ALIGNED = {
 };
 
 static hexagon_nn_output outputs_for_1024a[] = {
- { .max_size = 1072812, .unused = 0, }, // 1x299x299x3 x4
+ OUTPUT_4D(1,299,299,3,4),
 };
 
 static hexagon_nn_input inputs_for_1024b[] = {
@@ -146,7 +150,7 @@ static hexagon_nn_input inputs_for_1024b[] = {
  { .src_id = 0x1000e, .output_idx = 0, },
 };
 static hexagon_nn_output outputs_for_1024b[] = {
- { .max_size = 1072812, .unused = 0, }, // 1x1x1x268203 x4
+ OUTPUT_4D(1,1,1,268203,4), 
 };
 
 static hexagon_nn_input inputs_for_1024c[] = {
@@ -154,14 +158,14 @@ static hexagon_nn_input inputs_for_1024c[] = {
  { .src_id = 0x1000f, .output_idx = 0, },
 };
 static hexagon_nn_output outputs_for_1024c[] = {
- { .max_size = 4, .unused = 0, }, // 1x1x1x1 x4
+ OUTPUT_4D(1,1,1,1,4), 
 };
 static hexagon_nn_input inputs_for_1024d[] = {
  { .src_id = 0x1024b, .output_idx = 0, },
  { .src_id = 0x1000f, .output_idx = 0, },
 };
 static hexagon_nn_output outputs_for_1024d[] = {
- { .max_size = 4, .unused = 0, }, // 1x1x1x1 x4
+ OUTPUT_4D(1,1,1,1,4), 
 };
 
 static hexagon_nn_input inputs_for_1024e[] = {
@@ -170,9 +174,9 @@ static hexagon_nn_input inputs_for_1024e[] = {
  { .src_id = 0x1024d, .output_idx = 0, },
 };
 static hexagon_nn_output outputs_for_1024e[] = {
- { .max_size = 268203, .unused = 0, }, // 1x299x299x3 x1
- { .max_size = 4, .unused = 0, }, // 1x1x1x1 x4
- { .max_size = 4, .unused = 0, }, // 1x1x1x1 x4
+ OUTPUT_4D(1,299,299,3,1), //{ .max_size = 268203, }, // 1x299x299x3 x1
+ OUTPUT_4D(1,1,1,1,4),
+ OUTPUT_4D(1,1,1,1,4),
 };
 
 static hexagon_nn_input inputs_for_1024f[] = {
@@ -185,9 +189,9 @@ static hexagon_nn_input inputs_for_1024f[] = {
  { .src_id = 0x10250, .output_idx = 0, },
 };
 static hexagon_nn_output outputs_for_1024f[] = {
- { .max_size = 2841728, .unused = 0, }, // 1x149x149x32 x4
- { .max_size = 4, .unused = 0, }, // 1x1x1x1 x4
- { .max_size = 4, .unused = 0, }, // 1x1x1x1 x4
+ OUTPUT_4D(1,149,149,32,1), //{ .max_size = 2841728, }, // 1x149x149x32 x4
+ OUTPUT_4D(1,1,1,1,4),
+ OUTPUT_4D(1,1,1,1,4),
 };
 
 static hexagon_nn_input inputs_for_10251[] = {
@@ -196,9 +200,9 @@ static hexagon_nn_input inputs_for_10251[] = {
  { .src_id = 0x1024f, .output_idx = 2, },
 };
 static hexagon_nn_output outputs_for_10251[] = {
- { .max_size = 710432, .unused = 0, }, // 1x149x149x32 x1
- { .max_size = 4, .unused = 0, }, // 1x1x1x1 x4
- { .max_size = 4, .unused = 0, }, // 1x1x1x1 x4
+ OUTPUT_4D(1,149,149,32,1), // { .max_size = 710432, }, // 1x149x149x32 x1
+ OUTPUT_4D(1,1,1,1,4),
+ OUTPUT_4D(1,1,1,1,4),
 };
 
 static hexagon_nn_input inputs_for_10252[] = {
@@ -210,9 +214,9 @@ static hexagon_nn_input inputs_for_10252[] = {
  { .src_id = 0x10012, .output_idx = 0, },
 };
 static hexagon_nn_output outputs_for_10252[] = {
- { .max_size = 2841728, .unused = 0, }, // 1x149x149x32 x4
- { .max_size = 4, .unused = 0, }, // 1x1x1x1 x4
- { .max_size = 4, .unused = 0, }, // 1x1x1x1 x4
+ OUTPUT_4D(1,149,149,32,4), // { .max_size = 2841728, }, // 1x149x149x32 x4
+ OUTPUT_4D(1,1,1,1,4),
+ OUTPUT_4D(1,1,1,1,4),
 };
 
 static hexagon_nn_input inputs_for_10253[] = {
@@ -221,9 +225,9 @@ static hexagon_nn_input inputs_for_10253[] = {
  { .src_id = 0x10252, .output_idx = 2, },
 };
 static hexagon_nn_output outputs_for_10253[] = {
- { .max_size = 710432, .unused = 0, }, // 1x149x149x32 x1
- { .max_size = 4, .unused = 0, }, // 1x1x1x1 x4
- { .max_size = 4, .unused = 0, }, // 1x1x1x1 x4
+ OUTPUT_4D(1,149,149,32,1), //{ .max_size = 710432, }, // 1x149x149x32 x1
+ OUTPUT_4D(1,1,1,1,4),
+ OUTPUT_4D(1,1,1,1,4),
 };
 static hexagon_nn_input inputs_for_10254[] = {
  { .src_id = 0x10253, .output_idx = 0, },
@@ -231,9 +235,9 @@ static hexagon_nn_input inputs_for_10254[] = {
  { .src_id = 0x10253, .output_idx = 2, },
 };
 static hexagon_nn_output outputs_for_10254[] = {
- { .max_size = 710432, .unused = 0, }, // 1x149x149x32 x1
- { .max_size = 4, .unused = 0, }, // 1x1x1x1 x4
- { .max_size = 4, .unused = 0, }, // 1x1x1x1 x4
+ OUTPUT_4D(1,149,149,32,1), //{ .max_size = 710432, }, // 1x149x149x32 x1
+ OUTPUT_4D(1,1,1,1,4),
+ OUTPUT_4D(1,1,1,1,4),
 };
 
 
@@ -243,7 +247,7 @@ static hexagon_nn_input inputs_for_10442[] = {
  { .src_id = 0x10254, .output_idx = 2, },
 };
 static hexagon_nn_output outputs_for_10442[] = {
- { .max_size = (710432*4), .unused = 0, }, // 1x149x149x32x4
+ OUTPUT_4D(1,149,149,32,4), // { .max_size = (710432*4), }, // 1x149x149x32x4
 };
 
 static hexagon_nn_input inputs_for_1044d[] = {

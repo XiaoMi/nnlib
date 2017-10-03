@@ -129,8 +129,8 @@ void im2col_full(uint8_t *out,
 	int32_t in_y;
 	//int32_t adj_x = ((out_width-1) * stride_width + filt_width - in_width) / 2;
 	//int32_t adj_y = ((out_height-1) * stride_height + filt_height - in_height) / 2;
-	int32_t adj_x = nn_pad_compute_before(out_width,filt_width,stride_width,(padding_type)padding);
-	int32_t adj_y = nn_pad_compute_before(out_height,filt_height,stride_height,(padding_type)padding);
+	int32_t adj_x = nn_pad_compute_before(out_width,filt_width,stride_width,padding);
+	int32_t adj_y = nn_pad_compute_before(out_height,filt_height,stride_height,padding);
 	out += out_depth * out_width * out_height_start;
 	memset(out,zero_val,(out_height_stop-out_height_start)*out_width*out_depth);
 	for (out_y = out_height_start; out_y < out_height_stop; out_y++) {

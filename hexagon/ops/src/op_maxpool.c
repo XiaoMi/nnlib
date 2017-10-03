@@ -69,8 +69,8 @@ struct tdata {
 
 static void maxpool_execute_slice_ref(struct nn_graph *nn, void *vinfo)
 {
-	struct tdata *info = (struct tdata *)vinfo;
-	struct nn_node *self = (struct nn_node *)info->self;
+	struct tdata *info = vinfo;
+	struct nn_node *self = info->self;
 	int whoami = info->whoami;
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *window_tensor = self->inputs[3];
@@ -89,8 +89,9 @@ static void maxpool_execute_slice_ref(struct nn_graph *nn, void *vinfo)
 	int32_t window_width = window_tensor->shape.width;
 
 	int32_t out_batches = in_batches;
-	int32_t out_width = nn_pad_compute_outsize(in_width,window_width,stride_width,self->padding);
-	int32_t out_height = nn_pad_compute_outsize(in_height,window_height,stride_height,self->padding);
+	int32_t adj_x, adj_y;
+	int32_t out_width = nn_pad_compute_outsize_and_padbefore(in_width,window_width,stride_width,self->padding, & adj_x);
+	int32_t out_height = nn_pad_compute_outsize_and_padbefore(in_height,window_height,stride_height,self->padding, &adj_y);
 	int32_t out_depth = in_depth;
 
 	int32_t batch;
@@ -107,11 +108,8 @@ static void maxpool_execute_slice_ref(struct nn_graph *nn, void *vinfo)
 	int32_t end_y;
 	int32_t next_y;
 
-	uint8_t *in = (uint8_t *)in_tensor->data;
-	uint8_t *out = (uint8_t *)out_tensor->data;
-
-	int32_t adj_x = ((out_width-1) * stride_width + window_width - in_width) / 2;
-	int32_t adj_y = ((out_height-1) * stride_height + window_height - in_height) / 2;
+	uint8_t *in = in_tensor->data;
+	uint8_t *out = out_tensor->data;
 
 	uint8_t maxval;
 
@@ -170,8 +168,8 @@ static void maxpool_execute_slice_ref(struct nn_graph *nn, void *vinfo)
 
 static void maxpool_execute_slice_asm(struct nn_graph *nn, void *vinfo)
 {
-	struct tdata *info = (struct tdata *)vinfo;
-	struct nn_node *self = (struct nn_node *)info->self;
+	struct tdata *info = vinfo;
+	struct nn_node *self = info->self;
 	int whoami = info->whoami;
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *window_tensor = self->inputs[3];
@@ -190,8 +188,9 @@ static void maxpool_execute_slice_asm(struct nn_graph *nn, void *vinfo)
 	int32_t window_width = window_tensor->shape.width;
 
 	int32_t out_batches = in_batches;
-	int32_t out_width = nn_pad_compute_outsize(in_width,window_width,stride_width,self->padding);
-	int32_t out_height = nn_pad_compute_outsize(in_height,window_height,stride_height,self->padding);
+	int32_t adj_x, adj_y;
+	int32_t out_width = nn_pad_compute_outsize_and_padbefore(in_width,window_width,stride_width,self->padding, & adj_x);
+	int32_t out_height = nn_pad_compute_outsize_and_padbefore(in_height,window_height,stride_height,self->padding, &adj_y);
 	int32_t out_depth = in_depth;
 
 	int32_t batch;
@@ -208,11 +207,8 @@ static void maxpool_execute_slice_asm(struct nn_graph *nn, void *vinfo)
 	int32_t end_y;
 	int32_t next_y;
 
-	uint8_t *in = (uint8_t *)in_tensor->data;
-	uint8_t *out = (uint8_t *)out_tensor->data;
-
-	int32_t adj_x = ((out_width-1) * stride_width + window_width - in_width) / 2;
-	int32_t adj_y = ((out_height-1) * stride_height + window_height - in_height) / 2;
+	uint8_t *in = in_tensor->data;
+	uint8_t *out = out_tensor->data;
 
 	//uint32_t maxval;
 
@@ -291,18 +287,17 @@ static int maxpool_execute(struct nn_node *self, struct nn_graph *nn,
 	int32_t out_height = nn_pad_compute_outsize(in_height,window_height,stride_height,self->padding);
 	int32_t out_depth = in_depth;
 
-	size_t bytes = out_batches * out_width * out_height * out_depth;
 
-	struct tdata my_info = {
-		self,
-		0,
+	struct tdata worker0_info = {
+		.self = self,
+		.whoami = 0,
 	};
-	struct tdata worker_info = {
-		self,
-		1,
+	struct tdata worker1_info = {
+		.self = self,
+		.whoami = 1,
 	};
-	nn_sem_init(&worker_info.donesem,0);
-	nn_sem_init(&my_info.donesem,0);
+	nn_sem_init(&worker0_info.donesem,0);
+	nn_sem_init(&worker1_info.donesem,0);
 
 	/* Assert min and max are size 1,1,1,1 ? */
 
@@ -315,15 +310,18 @@ static int maxpool_execute(struct nn_node *self, struct nn_graph *nn,
 		|| (stride_tensor->shape.depth != 1)) {
 		return errlog(nn,"bad window/stride shape");
 	}
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	if (self->padding == NN_PAD_NA) return errlog(nn,"This op might pad");
-	tensor_set_shape(out_tensor,out_batches,out_height,out_width,out_depth);
-	out_tensor->data_size = bytes;
+	if( tensor_out_prepare_normal( out_tensor, out_batches,out_height,out_width,out_depth, NN_TYPE_QUINT8)!=0){
+		return errlog(nn,"out too small");
+	}
 
-	nn_os_work_for_vector(nn,maxpool_execute_slice_f,&worker_info);
+	if (self->padding == NN_PAD_NA) return errlog(nn,"This op might pad");
+
+	nn_os_work_for_vector(nn,maxpool_execute_slice_f,&worker0_info);
+	nn_os_work_for_vector(nn,maxpool_execute_slice_f,&worker1_info);
 	//maxpool_execute_slice_f(nn,&worker_info);
-	maxpool_execute_slice_f(nn,&my_info);
-	nn_sem_wait(&worker_info.donesem);
+	//maxpool_execute_slice_f(nn,&my_info);
+	nn_sem_wait(&worker0_info.donesem);
+	nn_sem_wait(&worker1_info.donesem);
 
 	tensor_copy(out_min_tensor,in_min_tensor);
 	tensor_copy(out_max_tensor,in_max_tensor);
@@ -383,17 +381,17 @@ static int maxpool_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_QuantizedMaxPool_8 = {
-	SFINIT(.execute, maxpool_execute_asm),
-	SFINIT(  .check, maxpool_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = maxpool_execute_asm,
+	.check = maxpool_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedMaxPool_8_ref = {
-	SFINIT(.execute, maxpool_execute_ref),
-	SFINIT(  .check, maxpool_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = maxpool_execute_ref,
+	.check = maxpool_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 

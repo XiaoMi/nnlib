@@ -62,9 +62,34 @@ static inline uint8_t uint8_t_min(uint8_t a, uint8_t b)
 	else return b;
 }
 #else
-void relu_kernel(uint8_t *in_data, uint8_t *out_data, int bytes, uint8_t quantized_zero);
-void reluX_kernel(uint8_t *in_data, uint8_t *out_data, int bytes, uint8_t quantized_zero, uint8_t quantized_max);
+void relu_kernel(const uint8_t *in_data, uint8_t *out_data, int bytes, uint8_t quantized_zero);
+void reluX_kernel(const uint8_t *in_data, uint8_t *out_data, int bytes, uint8_t quantized_zero, uint8_t quantized_max);
 #endif
+
+
+struct tdata {
+	const uint8_t *in_data;
+	uint8_t *out_data;
+	size_t bytes;
+	uint8_t quantized_zero;
+	uint8_t quantized_max;
+	nn_sem_t donesem;
+};
+
+
+static void relu_execute_hvx(struct nn_graph *nn, void *vtd)
+{
+	struct tdata *td = vtd;
+	relu_kernel(td->in_data, td->out_data, td->bytes, td->quantized_zero);
+	nn_sem_post(&td->donesem);
+}
+
+static void reluX_execute_hvx(struct nn_graph *nn, void *vtd)
+{
+	struct tdata *td = vtd;
+	reluX_kernel(td->in_data, td->out_data, td->bytes, td->quantized_zero,td->quantized_max);
+	nn_sem_post(&td->donesem);
+}
 
 static int relu_execute(struct nn_node *self, struct nn_graph *nn)
 {
@@ -74,15 +99,19 @@ static int relu_execute(struct nn_node *self, struct nn_graph *nn)
 	struct tensor *out_tensor = self->outputs[0];
 	struct tensor *out_min_tensor = self->outputs[1];
 	struct tensor *out_max_tensor = self->outputs[2];
-	size_t bytes = in_tensor->shape.batches 
-		* in_tensor->shape.height
-		* in_tensor->shape.width
-		* in_tensor->shape.depth;
-	uint8_t *in_data = (uint8_t *)in_tensor->data;
-	uint8_t *out_data = (uint8_t *)out_tensor->data;
-	uint8_t quantized_zero;
+	size_t bytes = 1* tensor_element_count(in_tensor);
+	uint8_t *in_data = in_tensor->data;
+	uint8_t *out_data = out_tensor->data;
 	float in_min = tensor_get_float(in_min_tensor,0);
 	float in_max = tensor_get_float(in_max_tensor,0);
+	uint8_t quantized_zero = quantize_uint8(0.0f,in_min,in_max);
+	struct tdata td = {
+		.in_data = in_data,
+		.out_data = out_data,
+		.bytes = bytes,
+		.quantized_zero = quantized_zero,
+	};
+	nn_sem_init(&td.donesem,0);
 
 	/* Assert min and max are size 1,1,1,1 ? */
 
@@ -91,13 +120,11 @@ static int relu_execute(struct nn_node *self, struct nn_graph *nn)
 		tensor_get_float(in_min_tensor,0),
 		tensor_get_float(in_max_tensor,0));
 
-	quantized_zero = quantize_uint8(0.0f,in_min,in_max);
+	if( tensor_out_prepare_normal_fromshape( out_tensor, & in_tensor->shape, NN_TYPE_QUINT8 )!= 0)
+		return errlog(nn,"out too small");
 
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	out_tensor->shape = in_tensor->shape;
-	out_tensor->data_size = bytes;
-
-	relu_kernel(in_data, out_data, bytes, quantized_zero);
+	nn_os_work_for_vector(nn,relu_execute_hvx,&td);
+	nn_sem_wait(&td.donesem);
 
 	tensor_copy(out_min_tensor,in_min_tensor);
 	tensor_copy(out_max_tensor,in_max_tensor);
@@ -106,6 +133,51 @@ static int relu_execute(struct nn_node *self, struct nn_graph *nn)
 		tensor_get_float(out_min_tensor,0),
 		tensor_get_float(out_max_tensor,0));
 	logmsg(nn,2,"relu %p done",self);
+	return 0;
+}
+
+static int clamp_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	const struct tensor *in_tensor = self->inputs[0];
+	const struct tensor *in_min_tensor = self->inputs[1];
+	const struct tensor *in_max_tensor = self->inputs[2];
+	const struct tensor *min_val_tensor = self->inputs[3];
+	const struct tensor *max_val_tensor = self->inputs[4];
+	struct tensor *out_tensor = self->outputs[0];
+	struct tensor *out_min_tensor = self->outputs[1];
+	struct tensor *out_max_tensor = self->outputs[2];
+	size_t bytes = 1* tensor_element_count(in_tensor);
+	uint8_t *in_data = in_tensor->data;
+	uint8_t *out_data = out_tensor->data;
+	float in_min = tensor_get_float(in_min_tensor,0);
+	float in_max = tensor_get_float(in_max_tensor,0);
+	float min_val = tensor_get_float(min_val_tensor,0);
+	float max_val = tensor_get_float(max_val_tensor,0);
+	uint8_t q_min = quantize_uint8(min_val,in_min,in_max);
+	uint8_t q_max = quantize_uint8(max_val,in_min,in_max);
+	struct tdata td = {
+		.in_data = in_data,
+		.out_data = out_data,
+		.bytes = bytes,
+		.quantized_zero = q_min,
+		.quantized_max = q_max,
+	};
+	nn_sem_init(&td.donesem,0);
+
+	/* Assert min and max are size 1,1,1,1 ? */
+
+	logmsg(nn,2,"clamp execute. self=%p ",self);
+
+	if( tensor_out_prepare_normal_fromshape( out_tensor, & in_tensor->shape, NN_TYPE_QUINT8 )!= 0)
+		return errlog(nn,"out too small");
+
+	nn_os_work_for_vector(nn,reluX_execute_hvx,&td);
+	nn_sem_wait(&td.donesem);
+
+	tensor_copy(out_min_tensor,in_min_tensor);
+	tensor_copy(out_max_tensor,in_max_tensor);
+
+	logmsg(nn,2,"clamp %p done",self);
 	return 0;
 }
 
@@ -118,30 +190,32 @@ static int reluX_execute(struct nn_node *self, struct nn_graph *nn)
 	struct tensor *out_tensor = self->outputs[0];
 	struct tensor *out_min_tensor = self->outputs[1];
 	struct tensor *out_max_tensor = self->outputs[2];
-	size_t bytes = in_tensor->shape.batches 
-		* in_tensor->shape.height
-		* in_tensor->shape.width
-		* in_tensor->shape.depth;
-	uint8_t *in_data = (uint8_t *)in_tensor->data;
-	uint8_t *out_data = (uint8_t *)out_tensor->data;
-	uint8_t quantized_zero;
-	uint8_t quantized_max;
+	size_t bytes = 1* tensor_element_count(in_tensor);
+	uint8_t *in_data = in_tensor->data;
+	uint8_t *out_data = out_tensor->data;
 	float in_min = tensor_get_float(in_min_tensor,0);
 	float in_max = tensor_get_float(in_max_tensor,0);
 	float max_val = tensor_get_float(max_val_tensor,0);
+	uint8_t quantized_zero = quantize_uint8(0.0f,in_min,in_max);
+	uint8_t quantized_max = quantize_uint8(max_val,in_min,in_max);
+	struct tdata td = {
+		.in_data = in_data,
+		.out_data = out_data,
+		.bytes = bytes,
+		.quantized_zero = quantized_zero,
+		.quantized_max = quantized_max,
+	};
+	nn_sem_init(&td.donesem,0);
 
 	/* Assert min and max are size 1,1,1,1 ? */
 
 	logmsg(nn,2,"relu execute. self=%p ",self);
 
-	quantized_zero = quantize_uint8(0.0f,in_min,in_max);
-	quantized_max = quantize_uint8(max_val,in_min,in_max);
+	if( tensor_out_prepare_normal_fromshape( out_tensor, & in_tensor->shape, NN_TYPE_QUINT8 )!= 0)
+		return errlog(nn,"out too small");
 
-	if (out_tensor->max_size < bytes) return errlog(nn,"out too small");
-	out_tensor->shape = in_tensor->shape;
-	out_tensor->data_size = bytes;
-
-	reluX_kernel(in_data, out_data, bytes, quantized_zero, quantized_max);
+	nn_os_work_for_vector(nn,reluX_execute_hvx,&td);
+	nn_sem_wait(&td.donesem);
 
 	tensor_copy(out_min_tensor,in_min_tensor);
 	tensor_copy(out_max_tensor,in_max_tensor);
@@ -164,6 +238,15 @@ static int relu_check(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
+static int clamp_check(struct nn_node *self, struct nn_graph *nn)
+{
+	logmsg(nn,2,"Checking clamp node %p",self);
+	if (self->n_inputs != 5) return errlog(nn,"wrong # inputs");
+	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
+	logmsg(nn,2,"clamp node %p check OK",self);
+	return 0;
+}
+
 static int reluX_check(struct nn_node *self, struct nn_graph *nn)
 {
 	int i;
@@ -180,31 +263,45 @@ static int reluX_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_QuantizedRelu_8 = {
-	SFINIT(.execute, relu_execute),
-	SFINIT(  .check, relu_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = relu_execute,
+	.check = relu_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedReluX_8 = {
-	SFINIT(.execute, reluX_execute),
-	SFINIT(  .check, reluX_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = reluX_execute,
+	.check = reluX_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 
 struct nn_node_ops nn_ops_for_QuantizedRelu_8_ref = {
-	SFINIT(.execute, relu_execute),
-	SFINIT(  .check, relu_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = relu_execute,
+	.check = relu_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedReluX_8_ref = {
-	SFINIT(.execute, reluX_execute),
-	SFINIT(  .check, reluX_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = reluX_execute,
+	.check = reluX_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};
+
+struct nn_node_ops nn_ops_for_QuantizedClamp_8 = {
+	.execute = clamp_execute, 
+	.check = clamp_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};
+
+struct nn_node_ops nn_ops_for_QuantizedClamp_8_ref = {
+	.execute = clamp_execute, 
+	.check = clamp_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

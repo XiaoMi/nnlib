@@ -149,8 +149,8 @@ biasadd_relu_requant_nonaligned_hvx:
                loop1(.L_loop1, num_patches)
              } {
                round = ##0x00008000
-               l2fetch(l2addr, l2cntrl)                //
              }
+               l2fetch(l2addr, l2cntrl)                //
 /*==============================================================================*/
                .balign 32
 .L_loop1:

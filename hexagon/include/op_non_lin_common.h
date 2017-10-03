@@ -89,6 +89,47 @@ static inline void requant_u8u8_inplace(uint8_t *data, int numbytes, float in_mi
 	}
 }
 
+static inline void requant_s8u8(int8_t *odata, uint8_t *idata, int numbytes, float in_min, float in_max, float out_min, float out_max)
+{
+	#define QUANTMAX_8BITUNSIGN (0x000000FFL)
+	#define QUANTMAX_8BITSIGNED (0x0000007FL)
+	#define QUANTMIN_8BITSIGNED (0xFFFFFF80L)
+	#define QUANTSHIFT_16BITVAR (15)
+	float out_level_recip;
+	float in_level;
+	float limgain;
+	int gain;
+	int rval;
+	int lval;
+	int in_zero;
+	int out_zero;
+	int i;
+	
+	// compute with appropriate bitshift the gain and offset for requantization from input min-max to output min-max on data
+	in_zero = ((int)quantize_uint8(0.0f,in_min,in_max) & QUANTMAX_8BITUNSIGN);
+	in_level = ((in_max - in_min) / (float)(QUANTMAX_8BITUNSIGN));
+	out_level_recip = ((float)(QUANTMAX_8BITUNSIGN) / (out_max - out_min));
+	rval = roundf((0.0f - out_min) * out_level_recip);
+	out_zero = (rval < -128) ? -128 : ((rval > 127) ? 127 : rval);
+	limgain = (float)(powf(2.0, QUANTSHIFT_16BITVAR));
+	gain = (int)(out_level_recip * in_level * limgain);
+	if (gain > (int)(limgain - 1)) {
+		gain = (int)(limgain - 1);
+	}
+	
+	// apply with appropriate bitshift the gain and offset for requantization from input min-max to output min-max on data
+	for (i = 0; i < numbytes; i++) {
+		rval = (((int)idata[i] & QUANTMAX_8BITUNSIGN) - in_zero);
+		lval = ((rval * gain) + ((int)(limgain) / 2)) >> QUANTSHIFT_16BITVAR;
+		if (lval > (int)QUANTMAX_8BITSIGNED) {
+			lval = (int)QUANTMAX_8BITSIGNED;
+		} else if (lval < (int)QUANTMIN_8BITSIGNED) {
+			lval = (int)QUANTMIN_8BITSIGNED;
+		}
+		odata[i] = (int8_t)(lval);
+	}
+}
+
 static inline void dequant_u8(float *out, const uint8_t *in, int numbytes, float in_min, float in_max)
 {
 	#define QUANTMAX_8BITUNSIGN (0x000000FFL)

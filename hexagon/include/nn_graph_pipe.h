@@ -45,8 +45,10 @@ struct nn_pipe {
 	int send_idx;
 	int recv_idx;
 };
+
 struct nn_pipe *nn_pipe_alloc_portable(struct nn_graph *nn, uint32_t pipe_elements);
+void nn_pipe_free_portable(struct nn_pipe *pipe);
 void nn_pipe_send_portable(struct nn_pipe *pipe, uint64_t val);
-unsigned long long int nn_pipe_recv_portable(struct nn_pipe *pipe);
+uint64_t nn_pipe_recv_portable(struct nn_pipe *pipe);
 
 #endif

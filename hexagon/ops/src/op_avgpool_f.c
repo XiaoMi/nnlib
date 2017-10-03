@@ -57,8 +57,10 @@ static int avgpool_execute(struct nn_node *self, struct nn_graph *nn)
 	int32_t window_width = window_tensor->shape.width;
 
 	int32_t out_batches = in_batches;
-	int32_t out_width = nn_pad_compute_outsize(in_width,window_width,stride_width,self->padding);
-	int32_t out_height = nn_pad_compute_outsize(in_height,window_height,stride_height,self->padding);
+	int32_t adj_x;
+	int32_t adj_y;
+	int32_t out_width = nn_pad_compute_outsize_and_padbefore(in_width,window_width,stride_width,self->padding, & adj_x);
+	int32_t out_height = nn_pad_compute_outsize_and_padbefore(in_height,window_height,stride_height,self->padding, & adj_y);
 	int32_t out_depth = in_depth;
 	int32_t batch;
 	int32_t out_x;
@@ -67,27 +69,28 @@ static int avgpool_execute(struct nn_node *self, struct nn_graph *nn)
 	int32_t in_x;
 	int32_t in_y;
 	int32_t in_z;
-	const float *in = (const float *)in_tensor->data;
-	float *out = (float *)out_tensor->data;
+	const float *in = in_tensor->data;
+	float *out = out_tensor->data;
 
-	int32_t adj_x = ((out_width-1) * stride_width + window_width - in_width) / 2;
-	int32_t adj_y = ((out_height-1) * stride_height + window_height - in_height) / 2;
 
-	size_t bytes = out_batches * out_width * out_height * out_depth * sizeof(float);
 
 	/* check size of output */
 
 	logmsg(nn,2,"fp avgpool execute. self=%p ",self);
+	if( out_width < 1 || out_height < 1) {
+		return errlog(nn,"input too small");
+	}
 	if ((window_tensor->shape.batches != 1)
 		|| (window_tensor->shape.depth != 1)
 		|| (stride_tensor->shape.batches != 1)
 		|| (stride_tensor->shape.depth != 1)) {
 		return errlog(nn,"bad window/stride shape");
 	}
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
 	if (self->padding == NN_PAD_NA) return errlog(nn,"This op might pad");
-	tensor_set_shape(out_tensor,out_batches,out_height,out_width,out_depth);
-	out_tensor->data_size = bytes;
+	if( tensor_out_prepare_normal(out_tensor,
+			out_batches,out_height,out_width,out_depth, NN_TYPE_FLOAT)!= 0)
+		return errlog(nn,"avgpool_f: failed to create output");
+
 	for (batch = 0; batch < out_batches; batch++) {
 	  /* foreach out y */
 	  for (out_y = 0; out_y < out_height; out_y++) {
@@ -155,10 +158,10 @@ static int avgpool_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_AvgPool_f = {
-	SFINIT(.execute, avgpool_execute),
-	SFINIT(  .check, avgpool_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = avgpool_execute,
+	.check = avgpool_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 

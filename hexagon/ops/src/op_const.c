@@ -51,7 +51,6 @@ static int const_execute(struct nn_node *self, struct nn_graph *nn)
 
 static int const_check(struct nn_node *self, struct nn_graph *nn)
 {
-	logmsg(nn,2,"Checking const node %p",self);
 	if (self->inputs != NULL) {
 		return errlog(nn,0,"const: fatal: inputs");
 	}
@@ -61,7 +60,6 @@ static int const_check(struct nn_node *self, struct nn_graph *nn)
 	if (self->outputs[0] == NULL) {
 		return errlog(nn,0,"const: fatal: NULL output 0");
 	}
-	logmsg(nn,2,"const node %p check OK",self);
 	return 0;
 }
 struct nn_node *hexagon_nn_const_ctor(
@@ -77,6 +75,7 @@ struct nn_node *hexagon_nn_const_ctor(
 	struct nn_node *self;
 	struct tensor *const_tensor;
 	struct tensor tmp_tensor;
+	struct output *outdefs;
 	tensor_set_shape(&tmp_tensor,batches,height,width,depth);
 	tmp_tensor.data = (uint8_t *)data;
 	tmp_tensor.max_size = tmp_tensor.data_size = data_len;
@@ -88,11 +87,31 @@ struct nn_node *hexagon_nn_const_ctor(
 		errlog(nn,"cant alloc node");
 		return NULL;
 	}
+	if ((outdefs = nn_calloc(1,sizeof(struct output))) == NULL) {
+		errlog(nn,"can't alloc out defs");
+		return NULL;
+	}
+	outdefs[0].rank = 4;
+	outdefs[0].max_sizes[0] = batches;
+	outdefs[0].max_sizes[1] = height;
+	outdefs[0].max_sizes[2] = width;
+	outdefs[0].max_sizes[3] = depth;
+	outdefs[0].elementsize = data_len/(batches*height*width*depth);
 	self->n_inputs = 0;
 	self->n_outputs = 1;
 	self->outputs = &const_tensor->self;
+	self->output_defs = outdefs;
 	self->inputs = NULL;
 	self->input_refs = NULL;
+	self->executions = 0;
+	self->perfcounter = 0;
+	logmsg(nn,9,"DEBUG: Const node output at %p is %d*%d*%d*%d",
+	       self->outputs[0],
+	       self->outputs[0]->shape.batches,
+	       self->outputs[0]->shape.height,
+	       self->outputs[0]->shape.width,
+	       self->outputs[0]->shape.depth
+		);
 	return self;
 }
 
@@ -112,17 +131,18 @@ static struct nn_node *const_ctor(
 
 static int const_dtor(struct nn_node *self, struct nn_graph *nn)
 {
-	logmsg(nn,2,"const node %p dtor",self);
+	logmsg(nn,9,"const node %p dtor id=%x",self,self->node_id);
 	tensor_free(self->outputs[0]);
-	free(self);
+	nn_free(self->output_defs);
+	nn_free(self);
 	return 0;
 }
 
 struct nn_node_ops nn_ops_for_Const = {
-	SFINIT(.execute, const_execute),
-	SFINIT(  .check, const_check),
-	SFINIT(   .ctor, const_ctor),
-	SFINIT(   .dtor, const_dtor),
+	.execute = const_execute,
+	.check = const_check,
+	.ctor = const_ctor,
+	.dtor = const_dtor,
 };
 
 

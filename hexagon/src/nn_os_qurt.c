@@ -33,24 +33,50 @@
  *
  */
 
+#ifdef USE_OS_QURT
+
 #include "dspCV_hvx.h"
 #include <qurt.h>
+#include <nn_graph.h>
 
-#define PIPESIZE_ELEMENTS 4
-#define PIPESIZE_BYTES ((PIPESIZE_ELEMENTS)*8)
-#define STACK_SIZE 8192
-
-
-static void __attribute__((unused)) qurt_worker(void *p)
+#if !defined(HEXAGON_V65) && !defined(HEXAGON_V66)
+#else
+#include <HAP_vtcm_mgr.h>
+#endif
+int nn_os_vtcm_acquire(struct nn_graph *nn)
 {
-	nn_os_worker(p);
-	qurt_thread_exit(0);
+#if !defined(HEXAGON_V65) && !defined(HEXAGON_V66)
+	/* Just return 0 */
+#else
+// FIXME: query how much VTCM
+#define VTCM_AMT (256*1024)
+	int use_single_page = 1;
+	void *ptr = HAP_request_VTCM(VTCM_AMT,use_single_page);
+	if (ptr != NULL) {
+		nn->vtcm_size = VTCM_AMT;
+		nn->vtcm_ptr = ptr;
+	}
+#endif
+	return 0;
+}
+
+int nn_os_vtcm_release(struct nn_graph *nn)
+{
+#if !defined(HEXAGON_V65) && !defined(HEXAGON_V66)
+	return 0;
+#else
+	HAP_release_VTCM(nn->vtcm_ptr);
+	nn->vtcm_ptr = NULL;
+	nn->vtcm_size = 0;
+#endif
+	return 0;
 }
 
 
 int nn_os_vector_acquire()
 {
-        if (dspCV_hvx_lock(DSPCV_HVX_MODE_128B, 0) < 0) {
+	int wait_for_context = 1;
+        if (dspCV_hvx_lock(DSPCV_HVX_MODE_128B, wait_for_context) < 0) {
 		return 0;
 	}
 	return 0;
@@ -60,49 +86,6 @@ int nn_os_vector_acquire()
 void nn_os_vector_release(int idx)
 {
 	dspCV_hvx_unlock();
-}
-
-int nn_os_workers_spawn(struct nn_graph *nn)
-{
-	qurt_thread_t vec,scal1,scal2;
-	struct tinfo info;
-	qurt_thread_attr_t attrs[3];
-	qurt_pipe_attr_t pattr;
-	int i;
-
-	nn_sem_init(&info.sem,0);
-	info.nn = nn;
-
-	qurt_pipe_attr_init(&pattr);
-	qurt_pipe_attr_set_buffer(&pattr,malloc(PIPESIZE_BYTES));
-	qurt_pipe_attr_set_elements(&pattr,PIPESIZE_ELEMENTS);
-	qurt_pipe_create(&nn->vec_work,&pattr);
-
-	qurt_pipe_attr_init(&pattr);
-	qurt_pipe_attr_set_buffer(&pattr,malloc(PIPESIZE_BYTES));
-	qurt_pipe_attr_set_elements(&pattr,PIPESIZE_ELEMENTS);
-	qurt_pipe_create(&nn->nonvec_work,&pattr);
-
-	for (i = 0; i < 3; i++) {
-		qurt_thread_attr_t *a = &attrs[i];
-		qurt_thread_attr_init(a);
-		qurt_thread_attr_set_name(a,(char *)"nn_worker");
-		qurt_thread_attr_set_stack_addr(a,malloc(STACK_SIZE));
-		qurt_thread_attr_set_stack_size(a,STACK_SIZE);
-		qurt_thread_attr_set_priority(a, QURT_THREAD_ATTR_PRIORITY_DEFAULT/2+i);
-	}
-	logmsg(nn,0,"thread priority: %d\n",QURT_THREAD_ATTR_PRIORITY_DEFAULT/2);
-	info.pipe = nn->vec_work;
-	if ((i=qurt_thread_create(&vec,&attrs[0],qurt_worker,&info)) != QURT_EOK) {
-		return errlog(nn,"thread create fail: %d",i);
-	}
-	nn_sem_wait(&info.sem);
-	info.pipe = nn->nonvec_work;
-	qurt_thread_create(&scal1,&attrs[1],qurt_worker,&info);
-	nn_sem_wait(&info.sem);
-	qurt_thread_create(&scal2,&attrs[2],qurt_worker,&info);
-	nn_sem_wait(&info.sem);
-	return 0;
 }
 
 void nn_os_hvx_power_on(struct nn_graph *nn)
@@ -116,3 +99,78 @@ void nn_os_hvx_power_off(struct nn_graph *nn)
 {
 	dspCV_hvx_power_off();
 }
+
+nn_pipe_t *nn_pipe_alloc(struct nn_graph *nn, uint32_t pipe_elements)
+{
+	qurt_pipe_attr_t pattr;
+	nn_pipe_t *ret;
+	const unsigned int PIPESIZE_ELEMENTS = 4;
+	const unsigned int PIPESIZE_BYTES = PIPESIZE_ELEMENTS * 8;
+	qurt_pipe_attr_init(&pattr);
+	qurt_pipe_attr_set_buffer(&pattr,nn_malloc(PIPESIZE_BYTES));
+	qurt_pipe_attr_set_elements(&pattr,PIPESIZE_ELEMENTS);
+	qurt_pipe_create(&ret,&pattr);
+	return ret;
+}
+
+struct qurt_startup {
+	void *(*f)(void *);
+	void *arg;
+	nn_sem_t sem;
+};
+
+static void __attribute__((unused)) qurt_wrap(void *p)
+{
+	struct qurt_startup *st = p;
+	void *(*f)(void *) = st->f;
+	void *arg = st->arg;
+	nn_sem_post(&st->sem);
+	f(arg);
+	qurt_thread_exit(0);
+}
+
+int nn_thread_create(
+	struct nn_graph *nn,
+	nn_thread_t *tid,
+	const nn_thread_attr_t *attrs,
+	void *(*f)(void *),
+	void *arg)
+{
+	int ret;
+	char name[16];
+	unsigned int cycles = nn_os_get_cycles(nn);
+	struct qurt_startup st;
+	nn_thread_attr_t myattrs = *attrs;
+	nn_sem_init(&st.sem,0);
+	st.f = f;
+	st.arg = arg;
+	snprintf(name,16,"nn_%x",cycles);
+	qurt_thread_attr_set_name(&myattrs,name);
+	qurt_thread_attr_set_priority(&myattrs,QURT_THREAD_ATTR_PRIORITY_DEFAULT/2);
+	ret = qurt_thread_create(tid,&myattrs,qurt_wrap,&st);
+	if (ret != 0) return errlog(nn,"Can't create qurt thread ret=%x",ret);
+	nn_sem_wait(&st.sem);
+	return ret;
+}
+
+/* depending on config, get pcycles or PMU events */
+unsigned long long int nn_os_get_perfcount(struct nn_graph *nn) {
+	uint32_t lo;
+	uint32_t hi;
+	uint64_t ret;
+	uint64_t lo64;
+	if (nn->perf_event < NN_GRAPH_PERFEVENT_HWPMU) {
+		if (nn->perf_event == 0) return qurt_get_core_pcycles();
+	}
+	if (nn->perf_event == NN_GRAPH_PERFEVENT_UTIME) return nn_os_get_usecs(nn);
+	lo = qurt_pmu_get(QURT_PMUCNT0);
+	hi = qurt_pmu_get(QURT_PMUCNT1);
+	ret = (uint64_t)hi;
+	ret <<= 32;
+	lo64 = lo;
+	ret |= lo64;	// shut up klockwork
+	return ret;
+}
+
+#endif
+

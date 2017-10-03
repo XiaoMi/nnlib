@@ -43,15 +43,42 @@
  */
 
 //#ifndef __hexagon__
-#if !defined(USE_OS_QURT)
-static inline void config_event_hw(struct nn_graph *nn, uint32_t event) {}
-#else
-#include <qurt.h>
+#if defined(H2_H)
 static inline void config_event_hw(struct nn_graph *nn, uint32_t event)
 {
 	uint32_t pmuevtcfg;
 	pmuevtcfg = (event & 0xFF) | 0x0100;
-	qurt_pmu_set(QURT_PMUEVTCFG,pmuevtcfg);
+	h2_pmu_setreg(H2_PMUEVTCFG,pmuevtcfg);
+#if defined(HEXAGON_V65) || defined(HEXAGON_V66)
+	h2_pmu_setreg(H2_PMUCFG,(event & 0x100) >> 8);
+#endif
+}
+
+#elif !defined(USE_OS_QURT)
+static inline void config_event_hw(struct nn_graph *nn, uint32_t event) {}
+#else
+#include <qurt.h>
+#include <qurt_event.h>
+#include "nn_graph_log.h"
+
+static inline void config_event_hw(struct nn_graph *nn, uint32_t event)
+{
+    qurt_arch_version_t hvxver;
+    if (QURT_EOK != qurt_sysenv_get_arch_version(&hvxver))
+    {
+        //FARF(HIGH, "config_event_hw error");
+        // error message
+        return;
+    }
+
+    hvxver.arch_version &= 0xff;
+    if (hvxver.arch_version == 0x65)
+    {
+        qurt_pmu_set(QURT_PMUCFG, (event & 0x100) >> 8);
+    }
+
+    uint32_t pmuevtcfg = (event & 0xFF) | 0x0100;
+    qurt_pmu_set(QURT_PMUEVTCFG,pmuevtcfg);
 }
 #endif
 

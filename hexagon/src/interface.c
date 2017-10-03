@@ -41,6 +41,7 @@
  * This contains the interface code.
  */
 
+#include <hexagon_nn.h>
 #include <nn_graph.h>
 #include <string.h>
 #include <stdio.h>
@@ -54,7 +55,10 @@
 #include "HAP_power.h"
 #include "HAP_mem.h"
 #include "HAP_perf.h"
+#include "AEEStdErr.h"
 #include <qurt.h>
+#else
+#define AEE_EBADCLASS 10
 #endif
 
 static inline void fast_strncpy(char *dst, const char *src, int len)
@@ -73,29 +77,33 @@ static inline nn_id_t nn_graph_to_id(struct nn_graph *graph) {
 	return (nn_id_t)(graph);
 }
 
-nn_id_t hexagon_nn_init()
+int hexagon_nn_init(hexagon_nn_nn_id *g)
 {
+	if (!g) return AEE_EBADCLASS;
+
 	/* allocate new ID */
 	struct nn_graph *graph;
 	int ret;
-	if ((graph = (struct nn_graph *)calloc(1,sizeof(*graph))) == NULL) {
+	if ((graph = nn_calloc(1,sizeof(*graph))) == NULL) {
 		return 0;
 	}
 	graph->state = NN_GRAPH_CONSTRUCTION;
-	if ((graph->scratch = memalign(128,SCRATCH_SIZE)) == NULL) {
-		free(graph);
+	nn_mutex_init(&graph->log_mutex);
+	if ((graph->scratch = nn_memalign(128,SCRATCH_SIZE)) == NULL) {
+		nn_free(graph);
 		return 0;
 	}
 	graph->scratch_size = SCRATCH_SIZE;
-	if ((graph->logbuf = (char *)calloc(1,LOGBUF_SIZE)) == NULL) {
-		free(graph->scratch);
-		free(graph);
+	if ((graph->logbuf = nn_calloc(1,LOGBUF_SIZE)) == NULL) {
+		nn_free(graph->scratch);
+		nn_free(graph);
 		return 0;
 	}
 	graph->logbuf_size = LOGBUF_SIZE-1;
 	graph->logbuf_pos = 0;
 	if ((ret=nn_os_workers_spawn(graph)) != 0) return ret;
-	return nn_graph_to_id(graph);
+	*g = nn_graph_to_id(graph);
+	return 0;
 }
 
 int hexagon_nn_getlog(nn_id_t id, unsigned char *buf, uint32_t length)
@@ -193,6 +201,16 @@ int hexagon_nn_append_const_node(
 		data_len);
 }
 
+
+/*
+ * FIXME: hexagon_nn_tensordef will no longer be compatible with struct tensor
+ * as we make it more complex.
+ * Instead, create struct tensors here and copy from hexagon_nn_tensordef values.
+ * You should be able to avoid copying the bulk data though!
+ * 
+ * Note that in C99 you can create an array on the stack from a function argument.
+ */
+
 int hexagon_nn_execute_new(
 	nn_id_t id,
 	const hexagon_nn_tensordef *inputs,
@@ -201,14 +219,49 @@ int hexagon_nn_execute_new(
 	uint32_t n_outputs)
 {
 	struct nn_graph *graph;
-	const struct tensor *ins;
-	struct tensor *outs;
-	/* 
-	 * hexagon_nn_tensordef should be compatible with struct tensor for
-	 * input and output nodes
-	 */
-	ins = (const struct tensor *)inputs;
-	outs = (struct tensor *)outputs;
+	if ((graph = nn_id_to_graph(id)) == NULL) {
+		return errlog(NULL,"nn id %x not found",id);
+	}
+	if (graph->n_inputs != n_inputs) {
+		struct tensor *inputs_tmp;
+		if ((inputs_tmp = nn_realloc((void *)graph->inputs,sizeof(*inputs_tmp)*n_inputs)) == NULL) {
+			return errlog(graph,"can't allocate for %d inputs",n_inputs);
+		} else {
+			graph->inputs = inputs_tmp;
+			graph->n_inputs = n_inputs;
+		}
+	}
+	if (graph->n_outputs != n_outputs) {
+		struct tensor *outputs_tmp;
+		if ((outputs_tmp = nn_realloc(graph->outputs,sizeof(*outputs_tmp)*n_outputs)) == NULL) {
+			return errlog(graph,"can't allocate for %d outputs",n_outputs);
+		} else {
+			graph->outputs = outputs_tmp;
+			graph->n_outputs = n_outputs;
+		}
+	}
+	int i;
+	int ret;
+	struct tensor *input_tensors = (struct tensor *)graph->inputs;
+	struct tensor *output_tensors = (struct tensor *)graph->outputs;
+	for (i = 0; i < n_inputs; i++) {
+		const hexagon_nn_tensordef *in = inputs+i;
+		struct tensor *t = input_tensors+i;
+		t->shape.batches = in->batches;
+		t->shape.height = in->height;
+		t->shape.width = in->width;
+		t->shape.depth = in->depth;
+		t->data = in->data;
+		t->max_size = in->dataLen;
+		t->data_size = in->data_valid_len;
+		t->format.raw = 0;
+	}
+	for (i = 0; i < n_outputs; i++) {
+		hexagon_nn_tensordef *out = outputs+i;
+		struct tensor *t = output_tensors+i;
+		t->data = out->data;
+		t->max_size = out->dataLen;
+	}
 	if ((graph = nn_id_to_graph(id)) == NULL) {
 		return errlog(NULL,"nn id %x not found",id);
 	}
@@ -216,7 +269,17 @@ int hexagon_nn_execute_new(
 		return errlog(graph,"graph not prepared");
 	}
 	logmsg(graph,2,"in hexagon_nn_execute_new, %d in %d out",n_inputs,n_outputs);
-	return do_execute(graph,ins,n_inputs,outs,n_outputs);
+	ret = do_execute(graph);
+	for (i = 0; i < n_outputs; i++) {
+		hexagon_nn_tensordef *out = outputs+i;
+		struct tensor *t = output_tensors+i;
+		out->batches = t->shape.batches;
+		out->height = t->shape.height;
+		out->width = t->shape.width;
+		out->depth = t->shape.depth;
+		out->data_valid_len = t->data_size;
+	}
+	return ret;
 }
 
 int hexagon_nn_execute(
@@ -235,28 +298,24 @@ int hexagon_nn_execute(
 	uint32_t data_out_max,
 	uint32_t *data_out_size)
 {
-	struct nn_graph *graph;
-	struct tensor in;
-	struct tensor out;
+	hexagon_nn_tensordef in;
+	hexagon_nn_tensordef out;
 	int ret;
-	tensor_set_shape(&in,batches_in,height_in,width_in,depth_in);
-	in.data_size = in.max_size = data_len_in;
+
+	in.batches = batches_in;
+	in.height = height_in;
+	in.width = width_in;
+	in.depth = depth_in;
+	in.data_valid_len = in.dataLen = data_len_in;
 	in.data = (uint8_t *)data_in;
 	out.data = data_out;
-	/* Put max size in data_size for output tensor to match RPC layout */
-	out.data_size = out.max_size = data_out_max;
-	if ((graph = nn_id_to_graph(id)) == NULL) {
-		return errlog(NULL,"nn id %x not found",id);
-	}
-	if (graph->state != NN_GRAPH_PREPARED) {
-		return errlog(graph,"graph not prepared");
-	}
-	ret = do_execute(graph,&in,1,&out,1);
-	*batches_out = out.shape.batches;
-	*height_out = out.shape.height;
-	*width_out = out.shape.width;
-	*depth_out = out.shape.depth;
-	*data_out_size = out.data_size;
+	out.dataLen = data_out_max;
+	ret = hexagon_nn_execute_new(id,&in,1,&out,1);
+	*batches_out = out.batches;
+	*height_out = out.height;
+	*width_out = out.width;
+	*depth_out = out.depth;
+	*data_out_size = out.data_valid_len;
 	return ret;
 }
 
@@ -312,6 +371,21 @@ int hexagon_nn_last_execution_cycles(nn_id_t id, unsigned int *cycles_lo, unsign
 	*cycles_lo = total;
 	return 0;
 }
+
+
+int print_node_perf(nn_id_t id)
+{
+	struct nn_graph *graph;
+	struct nn_node *node;
+	if ((graph = nn_id_to_graph(id)) == NULL) {
+		return errlog(NULL,"nn id %x not found",id);
+	}
+	for (node = graph->head; node != NULL; node = node->next) {
+		logmsg(graph,0,"Node performance: %9llu - %s",node->iter_cycles,hexagon_nn_op_names[node->node_type]);
+	}
+	return 0;
+}
+
 
 int hexagon_nn_GetHexagonBinaryVersion(int *ver)
 {

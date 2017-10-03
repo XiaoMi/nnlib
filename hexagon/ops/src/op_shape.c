@@ -39,22 +39,22 @@
 #include <quantize.h>
 #include <math.h>
 
+// output tensor is (1,1,1,4) with 4 elements indicating the
+// shape of the input tensor.
+
 static int shape_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	const struct tensor *in_tensor = self->inputs[0];
 	struct tensor *out_tensor = self->outputs[0];
-	int rank = 4;
-	size_t bytes = rank * sizeof(int32_t);
 
 	logmsg(nn,2,"shape execute. self=%p ",self);
 
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	tensor_set_shape(out_tensor,1,1,1,4);
+	if( tensor_out_prepare_normal( out_tensor, 1,1,1,4, NN_TYPE_INT32)!= 0 )
+		return errlog(nn,"out too small");
 	tensor_set_int32(out_tensor,0,in_tensor->shape.batches);
 	tensor_set_int32(out_tensor,1,in_tensor->shape.height);
 	tensor_set_int32(out_tensor,2,in_tensor->shape.width);
 	tensor_set_int32(out_tensor,3,in_tensor->shape.depth);
-	out_tensor->data_size = bytes;
 
 	logmsg(nn,2,"shape %p done",self);
 	return 0;
@@ -63,16 +63,17 @@ static int shape_execute(struct nn_node *self, struct nn_graph *nn)
 static int shape_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking shape node %p",self);
-	if (self->n_inputs != 1) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
+	int k = node_check_inputs_outputs_n( self,nn, "shape", 1,1);
+	if (k!=0)
+		return k;
 	logmsg(nn,2,"shape %p check OK",self);
 	return 0;
 }
 
 struct nn_node_ops nn_ops_for_Shape_int32 = {
-	SFINIT(.execute, shape_execute),
-	SFINIT(  .check, shape_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = shape_execute,
+	.check = shape_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

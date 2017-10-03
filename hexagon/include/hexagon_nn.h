@@ -35,23 +35,14 @@
 
 #ifndef HEXAGON_NN_H
 #define HEXAGON_NN_H 1
-#include <nn_graph.h>
+#include <nn_graph_types.h>
 
 typedef struct input hexagon_nn_input;
 typedef struct output hexagon_nn_output;
 typedef struct perfinfo hexagon_nn_perfinfo;
 
-struct almost_a_tensor {
-	unsigned int batches;
-	unsigned int height;
-	unsigned int width;
-	unsigned int depth;
-	unsigned char *data;
-	int dataLen;		/* For input and output */
-	unsigned int data_valid_len; /* for output only */
-	unsigned int unused;
-};
+typedef int32_t hexagon_nn_nn_id;
+typedef int32_t hexagon_nn_padding_type;
 
-static inline int hexagon_nn_config() { return 0; }
-
+#include <nn_graph.h>
 #endif

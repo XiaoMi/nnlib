@@ -42,15 +42,24 @@
  * This contains a node to flatten to a 1D array... basically fancy nop
  */
 
+static void do_reshape(struct nn_graph *nn, void *vself)
+{
+	struct nn_node *self = vself;
+	const struct tensor *in_tensor = self->inputs[0];
+	struct tensor *out_tensor = self->outputs[0];
+	vmemcpy_asm(out_tensor->data,in_tensor->data,in_tensor->data_size);
+	nn_sem_post(self->opaque);
+}
+
 static int reshape_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *in_shape = self->inputs[1];
 	struct tensor *out_tensor = self->outputs[0];
-	uint32_t b = self->inputs[0]->shape.batches;
-	uint32_t h = self->inputs[0]->shape.height;
-	uint32_t w = self->inputs[0]->shape.width;
-	uint32_t d = self->inputs[0]->shape.depth;
+	uint32_t b = in_tensor->shape.batches;
+	uint32_t h = in_tensor->shape.height;
+	uint32_t w = in_tensor->shape.width;
+	uint32_t d = in_tensor->shape.depth;
 	uint32_t elements = b*h*w*d;
 	int32_t new_rank = in_shape->shape.depth;
 	int32_t newb = (new_rank < 4) ? 1 : tensor_get_int32(in_shape,new_rank-4);
@@ -60,6 +69,7 @@ static int reshape_execute(struct nn_node *self, struct nn_graph *nn)
 	int32_t new_elements = newb*newh*neww*newd;
 	int32_t num_negs = (newb < 0) + (newh < 0) + (neww < 0) + (newd < 0);
 	int32_t unknown_dim;
+	nn_sem_t sem;
 	logmsg(nn,2,"(q)reshape execute. self=%p ",self);
 	if (out_tensor->max_size < in_tensor->data_size) {
 		return errlog(nn,"out too small");
@@ -70,11 +80,15 @@ static int reshape_execute(struct nn_node *self, struct nn_graph *nn)
 	if (newh < 0) newh = unknown_dim;
 	if (neww < 0) neww = unknown_dim;
 	if (newd < 0) newd = unknown_dim;
+	nn_sem_init(&sem,0);
+	self->opaque = &sem;
 
 	/* Copy input tensor to output */
 	tensor_set_shape(out_tensor,newb,newh,neww,newd);
 	out_tensor->data_size = in_tensor->data_size;
-	vmemcpy_asm(out_tensor->data,in_tensor->data,in_tensor->data_size);
+	nn_os_work_for_vector(nn,do_reshape,self);
+	nn_sem_wait(&sem);
+	self->opaque = NULL;
 	/* Handle quantized version */
 	if (self->n_outputs == 3) {
 		if (tensor_copy(self->outputs[1],self->inputs[2]) != 0) {
@@ -84,7 +98,7 @@ static int reshape_execute(struct nn_node *self, struct nn_graph *nn)
 			return errlog(nn,"bad extra copy");
 		}
 	}
-	logmsg(nn,2,"qreshape %dx%dx%dx%x (%dx%dx%dx%d) --> %dx%dx%dx%d",
+	logmsg(nn,2,"qreshape %dx%dx%dx%d (%dx%dx%dx%d) --> %dx%dx%dx%d",
 		b,h,w,d,
 		in_shape->shape.batches,
 		in_shape->shape.height,
@@ -113,16 +127,16 @@ static int qreshape_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Reshape = {
-	SFINIT(.execute, reshape_execute),
-	SFINIT(  .check, reshape_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = reshape_execute,
+	.check = reshape_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedReshape = {
-	SFINIT(.execute, reshape_execute),
-	SFINIT(  .check, qreshape_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = reshape_execute,
+	.check = qreshape_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

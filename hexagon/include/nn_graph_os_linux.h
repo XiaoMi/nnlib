@@ -42,12 +42,37 @@
 #include <semaphore.h>
 #include <time.h>
 
+#ifndef DONT_REDEF_ALLOC
+#define DONT_REDEF_ALLOC 1
+#endif
+#include <stdlib.h>
+
+
 struct nn_graph;
 typedef sem_t nn_sem_t;
 typedef pthread_mutex_t nn_mutex_t;
 typedef struct nn_pipe nn_pipe_t;
+typedef pthread_t nn_thread_t;
+typedef pthread_attr_t nn_thread_attr_t;
 
 #include "nn_graph_pipe.h"
+
+static inline int nn_thread_join(nn_thread_t id, void **retval) { return pthread_join(id,retval); }
+static inline int nn_thread_attr_init(nn_thread_attr_t *attrs) { return pthread_attr_init(attrs); }
+static inline int nn_thread_create(
+	struct nn_graph *nn,
+	nn_thread_t *tid,
+	const nn_thread_attr_t *attrs,
+	void *(*f)(void *),
+	void *arg) 
+{
+	return pthread_create(tid,attrs,f,arg);
+}
+static inline int nn_thread_attr_setstack(nn_thread_attr_t *attrs, void *stackaddr, size_t stacksize)
+{
+	if (stackaddr == NULL) return pthread_attr_setstacksize(attrs,stacksize);
+	return pthread_attr_setstack(attrs,stackaddr,stacksize);
+}
 
 static inline void nn_mutex_init(nn_mutex_t *mutex) { pthread_mutex_init(mutex,NULL); }
 static inline void nn_mutex_lock(nn_mutex_t *mutex) {pthread_mutex_lock(mutex); }
@@ -65,6 +90,7 @@ static inline void nn_pipe_send(nn_pipe_t *pipe, unsigned long long int val)
 	nn_pipe_send_portable(pipe,val);
 }
 static inline unsigned long long int nn_pipe_recv(nn_pipe_t *pipe) { return nn_pipe_recv_portable(pipe); }
+static inline void nn_pipe_free(nn_pipe_t *pipe) { nn_pipe_free_portable(pipe); }
 
 static inline int nn_os_vector_acquire(){return 0;}
 static inline void nn_os_vector_release(int idx){};
@@ -75,8 +101,9 @@ static inline void nn_os_hvx_power_off(struct nn_graph *nn) {};
 static inline uint64_t nn_os_get_cycles(struct nn_graph *nn)
 {
 	struct timespec ts;
+	asm volatile ("");
 	clock_gettime(CLOCK_REALTIME, &ts);
-
+	asm volatile ("");
 	return ts.tv_nsec;
 }
 #endif

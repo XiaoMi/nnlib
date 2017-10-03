@@ -46,13 +46,6 @@
 #include <quantize.h>
 
 
-static inline uint32_t tensor_elements(const struct tensor *t)
-{
-	return t->shape.batches
-		* t->shape.height
-		* t->shape.width
-		* t->shape.depth;
-}
 
 static inline uint8_t __attribute__((unused)) roundsatu8(float in)
 {
@@ -74,8 +67,8 @@ struct tdata {
 
 static void concat_execute_slice_ref(struct nn_graph *nn, void *vinfo)
 {
-	struct tdata *info = (struct tdata *)vinfo;
-	struct nn_node *self = (struct nn_node *)info->self;
+	struct tdata *info = vinfo;
+	struct nn_node *self = info->self;
 	int whoami = info->whoami;
 	int n_input_tensors = (self->n_inputs-1)/3;
 	const struct tensor **input_tensors = &self->inputs[1];
@@ -83,7 +76,7 @@ static void concat_execute_slice_ref(struct nn_graph *nn, void *vinfo)
 	const struct tensor **max_tensors = &self->inputs[1+2*n_input_tensors];
 	const struct tensor *t;
 	struct tensor *out_tensor = self->outputs[0];
-	uint8_t *out_data = (uint8_t *)out_tensor->data;
+	uint8_t *out_data = out_tensor->data;
 	uint32_t i;
 	float in_min;
 	float in_max; 
@@ -148,8 +141,8 @@ static void concat_execute_slice_ref(struct nn_graph *nn, void *vinfo)
 
 static void concat_execute_slice_asm(struct nn_graph *nn, void *vinfo)
 {
-	struct tdata *info = (struct tdata *)vinfo;
-	struct nn_node *self = (struct nn_node *)info->self;
+	struct tdata *info = vinfo;
+	struct nn_node *self = info->self;
 	int whoami = info->whoami;
 	int n_input_tensors = (self->n_inputs-1)/3;
 	const struct tensor **input_tensors = &self->inputs[1];
@@ -157,7 +150,7 @@ static void concat_execute_slice_asm(struct nn_graph *nn, void *vinfo)
 	const struct tensor **max_tensors = &self->inputs[1+2*n_input_tensors];
 	const struct tensor *t;
 	struct tensor *out_tensor = self->outputs[0];
-	uint8_t *out_data = (uint8_t *)out_tensor->data;
+	uint8_t *out_data = out_tensor->data;
 	uint32_t i;
 	float in_min;
 	float in_max; 
@@ -179,7 +172,7 @@ static void concat_execute_slice_asm(struct nn_graph *nn, void *vinfo)
 	for (i = 0; i < n_input_tensors; i++) {
 		t = input_tensors[i];
 		out = out_data;
-		in = (const uint8_t *)t->data;
+		in = t->data;
 		if ((i & 1) != whoami) {
 			out_data += t->shape.depth;
 			continue;
@@ -222,10 +215,9 @@ static int concat_execute(struct nn_node *self, struct nn_graph *nn,
 	uint32_t i;
 	float out_min = tensor_get_float(min_tensors[0],0);
 	float out_max = tensor_get_float(max_tensors[0],0);
-	uint32_t out_bytes = 0;
 	uint32_t total_depth = 0;
-	struct tdata my_info;
-	struct tdata worker_info;
+	struct tdata worker0_info;
+	struct tdata worker1_info;
 	logmsg(nn,2,"concat execute. self=%p ",self);
 	if (tensor_get_int32(dim_tensor,0) != 3) return errlog(nn,"only depth");
 	for (i = 0; i < n_input_tensors; i++) {
@@ -240,36 +232,33 @@ static int concat_execute(struct nn_node *self, struct nn_graph *nn,
 		}
 		out_min = fminf(out_min,tensor_get_float(min_tensors[i],0));
 		out_max = fmaxf(out_max,tensor_get_float(max_tensors[i],0));
-		out_bytes += tensor_elements(input_tensors[i]);
 		total_depth += input_tensors[i]->shape.depth;
 	}
-	if (out_bytes > out_tensor->max_size) return errlog(nn,"out too small");
 	if (out_min > 0.0f) {
 		out_min = 0.0f; // comport with op_quantize use of quantize_adjust_range setting minval = fminf(0.0f,min);
 	}
-	tensor_set_shape(out_min_tensor,1,1,1,1);
-	tensor_set_shape(out_max_tensor,1,1,1,1);
-	tensor_set_float(out_min_tensor,0,out_min);
-	tensor_set_float(out_max_tensor,0,out_max);
-	out_min_tensor->data_size = sizeof(float);
-	out_max_tensor->data_size = sizeof(float);
-	tensor_set_shape(out_tensor,in_batches,in_height,in_width,total_depth);
-	out_tensor->data_size = out_bytes;
+	if( tensor_out_prepare_normal( out_tensor,in_batches,in_height,in_width,total_depth, NN_TYPE_QUINT8 )!=0){
+		return errlog(nn,"out too small");
+	}
+	tensor_set_single_float(out_min_tensor, out_min);
+	tensor_set_single_float(out_max_tensor, out_max);
 
-	my_info.self = worker_info.self = self;
-	my_info.out_min = worker_info.out_min = out_min;
-	my_info.out_max = worker_info.out_max = out_max;
-	my_info.total_depth = worker_info.total_depth = total_depth;
-	my_info.whoami = 0;
-	worker_info.whoami = 1;
+	worker1_info.self = worker0_info.self = self;
+	worker1_info.out_min = worker0_info.out_min = out_min;
+	worker1_info.out_max = worker0_info.out_max = out_max;
+	worker1_info.total_depth = worker0_info.total_depth = total_depth;
+	worker0_info.whoami = 0;
+	worker1_info.whoami = 1;
 
-	nn_sem_init(&worker_info.donesem,0);
-	nn_sem_init(&my_info.donesem,0);
+	nn_sem_init(&worker0_info.donesem,0);
+	nn_sem_init(&worker1_info.donesem,0);
 
-	nn_os_work_for_vector(nn,concat_execute_slice_f,&worker_info);
+	nn_os_work_for_vector(nn,concat_execute_slice_f,&worker0_info);
+	nn_os_work_for_vector(nn,concat_execute_slice_f,&worker1_info);
 	//concat_execute_slice_f(nn,&worker_info);
-	concat_execute_slice_f(nn,&my_info);
-	nn_sem_wait(&worker_info.donesem);
+	//concat_execute_slice_f(nn,&my_info);
+	nn_sem_wait(&worker1_info.donesem);
+	nn_sem_wait(&worker0_info.donesem);
 
 	logmsg(nn,2,"concat %p done",self);
 	return 0;
@@ -287,33 +276,36 @@ static int concat_execute_asm(struct nn_node *self, struct nn_graph *nn)
 
 static int concat_check(struct nn_node *self, struct nn_graph *nn)
 {
-	int i;
+	int k;
 	logmsg(nn,2,"Checking concat node %p",self);
-	if ((self->n_inputs - 1) % 3) return errlog(nn,"input triplets please");
-	if (self->n_inputs < 4) return errlog(nn,"at least 1 input");
-	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
-	for (i = 0; i < self->n_inputs; i++) {
-		if (self->inputs[i] == NULL) return errlog(nn,"NULL input");
-	}
-	for (i = 0; i < self->n_outputs; i++) {
-		if (self->outputs[i] == NULL) return errlog(nn,"NULL output");
-	}
+
+	// must be 3*n+1 inputs, where n >= 1
+
+	int n_in = (self->n_inputs - 1) /3;	// actual # of inputs
+	if (n_in < 1 || (self->n_inputs - 1) % 3 !=0 )
+		return errlog(nn,"concat: inputs must be 3*n+1, n>=1");
+
+	// must be 3 outputs.
+	k = node_check_inputs_outputs_n( self,nn, "concat", self->n_inputs, 3);
+
+	if( k!=0) return k;
+
 	logmsg(nn,2,"concat node %p check OK",self);
 	return 0;
 }
 
 struct nn_node_ops nn_ops_for_QuantizedConcat_8 = {
-	SFINIT(.execute, concat_execute_asm),
-	SFINIT(  .check, concat_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = concat_execute_asm,
+	.check = concat_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 
 struct nn_node_ops nn_ops_for_QuantizedConcat_8_ref = {
-	SFINIT(.execute, concat_execute_ref),
-	SFINIT(  .check, concat_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = concat_execute_ref,
+	.check = concat_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

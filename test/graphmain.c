@@ -35,6 +35,7 @@
  */
 /*
  */
+#define DONT_REDEF_ALLOC 1
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -125,16 +126,21 @@ uint32_t graph_setup(int debug_level)
 {
 	uint32_t id;
 	int err;
-	id = hexagon_nn_init();
+	if (hexagon_nn_init((hexagon_nn_nn_id*)&id)) {
+		printf("ERROR: Could not initialize a new graph\n");
+		return 0;
+	}
 	hexagon_nn_set_debug_level(id,debug_level);
 	init_graph(id);
-	print_graph(id);
+	//print_graph(id);
 	printf("Init graph done.");
 	if ((err = hexagon_nn_prepare(id)) != 0) {
 		printf("Prepare %x returned 0x%x\n",(unsigned int)id,(unsigned int)err);
+		return 0;
 	} else {
 		printf("Prepare %x success!\n",(unsigned int)id);
 	}
+	//print_graph(id);
 	print_log(id);
 	print_graph(id);
 	return id;
@@ -165,7 +171,8 @@ int graph_execute(
 	int width,
 	int height,
 	float *msecs_out,
-	unsigned long long int *pcycles_out)
+	unsigned long long int *pcycles_out,
+	const struct options *options)
 {
 	uint32_t out_batches, out_height, out_width, out_depth;
 	uint32_t out_data_size;
@@ -180,7 +187,8 @@ int graph_execute(
 	float msecs;
 	int err;
 	uint32_t output_size = *output_size_ptr;
-	clock_gettime(CLOCK_REALTIME,&start);
+	int benchmark = options->benchmark;
+	if (!benchmark) clock_gettime(CLOCK_REALTIME,&start);
 	if ((err = hexagon_nn_execute(id,
 		1,
 		height,
@@ -200,25 +208,27 @@ int graph_execute(
 		print_log(id);
 		return err;
 	} else {
-		clock_gettime(CLOCK_REALTIME,&end);
+		if (!benchmark) clock_gettime(CLOCK_REALTIME,&end);
 	}
-	print_log(id);
-	secs = end.tv_sec - start.tv_sec;
-	if (end.tv_nsec < start.tv_nsec) {
-		secs -= 1;
-		nsecs = 1000*1000*1000 + end.tv_nsec - start.tv_nsec;
-	} else {
-		nsecs = end.tv_nsec - start.tv_nsec;
+	if (!benchmark) {
+		print_log(id);
+		secs = end.tv_sec - start.tv_sec;
+		if (end.tv_nsec < start.tv_nsec) {
+			secs -= 1;
+			nsecs = 1000*1000*1000 + end.tv_nsec - start.tv_nsec;
+		} else {
+			nsecs = end.tv_nsec - start.tv_nsec;
+		}
+		hexagon_nn_last_execution_cycles(id,&cycleslo,&cycleshi);
+		pcycles = cycleshi;
+		pcycles <<= 32;
+		pcycles |= cycleslo;
+		msecs = 1000.0f*secs;
+		msecs += nsecs/1.0e6f;
+		// printf("elapsed time: %f msecs\n",msecs);
+		if (msecs_out) *msecs_out = msecs;
+		if (pcycles_out) *pcycles_out = pcycles;
 	}
-	hexagon_nn_last_execution_cycles(id,&cycleslo,&cycleshi);
-	pcycles = cycleshi;
-	pcycles <<= 32;
-	pcycles |= cycleslo;
-	msecs = 1000.0f*secs;
-	msecs += nsecs/1.0e6f;
-	printf("elapsed time: %f msecs\n",msecs);
-	if (msecs_out) *msecs_out = msecs;
-	if (pcycles_out) *pcycles_out = pcycles;
 	*output_size_ptr = out_data_size;
 	return 0;
 }
@@ -415,7 +425,6 @@ void graph_perfdump(uint32_t id)
 	//graph_get_all_perf(id);
 }
 
-#define N_EVENTS 256
 
 const char *event_names[] = {
 	"CYCLES",		//0x0
@@ -657,6 +666,127 @@ const char *event_names[] = {
 	"SMT_DU_CONFLICT_PVIEW_CYCLES",
 	"SMT_XU_CONFLICT_PVIEW_CYCLES",
 	"",
+#if defined(CDSP_FLAG)
+	"",
+	"",//0xF0
+	"",
+	"",
+	"",
+	"",
+	"",
+	"",
+	"",
+	"",
+	"",
+	"",
+	"",
+	"",
+	"",
+	"",
+	"",//0xFF
+/*256 0x100*/ "HVX_ACTIVE",
+/*257 0x101*/ "HVX_WAIT_EMPTY",
+/*258 0x102*/ "HVX_EMPTY",
+/*259 0x103*/ "HVX_WAIT",
+/*260 0x104*/ "HVX_REG_ORDER",
+/*261 0x105*/ "HVX_LD_VTCM_OUTSTANDING",
+/*262 0x106*/ "HVX_LD_L2_OUTSTANDING",
+/*263 0x107*/ "HVX_ST_VTCM_OUTSTANDING",
+/*264 0x108*/ "HVX_ST_L2_OUTSTANDING",
+/*265 0x109*/ "HVX_SCATGATH_OUTSTANDING",
+/*266 0x10a*/ "HVX_SCATGATH_SHARED_FULL",
+/*267 0x10b*/ "HVX_ST_L2_SHARED_FULL",
+/*268 0x10c*/ "HVX_ST_ST_BANK_CONFLICT",
+/*269 0x10d*/ "HVX_VTCM_BANDWIDTH_OVER",
+/*270 0x10e*/ "HVX_OTHER_PART_OUTSTANDING",
+/*271 0x10f*/ "HVX_VOLTAGE_VIRUS_OVER",
+/*272 0x110*/ "HVX_VOLTAGE_UNDER",
+/*273 0x111*/ "HVX_POWER_OVER",
+/*274 0x112*/ "HVX_PARTIAL_PKT",
+/*275 0x113*/ "HVX_PKT",
+/*276 0x114*/ "",
+/*277 0x114*/ "",
+/*278 0x114*/ "",
+/*279 0x114*/ "",
+/*280 0x118*/ "HVX_PKT_THREAD",
+/*281 0x119*/ "HVX_CORE_VFIFO_FULL_STALL",
+/*282 0x11a*/ "HVX_L2_STORE_ACCESS",
+/*283 0x11b*/ "HVX_L2_STORE_MISS",
+/*284 0x11c*/ "HVX_L2_LOAD_ACCESS",
+/*285 0x11d*/ "HVX_L2_LOAD_MISS",
+/*286 0x11e*/ "HVX_L2_LOAD_SECONDARY_MISS",
+/*287 0x11f*/ "HVX_TCM_STORE_ACCESS",
+/*288 0x120*/ "HVX_TCM_LOAD_ACCESS",
+/*289 0x121*/ "",
+/*290 0x122*/ "",
+/*291 0x123*/ "",
+/*292 0x124*/ "",
+/*293 0x125*/ "",
+/*294 0x126*/ "",
+/*295 0x127*/ "",
+/*296 0x128*/ "VTCM_VECTOR_EXHAUSTED",
+/*297 0x129*/ "VTCM_VECTOR_SCALAR_ORDER",
+/*298 0x12a*/ "VTCM_VECTOR_LD_GATH_ORDER",
+/*299 0x12b*/ "VTCM_VECTOR_LD_ST_ORDER",
+/*300 0x12c*/ "VTCM_VECTOR_LD_FULL",
+/*301 0x12d*/ "VTCM_VECTOR_SCATGATH_FULL",
+/*302 0x12e*/ "VTCM_VECTOR_ST_FULL",
+/*303 0x12f*/ "VTCM_VECTOR_LD_ST_BANK_CONFLICT",
+/*304 0x130*/ "VTCM_VECTOR_LD_LD_BANK_CONFLICT",
+/*305 0x131*/ "VTCM_VECTOR_LD_PARTIAL_PKT",
+/*306 0x132*/ "VTCM_VECTOR_ST_PARTIAL_PKT",
+/*307 0x133*/ "VTCM_VECTOR_LD_PKT",
+/*308 0x134*/ "VTCM_VECTOR_ST_PKT",
+/*309 0x135*/ "VTCM_VECTOR_SCATGATH_PKT",
+/*310 0x136*/ "VTCM_VECTOR_NULL_PKT",
+/*311 0x137*/ "",
+/*312 0x138*/ "",
+/*313 0x139*/ "VTCM_SCALAR_ACTIVE",
+/*314 0x13a*/ "VTCM_SCALAR_EMPTY",
+/*315 0x13b*/ "VTCM_SCALAR_PORT_CONFLICT",
+/*316 0x13c*/ "VTCM_SCALAR_ST_ORDER",
+/*317 0x13d*/ "VTCM_SCALAR_VECTOR_ORDER",
+/*318 0x13e*/ "VTCM_SCALAR_LD_OUTSTANDING",
+/*319 0x13f*/ "VTCM_SCALAR_LD_SHARED_FULL",
+/*320 0x140*/ "VTCM_SCALAR_BANK_CONFLICT",
+/*321 0x141*/ "VTCM_SCALAR_LD_PIPELINE_CONFLICT",
+/*322 0x142*/ "VTCM_SCALAR_BANDWIDTH_OVER",
+/*323 0x143*/ "VTCM_SCALAR_LD",
+/*324 0x144*/ "VTCM_SCALAR_LDHIT",
+/*325 0x145*/ "VTCM_SCALAR_ST",
+/*326 0x146*/ "",
+/*327 0x147*/ "",
+/*328 0x148*/ "SCATGATH_SB_ACTIVE",
+/*329 0x149*/ "SCATGATH_SB_WAIT_EMPTY",
+/*330 0x14a*/ "SCATGATH_SB_EMPTY",
+/*331 0x14b*/ "SCATGATH_SB_WAIT",
+/*332 0x14c*/ "SCATGATH_SB_OUTSTANDING",
+/*333 0x14d*/ "SCATGATH_SB",
+/*324 0x14e*/ "",
+/*325 0x14f*/ "",
+/*336 0x150*/ "SCATGATH_IN_EMPTY",
+/*337 0x151*/ "SCATGATH_IN_OUTSTANDING",
+/*338 0x152*/ "SCATGATH_IN",
+/*339 0x153*/ "",
+/*340 0x154*/ "",
+/*341 0x155*/ "",
+/*342 0x156*/ "",
+/*343 0x157*/ "",
+/*344 0x158*/ "HVX_VREG_RD_EARLY_WR_1PKT",
+/*345 0x159*/ "HVX_VREG_RD_EARLY_WR_2PKT",
+/*346 0x15a*/ "HVX_VREG_RD_EARLY_WR",
+/*347 0x15b*/ "HVX_VREG_RD_LATE_WR_1PKT",
+/*348 0x15c*/ "HVX_VREG_RD_LATE_WR_2PKT",
+/*349 0x15d*/ "HVX_VREG_RD_LATE_WR",
+/*350 0x15e*/ "HVX_VREG_WR_EARLY_WR_1PKT",
+/*351 0x15f*/ "HVX_VREG_WR_EARLY_WR_2PKT",
+/*352 0x160*/ "HVX_VREG_WR_EARLY_WR",
+/*353 0x161*/ "HVX_VREG_WR_LAT_WR_1PKT",
+/*354 0x162*/ "HVX_VREG_WR_LATE_WR_2PKT",
+/*355 0x163*/ "HVX_VREG_WR_LATE_WR",
+/*356 0x164*/ "",
+/*357 0x165*/ "HVX_MAX_VOLT_UNDERSHOOT",
+#else
 	"COPROC_L2_STORE_TO_LOAD_MISS",
 	"COPROC_PKT_THREAD",		//0xF0
 	"COPROC_PKT_COUNT",
@@ -674,7 +804,10 @@ const char *event_names[] = {
 	"COPROC_TCM_STORE_ACCESS",
 	"COPROC_TCM_LOAD_ACCESS",
 	"COPROC_L2_LOAD_2NDARY_MISS",
+#endif
 };
+
+#define N_EVENTS (sizeof(event_names)/sizeof(event_names[0]))
 
 #define MAX_PERF_OUTPUT_SIZE 4096
 
@@ -705,7 +838,24 @@ int graph_get_all_perf(uint32_t id,
 		printf("malloc fail\n");
 		return -1;
 	}
+	//dummy
+	hexagon_nn_execute(id,
+			1,
+			height,
+			width,
+			depth,
+			input,
+			depth*width*height*elementsize,
+			&out_b,
+			&out_h,
+			&out_w,
+			&out_d,
+			output,
+			MAX_PERF_OUTPUT_SIZE,
+			&out_data_size);
 	for (i = 0; i < N_EVENTS; i++) {
+		if (0 == strcmp("", event_names[i]))
+			continue;
 		hexagon_nn_reset_perfinfo(id,i);
 		printf("executing for event 0x%02x...\n",i);
 		if ((err=hexagon_nn_execute(id,
@@ -734,8 +884,17 @@ int graph_get_all_perf(uint32_t id,
 			counters[i*MAX_NODES+j] = get_counter(info[j]);
 		}
 	}
+	printf(",,");
+	for (i = 0; i < N_EVENTS; i++) {
+		if (0 == strcmp("", event_names[i]))
+			continue;
+		printf("0x%x,",i);
+	}
+	printf("\n");
 	printf("OPNAME,NAME,");
 	for (i = 0; i < N_EVENTS; i++) {
+		if (0 == strcmp("", event_names[i]))
+			continue;
 		printf("%s,",event_names[i]);
 	}
 	printf("\n");
@@ -744,6 +903,8 @@ int graph_get_all_perf(uint32_t id,
 		if (strcmp("?",info_id2name(node_id))==0) continue;
 		printf("%s,%s,",info_id2opname(node_id),info_id2name(node_id));
 		for (i = 0; i < N_EVENTS; i++) {
+			if (0 == strcmp("", event_names[i]))
+			continue;
 			printf("%lld,",counters[i*MAX_NODES+j]);
 		}
 		printf("\n");
@@ -753,6 +914,69 @@ int graph_get_all_perf(uint32_t id,
 	free(counters);
 	return 0;
 }
+
+/* FIXME: copy pasta.  Refactor for commonality */
+int graph_get_a_perf(uint32_t id,
+	int elementsize,
+	int depth,
+	int width,
+	int height,
+	int event)
+{
+	unsigned int n_nodes;
+	uint32_t out_b, out_h,out_w,out_d,out_data_size;
+	void *input;
+	void *output;
+	hexagon_nn_perfinfo info[MAX_NODES];
+	int j;
+	int err;
+	printf("Getting all performance counter information\n");
+	memset(info,0,sizeof(info));
+	if ((input = calloc(1,height*width*depth*elementsize)) == NULL) {
+		printf("malloc fail\n");
+		return -1;
+	}
+	if ((output = malloc(MAX_PERF_OUTPUT_SIZE)) == NULL) {
+		printf("malloc fail\n");
+		return -1;
+	}
+	hexagon_nn_reset_perfinfo(id,event);
+	printf("executing for event 0x%02x...\n",event);
+	if ((err=hexagon_nn_execute(id,
+		1,
+		height,
+		width,
+		depth,
+		input,
+		depth*width*height*elementsize,
+		&out_b,
+		&out_h,
+		&out_w,
+		&out_d,
+		output,
+		MAX_PERF_OUTPUT_SIZE,
+		&out_data_size)) != 0) {
+		printf("execute err %d\n",err);
+		exit(1);
+	}
+	print_log(id);
+	if (hexagon_nn_get_perfinfo(id,info,MAX_NODES,&n_nodes) != 0) {
+		printf("perf info failure\n");
+		exit(1);
+	}
+	printf("OPNAME,NAME,%s\n",event_names[event]);
+	for (j = 0; j < n_nodes; j++) {
+		uint32_t node_id = info[j].node_id;
+		printf("%s,%s,%lld\n",
+			info_id2opname(node_id),
+			info_id2name(node_id),
+			get_counter(info[j]));
+	}
+	free(output);
+	free(input);
+	return 0;
+}
+
 
 void graph_teardown(uint32_t id)
 {

@@ -45,6 +45,21 @@
 #endif
 //#define DEBUG_PRINT_PERFORMANCE
 
+struct mul_info {
+	int a_offset;
+	int b_offset;
+};
+
+struct tdata {
+	struct nn_node *self;
+	const struct tensor *a_tensor;
+	const struct tensor *b_tensor;
+	struct tensor *out_tensor;
+	int opt_flag;
+	struct mul_info *info;
+	nn_sem_t donesem;
+};
+
 static inline int32_t mul_helper(int32_t a, int32_t b, void *u)
 {
 	return a*b;
@@ -64,14 +79,9 @@ static int mul_int32_check(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-struct mul_info {
-	int a_offset;
-	int b_offset;
-};
-
 static inline int32_t q8mul_helper(uint8_t a, uint8_t b, void *vmul_info)
 {
-	const struct mul_info *info = (const struct mul_info *)vmul_info;
+	const struct mul_info *info = vmul_info;
 	int a_offset = info->a_offset;
 	int b_offset = info->b_offset;
 	int32_t aval = a;
@@ -104,10 +114,9 @@ static int mul_q8_execute(struct nn_node *self, struct nn_graph *nn)
 	start_time =  nn_os_get_cycles(nn);
 #endif
 
-	tensor_set_shape(out_min_tensor,1,1,1,1);
-	tensor_set_float(out_min_tensor,0,out_min);
-	tensor_set_shape(out_max_tensor,1,1,1,1);
-	tensor_set_float(out_max_tensor,0,out_max);
+
+	tensor_set_single_float( out_min_tensor,out_min);
+	tensor_set_single_float( out_max_tensor,out_max);
 
 	info.a_offset = quantize_uint8(0.0f,a_min_float,a_max_float);
 	info.b_offset = quantize_uint8(0.0f,b_min_float,b_max_float);
@@ -121,16 +130,14 @@ static int mul_q8_execute(struct nn_node *self, struct nn_graph *nn)
 	return retval;
 }
 
-#if 0
-static inline void predicated_store(HVX_VectorPred qv, HVX_Vector *p, HVX_Vector val)
+static inline __attribute__((unused)) void predicated_store(HVX_VectorPred qv, HVX_Vector *p, HVX_Vector val)
 {
-	asm volatile (" if(%1) vmem(%0):nt=%2":"=r"(p) :"q"(qv),"v"(val): "memory");
+	asm volatile (" if(%1) vmem(%0):nt=%2":"=r"(p) :"q"(qv),"v"(val) : "memory");
 }
-#endif
 
 //#define TOOLS_NOT_7_2_12
 #ifdef TOOLS_NOT_7_2_12 // Tool version 7.2.12 does not support Q6_vmaskedstorentq_QAV intrinsics
-static inline void qmul_hvx(
+static inline __attribute__((unused)) void qmul_hvx(
 		uint8_t *a,
 		uint8_t *b,
 		int32_t *out,
@@ -247,10 +254,46 @@ static inline void qmul_hvx(
 }
 #endif
 
+static void qmul_thread_process(struct nn_graph *nn, void *vtdata) {
+
+	struct tdata *td = vtdata;
+	const struct tensor *a_tensor = td->a_tensor;
+	const struct tensor *b_tensor = td->b_tensor;
+	struct tensor *out_tensor = td->out_tensor;
+	const uint8_t *a_data = a_tensor->data;
+	const uint8_t *b_data = b_tensor->data;
+	int32_t *out_data = out_tensor->data;
+	struct mul_info *info = td->info;
+	int elements, a_const_value, b_const_value;
+	struct hvx_info opt_info;
+	uint8_t *a_data_pad;
+	uint8_t *b_data_pad;
+
+	/* Look for patterns to use HVX intrinsics version of the code and broadcast/prepare the data */
+	td->opt_flag = check_prepare_hvx_opt(nn, a_tensor, b_tensor, out_tensor, a_data, b_data, &opt_info);
+
+	a_data_pad = opt_info.a_data_pad;
+	b_data_pad = opt_info.b_data_pad;
+	elements = opt_info.elements;
+	elements = opt_info.elements;
+	a_const_value = opt_info.a_const_value;
+	b_const_value = opt_info.b_const_value;
+	if(td->opt_flag == 1) {
+		/* Intrinsic version of qmul */
+		l2fetch(a_data_pad, 128 , 128 , 1);
+		l2fetch(b_data_pad, 128 , 128 , 1);
+#ifdef TOOLS_NOT_7_2_12 // Tool version 7.2.12 does not support Q6_vmaskedstorentq_QAV intrinsics
+		qmul_hvx(a_data_pad, b_data_pad, out_data, info, elements, a_const_value, b_const_value);
+#else	// use generated assembly from 8.1.02
+		qmul_asm(a_data_pad, b_data_pad, out_data, info, elements, a_const_value, b_const_value);
+#endif
+	}
+	nn_sem_post(&td->donesem);
+}
+
 static int mul_q8_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 {
 	struct mul_info info;
-	struct hvx_info opt_info;
 	const struct tensor *a_tensor = self->inputs[0];
 	const struct tensor *b_tensor = self->inputs[1];
 	const struct tensor *a_min_tensor = self->inputs[2];
@@ -269,16 +312,7 @@ static int mul_q8_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	float out_level_size = a_level_size * b_level_size;
 	float out_max = 2147483648.0f/*0x1.0p31f*/ * out_level_size;
 	float out_min = -out_max;
-
-	const uint8_t *a_data = (const uint8_t *)a_tensor->data;
-	const uint8_t *b_data = (const uint8_t *)b_tensor->data;
-	int32_t *out_data = (int32_t *)out_tensor->data;
-	uint8_t *a_data_pad;
-	uint8_t *b_data_pad;
-
 	int retval;
-	int elements, a_const_value, b_const_value;
-	int opt_flag = 0;
 
 #ifdef DEBUG_PRINT_PERFORMANCE
 	int start_time, end_time;//, t1, t2, t3, t4, t5;
@@ -288,78 +322,63 @@ static int mul_q8_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	info.a_offset = quantize_uint8(0.0f,a_min_float,a_max_float);
 	info.b_offset = quantize_uint8(0.0f,b_min_float,b_max_float);
 
+	tensor_set_single_float( out_min_tensor,out_min);
+	tensor_set_single_float( out_max_tensor,out_max);
 
-	tensor_set_shape(out_min_tensor,1,1,1,1);
-	tensor_set_float(out_min_tensor,0,out_min);
-	tensor_set_shape(out_max_tensor,1,1,1,1);
-	tensor_set_float(out_max_tensor,0,out_max);
-	//t1 =  nn_os_get_cycles(nn);
+	struct tdata td = {
+		.self = self,
+		.a_tensor = a_tensor,
+		.b_tensor = b_tensor,
+		.out_tensor = out_tensor,
+		.opt_flag = 0,
+		.info = &info,
+	};
 
-	/* Look for patterns to use HVX intrinsics version of the code and broadcast/prepare the data */
-	opt_flag = check_prepare_hvx_opt(nn, a_tensor, b_tensor, out_tensor, a_data, b_data, &opt_info);
+	nn_sem_init(&td.donesem,0);
+	nn_os_work_for_vector(nn, qmul_thread_process, &td);
+	nn_sem_wait(&td.donesem);
 
-	a_data_pad = opt_info.a_data_pad;
-	b_data_pad = opt_info.b_data_pad;
-	elements = opt_info.elements;
-	a_const_value = opt_info.a_const_value;
-	b_const_value = opt_info.b_const_value;
-	//l2fetch((void *)(a_data_pad), 128, 128, 4);
-	//l2fetch((void *)(b_data_pad), 128, 128, 4);
-
-	if(opt_flag == 1) {
-
-		/* Intrinsic version of qmul */
-		//t4 =  nn_os_get_cycles(nn);
-		l2fetch(a_data_pad, 128 , 128 , 1);
-		l2fetch(b_data_pad, 128 , 128 , 1);
-#ifdef TOOLS_NOT_7_2_12 // Tool version 7.2.12 does not support Q6_vmaskedstorentq_QAV intrinsics
-		qmul_hvx(a_data_pad, b_data_pad, out_data, &info, elements, a_const_value, b_const_value);
-#else	// use generated assembly from 8.1.02
-		qmul_asm(a_data_pad, b_data_pad, out_data, &info, elements, a_const_value, b_const_value);
-#endif
+	if(td.opt_flag == 1) {
 		retval = 0;
-	}
-	else {
+	} else {
 		retval = broadcast_elementwise_execute_qint32_quint8(self,nn,q8mul_helper,&info);
 	}
+
 #ifdef DEBUG_PRINT_PERFORMANCE
 		end_time =  nn_os_get_cycles(nn);
-		printf("opt_flag=%d, qmul HVX cycles = %d\n", opt_flag, end_time-start_time);
-		//printf("qmul HVX cycles = %d->%d->%d->%d->%d = %d\n",t1-start_time, t2-start_time, t3-start_time, t4-start_time, t5-start_time, end_time-start_time);
+		printf("opt=%d, qmul HVX cycles = %d\n", td.opt_flag, end_time-start_time);
 #endif
-		return retval;
-
+	return retval;
 }
 
 static int mul_q8_check(struct nn_node *self, struct nn_graph *nn)
 {
+	int k;
 	logmsg(nn,2,"mul node %p",self);
-	if (self->n_inputs != 6) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
+	k = node_check_inputs_outputs_n( self,nn, "mul", 6, 3);
+	if( k !=0) return k;
 	logmsg(nn,2,"mul %p check OK",self);
 	return 0;
 }
 
-
-
 struct nn_node_ops nn_ops_for_Mul_int32 = {
-	SFINIT(.execute, mul_int32_execute),
-	SFINIT(  .check, mul_int32_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = mul_int32_execute,
+	.check = mul_int32_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedMul_8x8to32 = {
-	SFINIT(.execute, mul_q8_execute_hvx),
-	SFINIT(  .check, mul_q8_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = mul_q8_execute_hvx,
+	.check = mul_q8_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedMul_8x8to32_ref = {
-	SFINIT(.execute, mul_q8_execute),
-	SFINIT(  .check, mul_q8_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = mul_q8_execute,
+	.check = mul_q8_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

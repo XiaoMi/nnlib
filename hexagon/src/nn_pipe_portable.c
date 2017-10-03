@@ -42,12 +42,12 @@ struct nn_pipe *nn_pipe_alloc_portable(struct nn_graph *nn, uint32_t pipe_elemen
 {
 	struct nn_pipe *pipe;
 	uint64_t *buf;
-	if ((buf = (uint64_t *)malloc(sizeof(uint64_t)*pipe_elements))  == NULL) {
+	if ((buf = nn_malloc(sizeof(uint64_t)*pipe_elements))  == NULL) {
 		logmsg(nn,0,"nn_pipe_alloc:buf Fatal ERROR!!!");
 		return NULL;
 	}
-	if ((pipe = (struct nn_pipe *)malloc(sizeof(struct nn_pipe))) == NULL) {
-		free(buf);
+	if ((pipe = nn_malloc(sizeof(struct nn_pipe))) == NULL) {
+		nn_free(buf);
 		logmsg(nn,0,"nn_pipe_alloc:pipe Fatal ERROR!!!");
 		return NULL;
 	}
@@ -60,6 +60,12 @@ struct nn_pipe *nn_pipe_alloc_portable(struct nn_graph *nn, uint32_t pipe_elemen
 	pipe->recv_idx = 0;
 	//logmsg(nn,0,"nn_pipe_alloc: elements=%d", pipe->elements);
 	return pipe;
+}
+
+void nn_pipe_free_portable(struct nn_pipe *pipe)
+{
+	nn_free(pipe->data);
+	nn_free(pipe);
 }
 
 void nn_pipe_send_portable(struct nn_pipe *pipe, uint64_t data)

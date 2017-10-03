@@ -96,8 +96,9 @@ static int __attribute__((unused)) conv2d_execute_ref_im2col(struct nn_node *sel
 	int32_t stride_height = stride_tensor->shape.height;
 
 	int32_t out_batches = in_batches;
-	int32_t out_width = nn_pad_compute_outsize(in_width,filt_width,stride_width,self->padding);
-	int32_t out_height = nn_pad_compute_outsize(in_height,filt_height,stride_height,self->padding);
+	int32_t adj_x, adj_y;
+	int32_t out_width = nn_pad_compute_outsize_and_padbefore(in_width,filt_width,stride_width,self->padding, & adj_x);
+	int32_t out_height = nn_pad_compute_outsize_and_padbefore(in_height,filt_height,stride_height,self->padding, & adj_y);
 	int32_t out_depth = filt_batches;
 
 	int32_t batch;
@@ -108,9 +109,9 @@ static int __attribute__((unused)) conv2d_execute_ref_im2col(struct nn_node *sel
 	int32_t in_y_base;
 	int32_t in_x_base;
 
-	uint8_t *in = (uint8_t *)in_tensor->data;
-	uint8_t *filt = (uint8_t *)filt_tensor->data;
-	int32_t *out = (int32_t *)out_tensor->data;
+	uint8_t *in = in_tensor->data;
+	uint8_t *filt = filt_tensor->data;
+	int32_t *out = out_tensor->data;
 
 	uint8_t *filtstripe;
 	int32_t *outstripe;
@@ -126,11 +127,6 @@ static int __attribute__((unused)) conv2d_execute_ref_im2col(struct nn_node *sel
 	float in_min_float = tensor_get_float(min_in_tensor,0);
 	float filt_max_float = tensor_get_float(max_filt_tensor,0);
 	float filt_min_float = tensor_get_float(min_filt_tensor,0);
-
-	//int32_t adj_x = ((out_width-1) * stride_width + filt_width - in_width) / 2;
-	//int32_t adj_y = ((out_height-1) * stride_height + filt_height - in_height) / 2;
-	int32_t adj_x = nn_pad_compute_before(out_width,filt_width,stride_width,self->padding);
-	int32_t adj_y = nn_pad_compute_before(out_height,filt_height,stride_height,self->padding);
 
 	/*
 	 * output min/max is computed this way:
@@ -174,7 +170,7 @@ static int __attribute__((unused)) conv2d_execute_ref_im2col(struct nn_node *sel
 	if (out_max->max_size < sizeof(float)) return errlog(nn,"max too small");
 	if (self->padding == NN_PAD_NA) return errlog(nn,"This op might pad");
 
-	if ((im2col_row = (uint8_t *)malloc(filt_total_length)) == NULL) return errlog(nn,"tmp data storage fail");
+	if ((im2col_row = nn_malloc(filt_total_length)) == NULL) return errlog(nn,"tmp data storage fail");
 	logmsg(nn,3,"malloced im2col row %p",im2col_row);
 
 	tensor_set_shape(out_tensor,out_batches,out_height,out_width,out_depth);
@@ -229,7 +225,7 @@ static int __attribute__((unused)) conv2d_execute_ref_im2col(struct nn_node *sel
 	  }
 	}
 	logmsg(nn,3,"freeing im2col row %p",im2col_row);
-	free(im2col_row);
+	nn_free(im2col_row);
 	logmsg(nn,2,"conv2d execute (im2col ref) done! %dx%dx%dx%d",
 		out_batches,out_height,out_width,out_depth);
 	return 0;
@@ -266,8 +262,9 @@ static int conv2d_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	int32_t stride_height = stride_tensor->shape.height;
 
 	int32_t out_batches = in_batches;
-	int32_t out_width = nn_pad_compute_outsize(in_width,filt_width,stride_width,self->padding);
-	int32_t out_height = nn_pad_compute_outsize(in_height,filt_height,stride_height,self->padding);
+	int32_t adj_x, adj_y;
+	int32_t out_width = nn_pad_compute_outsize_and_padbefore(in_width,filt_width,stride_width,self->padding, &adj_x);
+	int32_t out_height = nn_pad_compute_outsize_and_padbefore(in_height,filt_height,stride_height,self->padding, & adj_y);
 	int32_t out_depth = filt_batches;
 
 	int32_t batch;
@@ -281,9 +278,9 @@ static int conv2d_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	int32_t in_y_base;
 	int32_t in_x_base;
 
-	uint8_t *in = (uint8_t *)in_tensor->data;
-	uint8_t *filt = (uint8_t *)filt_tensor->data;
-	int32_t *out = (int32_t *)out_tensor->data;
+	uint8_t *in = in_tensor->data;
+	uint8_t *filt = filt_tensor->data;
+	int32_t *out = out_tensor->data;
 
 	uint8_t *instripe;
 	uint8_t *filtstripe;
@@ -301,10 +298,6 @@ static int conv2d_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	float filt_max_float = tensor_get_float(max_filt_tensor,0);
 	float filt_min_float = tensor_get_float(min_filt_tensor,0);
 
-	//int32_t adj_x = ((out_width-1) * stride_width + filt_width - in_width) / 2;
-	//int32_t adj_y = ((out_height-1) * stride_height + filt_height - in_height) / 2;
-	int32_t adj_x = nn_pad_compute_before(out_width,filt_width,stride_width,self->padding);
-	int32_t adj_y = nn_pad_compute_before(out_height,filt_height,stride_height,self->padding);
 
 	/*
 	 * output min/max is computed this way:
@@ -403,7 +396,7 @@ static int conv2d_execute_ref(struct nn_node *self, struct nn_graph *nn)
 
 
 
-static int conv2d_execute_hvx(struct nn_node *self, struct nn_graph *nn)
+static int __attribute__((unused)) conv2d_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 {
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *filt_tensor = self->inputs[1];
@@ -430,8 +423,9 @@ static int conv2d_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	int32_t stride_height = stride_tensor->shape.height;
 
 	int32_t out_batches = in_batches;
-	int32_t out_width = nn_pad_compute_outsize(in_width,filt_width,stride_width,self->padding);
-	int32_t out_height = nn_pad_compute_outsize(in_height,filt_height,stride_height,self->padding);
+	int32_t adj_x, adj_y;
+	int32_t out_width = nn_pad_compute_outsize_and_padbefore(in_width,filt_width,stride_width,self->padding, &adj_x);
+	int32_t out_height = nn_pad_compute_outsize_and_padbefore(in_height,filt_height,stride_height,self->padding,&adj_y);
 	int32_t out_depth = filt_batches;
 
 	int32_t batch;
@@ -439,8 +433,8 @@ static int conv2d_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 //	int32_t in_y_base;
 //	int32_t in_x_base;
 
-	uint8_t *in = (uint8_t *)in_tensor->data;
-	uint8_t *filt = (uint8_t *)filt_tensor->data;
+	uint8_t *in = in_tensor->data;
+	uint8_t *filt = filt_tensor->data;
 	int32_t *out = out_tensor->data;
 
 	uint32_t out_elements = out_batches*out_height*out_width*out_depth;
@@ -450,11 +444,6 @@ static int conv2d_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	float in_min_float = tensor_get_float(min_in_tensor,0);
 	float filt_max_float = tensor_get_float(max_filt_tensor,0);
 	float filt_min_float = tensor_get_float(min_filt_tensor,0);
-
-	//int32_t adj_x = ((out_width-1) * stride_width + filt_width - in_width) / 2;
-	//int32_t adj_y = ((out_height-1) * stride_height + filt_height - in_height) / 2;
-	int32_t adj_x = nn_pad_compute_before(out_width,filt_width,stride_width,self->padding);
-	int32_t adj_y = nn_pad_compute_before(out_height,filt_height,stride_height,self->padding);
 
 	/*
 	 * output min/max is computed this way:
@@ -608,50 +597,27 @@ static int conv2d_check_ref(struct nn_node *self, struct nn_graph *nn)
 }
 
 
-static struct nn_node *conv2d_ctor(
-	struct nn_graph *nn,
-	uint32_t node_id,
-	op_type operation,
-	padding_type padding,
-	uint32_t num_inputs,
-	uint32_t num_outputs,
-	const struct input *inputs,
-	const struct output *outputs)
-{
-	logmsg(nn,2,"conv2d node id %x ctor",node_id);
-	/* FIXME: replace ops pointers with optimized implementations when available */
-	return node_alloc_common(
-		nn,
-		node_id,
-		operation,
-		padding,
-		num_inputs,
-		num_outputs,
-		inputs,
-		outputs);
-}
-
 #if 1
 struct nn_node_ops nn_ops_for_QuantizedConv2d_8x8to32 = {
-	SFINIT(.execute, conv2d_execute_hvx),
-	SFINIT(  .check, conv2d_check_ref),
-	SFINIT(   .ctor, conv2d_ctor),
-	SFINIT(   .dtor, node_free_common),
+	.execute = conv2d_execute_ref,
+	.check = conv2d_check_ref,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 #else
 struct nn_node_ops nn_ops_for_QuantizedConv2d_8x8to32 = {
-	SFINIT(.execute, conv2d_execute_ref_im2col), // <-- not working yet
-	//conv2d_execute_ref,
-	SFINIT(  .check, conv2d_check_ref),
-	SFINIT(   .ctor, conv2d_ctor),
-	SFINIT(   .dtor, node_free_common),
+	.execute = conv2d_execute_ref_im2col, // <-- not working yet
+	//.execute = conv2d_execute_ref,
+	.check = conv2d_check_ref,
+	.ctor = conv2d_ctor,
+	.dtor = node_free_common,
 };
 #endif
 
 struct nn_node_ops nn_ops_for_QuantizedConv2d_8x8to32_ref = {
-	SFINIT(.execute, conv2d_execute_ref),
-	SFINIT(  .check, conv2d_check_ref),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = conv2d_execute_ref,
+	.check = conv2d_check_ref,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

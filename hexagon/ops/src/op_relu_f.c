@@ -38,58 +38,99 @@
 #include <string.h>
 #include <quantize.h>
 
+//
+// underlying operator for relu:
+//   out = max( in , 0 )
+//
+static void relu_operator( float * out_data, float const * in_data, int elements, void *info)
+{
+	int i;
+	int nloop = (elements-1)>>1;
+	float x0 = in_data[0];
+	float x1;
+	for (i = 0; i < nloop; i++) {
+		float x1 = in_data[1];
+		out_data[0] = fmaxf(x0,0.0f);
+		out_data[1] = fmaxf(x1,0.0f);
+		x0 = in_data[2];
+		out_data += 2;
+		in_data += 2;
+	}
+	if( (elements&1)== 0){
+		x1 = in_data[1];
+		*out_data++ =  fmaxf(x0,0.0f);
+		x0 = x1;
+	}
+	*out_data =  fmaxf(x0,0.0f);
+}
+
 static int relu_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	const struct tensor *in_tensor = self->inputs[0];
-	struct tensor *out_tensor = self->outputs[0];
-	size_t elements = in_tensor->shape.batches 
-		* in_tensor->shape.height
-		* in_tensor->shape.width
-		* in_tensor->shape.depth;
-	size_t bytes = elements * sizeof(float);
-	const float *in_data = (const float *)in_tensor->data;
-	float *out_data = (float *)out_tensor->data;
-	uint32_t i;
-
 	logmsg(nn,2,"relu execute. self=%p ",self);
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	out_tensor->shape = in_tensor->shape;
-	out_tensor->data_size = bytes;
+	int res = nn_generic_unary_float_op( self,nn, relu_operator, NULL,0);
+	if (res == 0)
+		logmsg(nn,2,"relu %p done",self);
+	return res;
+}
 
-	for (i = 0; i < elements; i++) {
-		out_data[i] = fmaxf(in_data[i],0.0f);
+//
+// underlying operator for reluX and clamp_f
+//   out = min( maxval, max( in , minval ))
+//  where 'info' points to [minval,maxval]
+//
+void clamp_operator( float * __restrict out_data, float const * __restrict in_data, int elements, void *info)
+{
+	float const * parms = (float const*)info;
+	float minval = parms[0];
+	float maxval = parms[1];
+
+	int i;
+	int nloop = (elements-1)>>1;
+	float x0 = in_data[0];
+	float x1;
+	for (i = 0; i < nloop; i++) {
+		float x1 = in_data[1];
+		out_data[0] = fminf(maxval,fmaxf(x0,minval));
+		out_data[1] = fminf(maxval,fmaxf(x1,minval));
+		x0 = in_data[2];
+		out_data += 2;
+		in_data += 2;
 	}
-
-	logmsg(nn,2,"relu %p done",self);
-	return 0;
+	if( (elements&1)== 0){
+		x1 = in_data[1];
+		*out_data++ =  fminf(maxval,fmaxf(x0,minval));
+		x0 = x1;
+	}
+	*out_data =  fminf(maxval,fmaxf(x0,minval));
 }
 
 static int reluX_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	const struct tensor *in_tensor = self->inputs[0];
-	const struct tensor *max_val_tensor = self->inputs[1];
-	struct tensor *out_tensor = self->outputs[0];
-	size_t elements = in_tensor->shape.batches 
-		* in_tensor->shape.height
-		* in_tensor->shape.width
-		* in_tensor->shape.depth;
-	size_t bytes = elements * sizeof(float);
-	const float *in_data = (const float *)in_tensor->data;
-	float *out_data = (float *)out_tensor->data;
-	uint32_t i;
-	float max_val = tensor_get_float(max_val_tensor,0);
-
 	logmsg(nn,2,"reluX execute. self=%p ",self);
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	out_tensor->shape = in_tensor->shape;
-	out_tensor->data_size = bytes;
+	float max_val = tensor_get_float(self->inputs[1],0);
+	if( !(max_val > 0.0f))
+		return errlog(nn,"reluX limit %f not > 0", max_val);
+	float clamp_parms[2] = { 0.0f, max_val };
 
-	for (i = 0; i < elements; i++) {
-		out_data[i] = fminf(max_val,fmaxf(in_data[i],0.0f));
-	}
+	int res = nn_generic_unary_float_op( self,nn, clamp_operator, clamp_parms,0);
+	if (res == 0)
+		logmsg(nn,2,"reluX %p done",self);
+	return res;
+}
 
-	logmsg(nn,2,"reluX %p done",self);
-	return 0;
+static int clamp_f_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	logmsg(nn,2,"clamp execute. self=%p ",self);
+	const float minval = tensor_get_float(self->inputs[1],0);
+	const float maxval = tensor_get_float(self->inputs[2],0);
+	if( !(maxval > minval))
+		return errlog(nn,"clamp: min %f not < max %f", minval, maxval);
+	float clamp_parms[2] = { minval, maxval };
+
+	int res = nn_generic_unary_float_op( self,nn, clamp_operator, clamp_parms,0);
+	if (res == 0)
+		logmsg(nn,2,"clamp %p done",self);
+	return res;
 }
 
 static int relu_check(struct nn_node *self, struct nn_graph *nn)
@@ -98,6 +139,15 @@ static int relu_check(struct nn_node *self, struct nn_graph *nn)
 	if (self->n_inputs != 1) return errlog(nn,"wrong # inputs");
 	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
 	logmsg(nn,2,"relu node %p check OK",self);
+	return 0;
+}
+
+static int clamp_f_check(struct nn_node *self, struct nn_graph *nn)
+{
+	logmsg(nn,2,"Checking hard_tanh node %p",self);
+	if (self->n_inputs != 3) return errlog(nn,"wrong # inputs");
+	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
+	logmsg(nn,2,"hard_tanh node %p check OK",self);
 	return 0;
 }
 
@@ -111,16 +161,22 @@ static int reluX_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Relu_f = {
-	relu_execute,
-	relu_check,
-	node_alloc_common,
-	node_free_common,
+	.execute = relu_execute,
+	.check = relu_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_ReluX_f = {
-	reluX_execute,
-	reluX_check,
-	node_alloc_common,
-	node_free_common,
+	.execute = reluX_execute,
+	.check = reluX_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
+struct nn_node_ops nn_ops_for_Clamp_f = {
+	.execute = clamp_f_execute,
+	.check = clamp_f_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};

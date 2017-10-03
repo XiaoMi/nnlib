@@ -41,8 +41,6 @@
  * This contains operations on the graph
  */
 
-/* Returns the last node in the graph to reference the input. */
-/* If no node references the input, producer is returned.  */
 #include <nn_graph.h>
 
 static inline void log_causality(
@@ -59,6 +57,8 @@ static inline void log_causality(
 		producer,
 		producer->node_id);
 }
+/* Returns the last node in the graph to reference the input. */
+/* If no node references the input, producer is returned.  */
 
 struct nn_node* find_last_consumer(
 	struct nn_graph *nn, 
@@ -115,4 +115,139 @@ struct nn_node* find_first_consumer(
 	}
 	return producer;
 }
+/* Returns the *only* node in the graph to reference the input. */
+/* If no node references the input, or if there's more than  */
+/* one reference (including from the same node), producer is returned.  */
+
+struct nn_node* find_unique_consumer(
+	struct nn_graph *nn, 
+	struct nn_node *producer, 
+	int out_idx)
+{
+	struct nn_node *tmp;
+	struct nn_node *result = producer;
+	struct input *in;
+	int i;
+	int seen_producer = 0;
+    int count = 0;
+	uint32_t prod_id = producer->node_id;
+	for (tmp = nn->head; tmp != NULL; tmp = tmp->next) {
+		for (i = 0; i < tmp->n_inputs; i++) {
+			in = &tmp->input_refs[i];
+			if (in->src_id != prod_id) continue;
+			if (in->output_idx != out_idx) continue;
+			if (!seen_producer) {
+				log_causality(nn,tmp,producer);
+			} else {
+                count++;
+                if (count > 1) return producer;
+                result = tmp;
+			}
+		}
+		if (tmp == producer) seen_producer = 1;
+	}
+	return result;
+}
+//
+// returns true iff the output
+//  (producer, out_idx) 
+//  goes only to a single input, and that
+//  input is on 'consumer'
+//
+int check_single_consumer(
+	struct nn_graph *nn, 
+	struct nn_node *producer, 
+	int out_idx,
+	struct nn_node *consumer)
+{
+	struct nn_node *tmp;
+	struct input *in;
+	int i;
+	int seen_producer = 0;
+    int count = 0;
+	uint32_t prod_id = producer->node_id;
+
+	for (tmp = nn->head; tmp != NULL; tmp = tmp->next) {
+		for (i = 0; i < tmp->n_inputs; i++) {
+			in = &tmp->input_refs[i];
+			if (in->src_id != prod_id) continue;
+			if (in->output_idx != out_idx) continue;
+			if (!seen_producer) {
+				log_causality(nn,tmp,producer);
+			} else {
+                count ++;
+                if( tmp != consumer || count > 1) return 0;
+			}
+		}
+		if (tmp == producer) seen_producer = 1;
+	}
+	return count == 1;
+}
+
+//
+// this is given a list of one or more node items
+//    rmnodes[0..n_remove-1]
+//  which must exist in the list in the order given, possibly
+//  with intervening items. 'anchor' is an upstream anchor for these
+//   (i.e. *anchor = rmnodes[0]; or (*anchor)->next = rmnodes[0], etc)
+//
+// All of those are removed from the list, and the first one rmnodes[0] is replaced by new_node.
+// it will return -1 if it can't find the removed nodes; this should not
+// occur if the assumptions are met. If a non-zero return occurs, it may
+// be that some of the items were not deleted. If the first item could not be found,
+// the new item is not inserted.
+//
+// if anchor is NULL, &nn->head is used.
+// if new_node is NULL, only the removal of nodes in rmnodes is done.
+// if any of the rmnodes[1..n_remove-1] is NULL, it is taken as a list
+//  terminator (but there must be at least one item).
+//
+
+int replace_node_sequence (
+		struct nn_graph *nn,
+		struct nn_node ** anchor,	// list anchor, at items[0] or upstream
+		struct nn_node * new_node,	// node to replace (may be null)
+    	struct nn_node * const * rmnodes,
+        int n_remove)
+{
+	if( anchor == NULL) anchor = &nn->head;
+	// find the first one
+    struct nn_node * searchfor;
+    if( n_remove < 1 || ( searchfor = rmnodes[0]) == NULL )
+    	return -1;
+    struct nn_node * current = *anchor;
+    while( current != searchfor){
+    	if( current == NULL)
+    		return -1;		// couldn't find the first one...
+    	anchor = &current->next;
+    	current = *anchor;
+    }
+    // OK, the anchor points to the first node in rmnodes[].
+    if( new_node != NULL){
+    	// insert node before the one we're about to delete
+    	*anchor = new_node;
+    	anchor = &new_node->next;
+    	*anchor = current;
+    }
+    // remove the first item
+    current = current->next;
+    *anchor = current;
+
+    // remove the rest
+    for( int i = 1; i < n_remove; i++){
+    	searchfor = rmnodes[i];
+    	if (searchfor == NULL) break;	// all done
+        while( current != searchfor){
+        	if( current == NULL)
+        		return -1;		// couldn't find
+        	anchor = &current->next;
+        	current = *anchor;
+        }
+        // remove it
+        current = current->next;
+        *anchor = current;
+    }
+    return 0;
+}
+
 

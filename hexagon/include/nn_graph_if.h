@@ -43,6 +43,7 @@
  */
 
 #include <nn_graph_types.h>
+#include <hexagon_nn.h>
 #include <stdint.h>
 
 struct input {
@@ -52,9 +53,14 @@ struct input {
 
 #define NODE_ID_RESERVED_CONSTANT 0
 
+
+#define MAX_DIMENSIONS 8
 struct output {
-	uint32_t max_size;
-	uint32_t unused;
+	uint32_t rank; // dimensions in the tensor
+	uint32_t max_sizes[MAX_DIMENSIONS]; // max num elements in each dimension
+	uint32_t elementsize; // size of each element
+	int32_t zero_offset; // 0 for float / integer values
+	float stepsize; // 0 for float/integer values
 };
 
 struct perfinfo {
@@ -71,12 +77,31 @@ struct perfinfo {
 
 int hexagon_nn_version(int *ver);
 int hexagon_nn_last_execution_cycles(nn_id_t id, unsigned int *cycles_lo, unsigned int *cycles_hi);
-nn_id_t hexagon_nn_init();
+int hexagon_nn_init(hexagon_nn_nn_id *g);
+int hexagon_nn_config();
 int hexagon_nn_snpprint(nn_id_t id, unsigned char *buf, uint32_t length);
 int hexagon_nn_getlog(nn_id_t id, unsigned char *buf, uint32_t length);
 int hexagon_nn_set_debug_level(nn_id_t id, int level);
+int print_node_perf(nn_id_t id);
 
-typedef struct almost_a_tensor hexagon_nn_tensordef;
+struct almost_a_tensor ;
+
+/* 
+ * Definition / I/O for a Tensor
+ * Must match IDL
+ * FIXME: could remove unused
+ */
+typedef struct {
+	unsigned int batches;
+	unsigned int height;
+	unsigned int width;
+	unsigned int depth;
+	unsigned char *data;
+	int dataLen;		/* For input and output */
+	unsigned int data_valid_len; /* for output only */
+	unsigned int unused;
+} hexagon_nn_tensordef;
+
 int hexagon_nn_append_node(
 	nn_id_t id,
 	uint32_t node_id, 

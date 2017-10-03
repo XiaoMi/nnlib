@@ -46,51 +46,51 @@
 static int split_impl(
 	struct nn_node *self,
 	struct nn_graph *nn,
+	int element_type,
 	int element_size,
 	int n_outs)
 {
 	//const struct tensor *dimdef_tensor = self->inputs[0];
 	const struct tensor *data_tensor = self->inputs[1];
 	struct tensor **outs = self->outputs;
-	//int32_t dimdef = tensor_get_int32(dimdef_tensor,0);
+	// @@ seems that cnns_alexnet.c is built using Split with in[0] == in[1]
+	int32_t dimdef = 3;// tensor_get_int32(dimdef_tensor,0);
 	int32_t depth = data_tensor->shape.depth;
 	int32_t width = data_tensor->shape.width;
 	int32_t height = data_tensor->shape.height;
 	int32_t batches = data_tensor->shape.batches;
 	int32_t out_depth = depth / n_outs;
-	uint32_t out_bytes = data_tensor->data_size / n_outs;
-	const char *in_data = (const char *)data_tensor->data;
+	const char *in_data = (const char *) data_tensor->data;
 	const char *inptr;
 	char *outptr;
 	int i;
 	int j;
 	int bytestride;
+	int copyn;
 	
 
 	logmsg(nn,2,"split node %p execute",self);
-
+	if( dimdef != 3){
+		return errlog(nn, "only works on depth");		// FIXME
+	}
+	if( out_depth*n_outs !=  depth){
+		return errlog(nn, "uneven split: %d / %d", depth, n_outs);
+	}
 	if (n_outs == 1) {
-		return tensor_copy(self->outputs[0],self->inputs[1]);
+		return tensor_copy(outs[0],data_tensor);
 	}
 
 	for (i = 0; i < n_outs; i++) {
-		if (outs[i]->max_size < out_bytes) return errlog(nn,"out %d too small",i);
-		outs[i]->data_size = out_bytes;
-		tensor_set_shape(outs[i],batches,height,width,out_depth);
+		if( tensor_out_prepare_normal( outs[i],batches,height,width,out_depth, element_type )!=0)
+			return errlog(nn,"out %d too small",i);
 	}
-
-	/* Guess depth */
-
-	if ((depth % n_outs) == 0) {
-		bytestride = out_depth * element_size;
-	} else {
-		return errlog(nn,"FIXME: split assumes depth, need compatible dimension value");
-	}
+	copyn = batches*height*width;	// # of distinct copies per output
+	bytestride = out_depth * element_size;	 // length per copy
 
 	for (j = 0; j < n_outs; j++) {
 		inptr = in_data + j*bytestride;
 		outptr = (char *)outs[j]->data;
-		for (i = 0; i < batches*height*width*out_depth; i++) {
+		for (i = 0; i < copyn; i++) {
 			memcpy(outptr,inptr,bytestride);
 			outptr += bytestride;
 			inptr += (bytestride * n_outs);
@@ -101,7 +101,8 @@ static int split_impl(
 
 static int split_execute_f(struct nn_node *self, struct nn_graph *nn)
 {
-	return split_impl(self,nn,sizeof(float),self->n_outputs);
+	int eltype = (self->node_type == OP_Split_int32 )? NN_TYPE_INT32 : NN_TYPE_FLOAT;
+	return split_impl(self,nn,eltype, 4, self->n_outputs);
 }
 
 static int qsplit_execute_8(struct nn_node *self, struct nn_graph *nn)
@@ -109,7 +110,7 @@ static int qsplit_execute_8(struct nn_node *self, struct nn_graph *nn)
 	int n_outputs = self->n_outputs;
 	tensor_copy(self->outputs[n_outputs-2],self->inputs[2]);
 	tensor_copy(self->outputs[n_outputs-1],self->inputs[3]);
-	return split_impl(self,nn,1,n_outputs-2);
+	return split_impl(self,nn,NN_TYPE_QUINT8, 1, n_outputs-2);
 }
 
 static int split_check_f(struct nn_node *self, struct nn_graph *nn)
@@ -131,23 +132,23 @@ static int qsplit_check(struct nn_node *self, struct nn_graph *nn)
 
 
 struct nn_node_ops nn_ops_for_Split_f = {
-	SFINIT(.execute, split_execute_f),
-	SFINIT(  .check, split_check_f),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = split_execute_f,
+	.check = split_check_f,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_Split_int32 = {
-	SFINIT(.execute, split_execute_f),
-	SFINIT(  .check, split_check_f),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = split_execute_f,
+	.check = split_check_f,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedSplit_8 = {
-	SFINIT(.execute, qsplit_execute_8),
-	SFINIT(  .check, qsplit_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = qsplit_execute_8,
+	.check = qsplit_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

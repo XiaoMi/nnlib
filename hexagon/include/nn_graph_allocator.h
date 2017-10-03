@@ -44,4 +44,7 @@
 int allocate_graph_storage(struct nn_graph *nn);
 void allocator_teardown(struct nn_graph *nn);
 
+void canary_mark(struct nn_graph *nn, struct tensor *t);
+int canary_check(struct nn_graph *nn, const struct tensor *t);
+
 #endif

@@ -58,8 +58,8 @@ static int strided_slice_impl(
 	int h_in = input_tensor->shape.height;
 	int w_in = input_tensor->shape.width;
 	int d_in = input_tensor->shape.depth;
-	const char *in = (const char *)input_tensor->data;
-	char *out = (char *)out_tensor->data;
+	const char *in = input_tensor->data;
+	char *out = out_tensor->data;
 	int32_t order = start_tensor->shape.depth;
 	int b_start = (order < 4) ? 0 : tensor_get_int32(start_tensor,order-4);
 	int h_start = (order < 3) ? 0 : tensor_get_int32(start_tensor,order-3);
@@ -169,29 +169,29 @@ static int sslice_check_q8(struct nn_node *self, struct nn_graph *nn)
 
 
 struct nn_node_ops nn_ops_for_StridedSlice_f = {
-	SFINIT(.execute, sslice_execute_4b),
-	SFINIT(  .check, sslice_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = sslice_execute_4b,
+	.check = sslice_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_StridedSlice_int32 = {
-	SFINIT(.execute, sslice_execute_4b),
-	SFINIT(  .check, sslice_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = sslice_execute_4b,
+	.check = sslice_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_StridedSlice_uint8 = {
-	SFINIT(.execute, sslice_execute_1b),
-	SFINIT(  .check, sslice_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = sslice_execute_1b,
+	.check = sslice_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedStridedSlice_8 = {
-	SFINIT(.execute, sslice_execute_q8),
-	SFINIT(  .check, sslice_check_q8),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = sslice_execute_q8,
+	.check = sslice_check_q8,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };

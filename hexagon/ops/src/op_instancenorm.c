@@ -45,16 +45,6 @@
  * 
  */
 
-/*
- * EJP: THE ONLY THING I'VE TESTED IS THAT THIS COMPILES!!! IT PROBABLY DOESN'T WORK!!!
- * EJP: THE ONLY THING I'VE TESTED IS THAT THIS COMPILES!!! IT PROBABLY DOESN'T WORK!!!
- * EJP: THE ONLY THING I'VE TESTED IS THAT THIS COMPILES!!! IT PROBABLY DOESN'T WORK!!!
- * EJP: THE ONLY THING I'VE TESTED IS THAT THIS COMPILES!!! IT PROBABLY DOESN'T WORK!!!
- * EJP: THE ONLY THING I'VE TESTED IS THAT THIS COMPILES!!! IT PROBABLY DOESN'T WORK!!!
- * EJP: THE ONLY THING I'VE TESTED IS THAT THIS COMPILES!!! IT PROBABLY DOESN'T WORK!!!
- */
-
-
 #include <nn_graph.h>
 #include <string.h>
 #include <quantize.h>
@@ -69,6 +59,23 @@
  * (sum_of_squares - (sum*sum/(w*h))) / (w*h)
  * Eventually we take the invsqrt of the variance, so N**2 * variance(X) becomes N*sqrt(variance(X)...
  */
+
+/*
+ *  method for finding mean & variance of a bunch of u8 values:
+ *   - find their sum as u32
+ *   - find the sums of square,in u64
+ *   - variance is ( pop* ssq -   sum*sum) / (pop^2)
+ *   - mean is sum/pop
+ *     (all of which can  be done in integer, except for the divide).
+ *   - so 1/sqrt(var) can be found as
+ *         pop/ sqrt( pop* ssq -   sum*sum)
+ *
+ */
+struct integer_acc {
+	uint32_t sm;
+	uint64_t ssq;
+	uint8_t xmin,xmax;
+};
 
 static int execute_qinstancenorm_ref(struct nn_node *self, struct nn_graph *nn)
 {
@@ -86,93 +93,163 @@ static int execute_qinstancenorm_ref(struct nn_node *self, struct nn_graph *nn)
 	int32_t depth = in_tensor->shape.depth;
 
 	uint32_t tmp;
-	uint32_t *sum = (uint32_t *)nn->scratch;
-	uint32_t *sum_of_squares = sum + depth;
-	float *mean = (float *)(sum_of_squares + depth);
-	float *variance = mean + depth;
-	float *invsqrt_variance = mean + depth;
-	float *tmp_data = invsqrt_variance + depth;
+
+	// work area:
+	//   sum:    struct integer_acc * [depth]
+	//    mean, invsqrt_variance:   each float * [batches*depth]
+	//   out_scale,out_offs: each int32_t[depth]
+
+	int scratch_needed = ( sizeof(struct integer_acc)
+				 + 2*batches* sizeof(float) + 2*sizeof(int32_t)) * depth;
+
+	if( nn->scratch_size < scratch_needed ){
+		return errlog(nn, "needed %d bytes of scratch", scratch_needed);
+	}
+
+	struct integer_acc *sum = nn->scratch;
+	float *mean = (float *)(sum + depth);
+	float *invsqrt_variance = mean + depth*batches;
+	int32_t *out_scale = (int32_t*)(invsqrt_variance + depth*batches);
+	int32_t *out_offs = out_scale + depth;
 	float out_min = 0.0f;
 	float out_max = 0.0f;
-	float ftmp;
 
-	const uint8_t *in_data = (const uint8_t *)in_tensor->data;
+	const uint8_t *in_data = in_tensor->data;
 	const uint8_t *data;
-	uint8_t *out_data = (uint8_t *)out_tensor->data;
+	uint8_t *out_data = out_tensor->data;
 	//const float epsilon = tensor_get_float(epsilon_tensor,0);
 
-	int32_t b,h,w,d;
+	int32_t b,ihw,d;
 	int32_t wh = width*height;
-	int i;
-	size_t bytes = batches * width * height * depth;
 	//float in_min = tensor_get_float(in_min_tensor,0);
 	//float in_max = tensor_get_float(in_max_tensor,0);
 	//float in_level_size = (in_max-in_min)/255.0f;
-	memset(nn->scratch,0,sizeof(float)*depth*5);
 
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	if (batches != 1) return errlog(nn,"Currently batches not supported");
-	tensor_set_shape(out_tensor,batches,width,height,depth);
+
+    if( tensor_out_prepare_normal( out_tensor,batches,width,height,depth, NN_TYPE_QUINT8 )!=0) {
+    	return errlog(nn,"out too small");
+    }
 	logmsg(nn,2,"set out tensor shape %dx%dx%dx%d",batches,width,height,depth);
-	out_tensor->data_size = bytes;
 
 
-	//for (b = 0; b < batches; b++) {
-	b = 0;
-		data = in_data + (b * width * height * depth);
-		/* Try to keep data in fixed point as long as possible */
-		for (h = 0; h < height; h++) {
-			for (w = 0; w < width; w++) {
-				for (d = 0; d < depth; d++) {
-					tmp = *data++;
-					sum[d] += tmp;
-					sum_of_squares[d] += tmp*tmp;
-				}
+	//
+	// first pass finds scaling for each depth index, each batch;
+	// these are kept in 'mean' and  'invsqrt_variance'
+	// in the process, finds full range of output.
+	//
+
+	for (b = 0; b < batches; b++) {
+		// find sums at each d index
+		// also, the range of inputs present.
+		memset(nn->scratch,0,sizeof(struct integer_acc)*depth);
+		for(d = 0; d < depth; d++) sum[d].xmin = 0xFF;
+		data = in_data + (b * wh * depth);
+
+		for (ihw = 0; ihw <wh; ihw++) {
+			for (d = 0; d < depth; d++) {
+				tmp = *data++;
+				sum[d].xmin = tmp < sum[d].xmin? tmp: sum[d].xmin;
+				sum[d].xmax = tmp > sum[d].xmax? tmp: sum[d].xmax;
+				sum[d].sm += tmp;
+				sum[d].ssq += tmp*tmp;
 			}
 		}
+
+		// in cases where xmin = xmax in a partition, 'del' value
+		//  (ssq*pop- sm*sm) is always 0, and the output there will be 0.0.
+		// an extreme case is e.g.
+		//    999 of '100' and 1 of 101
+		//   in which case
+		//      xmean = 100.001
+		//      d = 999 ->  stdev = 0.03160  = 1/31.638
+		//      'normalization' gives
+		//       999 of -0.0316
+		//         1 of  31.607
+		// (you'd get the same result for 999 of any one value, and 1 of a larger value).
+		// so, stdev never gets really small with integer inputs, it's really just
+		// zero, or non-zero.
+		//
+
 		for (d = 0; d < depth; d++) {
-			/* Compute variance.  This would be better as fractional? */
-			/* Or maybe... if we add a constant to every input, is the variance the same? */
-			/* We need mean in addition to variance */
-			/* When we do fixed point here, we need to be careful about division. */
-			mean[d] = (float)sum[d] / (wh);
-			variance[d] = (sum_of_squares[d] - ((mean[d]*sum[d])))/(wh);
-			// alternatively: variance[d] (sum_of_squares[d] - (sum[d]*sum[d]/(w*h))) / (w*h)
-			// alternatively: variance[d] sum_of_squares[d]/(w*h) - mean[d]*mean[d]
-			/* 
-			 * Looking at the graph, epsilon is pretty small. Maybe
-			 * quantizes to zero. Can probably handle with clipped
-			 * reciprocal estimate
-			 */
-			/* replace with optimized invsqrt */
-			invsqrt_variance[d] = 1.0f / sqrtf((float)(variance[d]) + 0.00001f);
+			int xmin = sum[d].xmin;
+			int xmax = sum[d].xmax;
+			float xmean, inv_stdev;
+			if( xmax > xmin){
+				/* Compute mean, variance */
+				uint32_t sm = sum[d].sm;		// sum of all inputs.
+				uint64_t del = sum[d].ssq * (unsigned)wh - (uint64_t)sm * (uint64_t)sm;
+				// if we divide del by wh^2, we get the variance.
+				// to find 1/sqrt(variance), divide wh by the sqrt(del).
+				xmean = (float)sm / (float)(wh);
+				inv_stdev = (float)wh/ ( sqrtf((float)del) + 0.00001f*(float)wh);
+				invsqrt_variance[d] = inv_stdev;
+				// find the range of results at this d index
+				float ymin = ((float)xmin-xmean) * inv_stdev;
+				float ymax = ((float)xmax-xmean) * inv_stdev;
+				out_min = fminf( out_min,ymin);
+				out_max = fmaxf( out_max, ymax);
+			}else{
+				// all are the same... all output will be zero for this d.
+				xmean = 0.0f;
+				inv_stdev= 0.0f;
+			}
+			mean[b*batches + d] = xmean;
+			invsqrt_variance[b*batches + d] = inv_stdev;
+
 		}
+	} // b
+
+	// adjust the output range so we have a proper zero
+	out_max = fmaxf( out_max, out_min + 1e-5f);
+	adjust_minmax_for_zero( &out_min, &out_max);
+
+	float scl = 255.0f /( out_max-out_min);
+
+	// second pass - for each [b,d], find the scaling needed for
+	// that, and apply it with integer op.
+
+	for (b = 0; b < batches; b++) {
+		// go back through and find out_scale, out_offset to do the mapping in one step
+		// i.e.
+		//     y =  (x-xmean)*normfac
+		//   out =    round( [ y  - out_min] * scl )
+		//
+		// where scl = 255/(outmax-outmin)
+		//
+		//  ->  out = round(  x*(normfac*scl)   - [xmean*normfac+out_min]*scl )
+		//
+		// and expressed with 10 fractional bits...
+		//  -> out = (x * outk - out_offs)/1024
+		//
+		// note: all scale factors are >=0.5 or so here; it's unlikely for the normalization
+		// to reduce the range of quint8 codes within a depth slot, should only happen
+		// if some slots are skewed one way, and some another, so that aligning the means
+		// requires a range expansion.
+		// (exception: if a [b,d] slot
+		// was found to contain all identical values, we'll have out_scale = 0,
+		// and out_offs will be 1024*out_min*scl which results in the 'zero code' output).
+		//
+		//
+
+		for (d = 0; d < depth; d++) {
+			float xmean = mean[b*batches+d];
+			float normfac = invsqrt_variance[b*batches+d];
+			out_scale[d] = roundf_i32(1024.0f*normfac * scl);
+ 			out_offs[d] = roundf_i32(1024.0f * (xmean * normfac + out_min) *scl);
+		}
+
 		data = in_data + (b * width * height * depth);
-		for (h = 0; h < height; h++) {
-			for (w = 0; w < width; w++) {
-				for (d = 0; d < depth; d++) {
-					/* EJP: I think subtracting the mean cancels out the offset */
-					ftmp = (*data++ - mean[d]) * invsqrt_variance[d]; // * in_level_size;
-					*tmp_data++ = ftmp;
-					out_min = fminf(ftmp,out_min);
-					out_max = fmaxf(ftmp,out_max);
-				}
+		for (ihw = 0; ihw <wh; ihw++) {
+			for (d = 0; d < depth; d++) {
+				int val = *data * out_scale[d] - out_offs[d];
+				*out_data ++ = saturate_u8( (val+512)>>10);
+				data++;
 			}
 		}
-		tmp_data -= height*width*depth;
-		for (i = 0; i < height*width*depth; i++) {
-			*out_data++ = quantize_uint8(*tmp_data++,out_min,out_max);
-		}
-	//}
-        //out_min = out_min * in_level_size;
-        //out_max = out_max * in_level_size;
+	}
+	tensor_set_single_float( out_min_tensor, out_min );
+	tensor_set_single_float( out_max_tensor, out_max );
 
-	tensor_set_shape(out_min_tensor,1,1,1,1);
-	tensor_set_shape(out_max_tensor,1,1,1,1);
-	tensor_set_float(out_min_tensor,0,out_min);
-	tensor_set_float(out_max_tensor,0,out_max);
-	out_min_tensor->data_size = sizeof(float);
-	out_max_tensor->data_size = sizeof(float);
 	return 0;
 }
 
@@ -194,11 +271,13 @@ static int execute_finstancenorm(struct nn_node *self, struct nn_graph *nn)
 	int32_t depth = in_tensor->shape.depth;
 
 	float tmp;
-	float *sum = (float *)nn->scratch;
+	float *sum = nn->scratch;
 	float *sum_of_squares = sum + depth;
-	float *mean = sum_of_squares + depth;
+	// followed by 2nd sum, 2nd sum of squares..
+	// (cascaded acc to reduce loss of precision)
+	float *mean = sum_of_squares + depth*3;
 	float *variance = mean + depth;
-	float *invsqrt_variance = mean + depth;
+	float *invsqrt_variance = variance + depth;
 
 	const float *in_data = (const float *)in_tensor->data;
 	const float *data;
@@ -206,40 +285,50 @@ static int execute_finstancenorm(struct nn_node *self, struct nn_graph *nn)
 	//const float epsilon = tensor_get_float(epsilon_tensor,0);
 	const float epsilon = 1.0e-5f;
 
-	int32_t b,h,w,d;
-        int32_t wh = width * height;
+	int32_t b,d;
+	int32_t wh = width * height;
+	int32_t ihw;
 
-	size_t bytes = batches * width * height * depth * sizeof(float);
 
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
 
-	tensor_set_shape(out_tensor,batches,width,height,depth);
-	out_tensor->data_size = bytes;
+    if( tensor_out_prepare_normal( out_tensor,batches,width,height,depth, NN_TYPE_FLOAT )!=0) {
+    	return errlog(nn,"out too small");
+    }
+
+	out_data = (float*) out_tensor->data;
 
 	for (b = 0; b < batches; b++) {
-		memset(nn->scratch,0,sizeof(float)*depth*5);
+		memset(nn->scratch,0,sizeof(float)*depth*4);	// clear sums
 		data = in_data + (b * width * height * depth);
-		for (h = 0; h < height; h++) {
-			for (w = 0; w < width; w++) {
-				for (d = 0; d < depth; d++) {
-					tmp = *data++;
-					sum[d] += tmp;
-					sum_of_squares[d] += tmp*tmp;
+		for (ihw = 0; ihw <wh; ihw++) {
+			for (d = 0; d < depth; d++) {
+				tmp = *data++;
+				sum[d] += tmp;
+				sum_of_squares[d] += tmp*tmp;
+			}
+			if( ((ihw+1)&127)==0){
+				// unload accums (slots 0,1) to slots 2,3
+				for( int i = 0; i < depth*2;i++){
+					float x = sum[i];
+					sum[depth*2+i] += x;
+					sum[i] = 0.0f;
 				}
 			}
 		}
+		// find mean & variance - adding the two parts of the
+		// accs together.
 		for (d = 0; d < depth; d++) {
-			mean[d] = sum[d] / (wh);
-			variance[d] = (sum_of_squares[d]/(wh)) - (mean[d]*mean[d]);
+			float sm = sum[d] + sum[d + depth*2];
+			float ssq = sum_of_squares[d] + sum_of_squares[d + depth*2];
+			float mn = sm/ (wh);
+			mean[d] = mn ;
+			variance[d] = (ssq/(wh)) - (mn*mn);
 			invsqrt_variance[d] = 1.0f / sqrtf(variance[d] + epsilon);
 		}
 		data = in_data + (b * width * height * depth);
-		out_data = (float *)out_tensor->data;
-		for (h = 0; h < height; h++) {
-			for (w = 0; w < width; w++) {
-				for (d = 0; d < depth; d++) {
-					*out_data++ = (*data++ - mean[d]) * invsqrt_variance[d];
-				}
+		for (ihw = 0; ihw <wh;ihw++) {
+			for (d = 0; d < depth; d++) {
+				*out_data++ = (*data++ - mean[d]) * invsqrt_variance[d];
 			}
 		}
 	}
@@ -264,22 +353,22 @@ static int check_finstancenorm(struct nn_node *self, struct nn_graph *nn)
 
 
 struct nn_node_ops nn_ops_for_QuantizedInstanceNorm_8_ref = {
-	SFINIT(.execute, execute_qinstancenorm_ref),
-	SFINIT(  .check, check_qinstancenorm),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = execute_qinstancenorm_ref,
+	.check = check_qinstancenorm,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedInstanceNorm_8 = {
-	SFINIT(.execute, execute_qinstancenorm_ref),
-	SFINIT(  .check, check_qinstancenorm),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = execute_qinstancenorm_ref,
+	.check = check_qinstancenorm,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_InstanceNorm_f = {
-	SFINIT(.execute, execute_finstancenorm),
-	SFINIT(  .check, check_finstancenorm),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = execute_finstancenorm,
+	.check = check_finstancenorm,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };

@@ -58,8 +58,9 @@ static int maxpool_execute(struct nn_node *self, struct nn_graph *nn)
 	int32_t window_width = window_tensor->shape.width;
 
 	int32_t out_batches = in_batches;
-	int32_t out_width = nn_pad_compute_outsize(in_width,window_width,stride_width,self->padding);
-	int32_t out_height = nn_pad_compute_outsize(in_height,window_height,stride_height,self->padding);
+	int32_t adj_x, adj_y;
+	int32_t out_width = nn_pad_compute_outsize_and_padbefore(in_width,window_width,stride_width,self->padding, &adj_x);
+	int32_t out_height = nn_pad_compute_outsize_and_padbefore(in_height,window_height,stride_height,self->padding, &adj_y);
 	int32_t out_depth = in_depth;
 
 	int32_t batch;
@@ -73,25 +74,27 @@ static int maxpool_execute(struct nn_node *self, struct nn_graph *nn)
 	int32_t start_y;
 	int32_t end_x;
 	int32_t end_y;
-	int32_t adj_x = ((out_width-1) * stride_width + window_width - in_width) / 2;
-	int32_t adj_y = ((out_height-1) * stride_height + window_height - in_height) / 2;
 
-	const float *in = (const float *)in_tensor->data;
-	float *out = (float *)out_tensor->data;
+	const float *in = in_tensor->data;
+	float *out = out_tensor->data;
 	float maxval;
-	size_t bytes = out_batches * out_width * out_height * out_depth * sizeof(float);
 
 	logmsg(nn,2,"maxpool execute. self=%p ",self);
+	if( out_width < 1 || out_height < 1){
+		return errlog(nn,"input too small for filter\n");
+	}
 	if ((window_tensor->shape.batches != 1)
 		|| (window_tensor->shape.depth != 1)
 		|| (stride_tensor->shape.batches != 1)
 		|| (stride_tensor->shape.depth != 1)) {
 		return errlog(nn,"bad window/stride shape");
 	}
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
+
+	if( tensor_out_prepare_normal( out_tensor,out_batches,out_height,out_width,out_depth , NN_TYPE_FLOAT)!= 0){
+		return errlog(nn,"output too small");
+	}
+
 	if (self->padding == NN_PAD_NA) return errlog(nn,"This op might pad");
-	tensor_set_shape(out_tensor,out_batches,out_height,out_width,out_depth);
-	out_tensor->data_size = bytes;
 
 	for (batch = 0; batch < out_batches; batch++) {
 	  /* foreach out y */
@@ -155,9 +158,9 @@ static int maxpool_check(struct nn_node *self, struct nn_graph *nn)
 
 
 struct nn_node_ops nn_ops_for_MaxPool_f = {
-	maxpool_execute,
-	maxpool_check,
-	node_alloc_common,
-	node_free_common,
+	.execute = maxpool_execute,
+	.check = maxpool_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

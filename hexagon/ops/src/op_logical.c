@@ -67,22 +67,22 @@ static int logical_int32_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_LogicalAnd_int32 = {
-	SFINIT(.execute, and_int32_execute),
-	SFINIT(  .check, logical_int32_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = and_int32_execute,
+	.check = logical_int32_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_LogicalOr_int32 = {
-	SFINIT(.execute, ior_int32_execute),
-	SFINIT(  .check, logical_int32_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = ior_int32_execute,
+	.check = logical_int32_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_LogicalXor_int32 = {
-	SFINIT(.execute, xor_int32_execute),
-	SFINIT(  .check, logical_int32_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = xor_int32_execute,
+	.check = logical_int32_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };

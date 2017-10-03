@@ -49,9 +49,11 @@
               }
 #endif
 
-          .global avgpool_aligned_hvx
-          .type   avgpool_aligned_hvx, @function
-          .balign 32
+	.text
+
+	.global avgpool_aligned_hvx
+	.type   avgpool_aligned_hvx, @function
+	.balign 32
 avgpool_aligned_hvx: 
 /* ============================================================================ */
 #define dsto        r0 //dest ptr

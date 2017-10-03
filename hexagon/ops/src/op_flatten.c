@@ -54,10 +54,17 @@ static int flatten_execute(struct nn_node *self, struct nn_graph *nn)
 	uint32_t elements = batches*height*width*depth;
 	logmsg(nn,2,"flatten execute. self=%p ",self);
 	if (out_tensor->max_size < in_tensor->data_size) {
-		return errlog(nn,"out too small");
+		return errlog(nn,"out too small. %p  Need %d, have %d. (for %d*%d*%d*%d)",
+			      out_tensor,
+			      in_tensor->data_size,
+			      out_tensor->max_size,
+			      batches, height, width, depth
+			);
 	}
+	/* TODO: check if input is D32 */
 	/* Copy input tensor to output */
 	tensor_set_shape(out_tensor,1,1,1,elements);
+	out_tensor->format = in_tensor->format;
 	out_tensor->data_size = in_tensor->data_size;
 	memcpy(out_tensor->data,in_tensor->data,in_tensor->data_size);
 	logmsg(nn,2,"copied tensor %d bytes of data",in_tensor->data_size);
@@ -77,8 +84,10 @@ static int qflatten_execute(struct nn_node *self, struct nn_graph *nn)
 	if (out_tensor->max_size < in_tensor->data_size) {
 		return errlog(nn,"out too small");
 	}
+	/* TODO: check if input is D32 */
 	/* Copy input tensor to output */
 	tensor_set_shape(out_tensor,1,1,1,elements);
+	out_tensor->format = in_tensor->format;
 	out_tensor->data_size = in_tensor->data_size;
 	memcpy(out_tensor->data,in_tensor->data,in_tensor->data_size);
 	tensor_copy(self->outputs[1],self->inputs[1]);
@@ -108,16 +117,16 @@ static int qflatten_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Flatten = {
-	SFINIT(.execute, flatten_execute),
-	SFINIT(  .check, flatten_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = flatten_execute,
+	.check = flatten_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedFlatten = {
-	SFINIT(.execute, qflatten_execute),
-	SFINIT(  .check, qflatten_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = qflatten_execute,
+	.check = qflatten_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

@@ -33,18 +33,26 @@
  *
  */
 
+//
+// This op concatenates 2 or more tensors on a specified axis
+// The axis is specified by another input tensor which is a single integer 0 .. 3
+//   0 = batches, 1 = height, 2= width, 3= depth
+// All inputs must have a common shape on all dimensions *other* than the specified dimension
+// The output shape will be the sum of input dims on the specified direction, and the same on others
+//
+//   E.g. T1 shape  =  (2, 40, 30, 12 )
+//        T2 shape  =  (2, 40, 30, 24 )
+//        T3 shape   = (2, 40, 20, 12 )
+//        T4 shape   = (2, 40, 30, 14 )
+
+// T1,T2 can be concat on dimension 3, giving (2, 40, 30, 36) as output shape
+// T1,T3 can be concat on dimension 2, giving (2,40, 50, 12)
+// T1,T2,T4 can be concat on dimension 3, giving (2, 40, 30, 50 )
+//
 
 #include <nn_graph.h>
 #include <string.h>
 
-
-static inline uint32_t tensor_elements(const struct tensor *t)
-{
-	return t->shape.batches
-		* t->shape.height
-		* t->shape.width
-		* t->shape.depth;
-}
 
 static int concat_do_execute(
 	struct nn_node *self,
@@ -54,50 +62,83 @@ static int concat_do_execute(
 	int n_input_tensors,
 	int elementsize)
 {
+	struct shape out_shape;		// shape of output tensor
 	const struct tensor *t;
 	struct tensor *out_tensor = self->outputs[0];
-	int32_t in_width = input_tensors[0]->shape.width;
-	int32_t in_height = input_tensors[0]->shape.height;
-	int32_t in_batches = input_tensors[0]->shape.batches;
-	int32_t i;
-	int32_t j;
-	//float in_off; 
-	int32_t out_elements = 0;
-	int32_t out_bytes = 0;
-	int32_t total_depth = 0;
-	int32_t iters = in_width * in_height * in_batches;
-	const float *in_data;
-	float *out_data = (float *)out_tensor->data;
+	int concat_dim, i,k;
+	uint32_t j;
+
 	logmsg(nn,2,"concat execute. self=%p ",self);
-	if (tensor_get_int32(dim_tensor,0) != 3) {
-		if (!((in_width == 1) && (in_height == 1))) return errlog(nn,"only depth: %d (%dx%dx%dx%d)",tensor_get_int32(dim_tensor,0),in_batches,in_height,in_width,input_tensors[0]->shape.depth);
+	concat_dim = tensor_get_int32(dim_tensor,0);
+
+	// check the dims of all inputs, find the output shape. This also
+	// range checks 'concat_dim'.
+	//
+	k = find_concat_shape( input_tensors, n_input_tensors, concat_dim, &out_shape );
+	if( k < 0){
+		if( k <= -2) {
+			// mismatch size on a particular dim
+			return errlog(nn,"mismatch on tensor dim %d, concat on %d", (-2)-k , concat_dim);
+		}
+		return errlog( nn, "bad concat dim: %d", concat_dim);
 	}
-	for (i = 0; i < n_input_tensors; i++) {
-		if (input_tensors[i]->shape.width != in_width) {
-			return errlog(nn,"width mismatch tensor %d",i);
+
+	// input is 'outer_count' units of idim * inner_size, contiguous
+	// output is 'outer_count'units of odim * inner_size, contiguous
+	// idim = size of input in selected dim (changes per input)
+	// odim = size of output in selected dim (sum of all the idims)
+	//  so the copy is
+	//   for each input:
+	//        outer_count times:
+	//             copy 'inner_size*idim' bytes
+	//             advance in pointer by inner_size*idim, out ptr by inner_size * odim ( = out_stride)
+	//        advance 'base' out ptr by  inner_size*idim
+	//
+
+	// 'inner_size' is in bytes, so use byte pointers (memcpy is used for all copies).
+	uint8_t const * in_data;
+	uint8_t *  out_data = out_tensor->data;
+
+
+	uint32_t inner_size=0;
+	uint32_t out_stride=0;
+	uint32_t outer_count;
+
+	// set inner_size, out_stride, outer_count
+	// outer_count = prod of all dims < concat_dim
+	// inner_size = prod of all dims > concat_dim, and also elementsize
+	// out_stride = inner_size * dim[concat_dim]
+
+	outer_count = elementsize;	// this will become inner_size.
+
+	for( i= 3; i >= 0; --i){	// depth, width, height, batches
+		uint32_t ndim = out_shape.dimension[i];
+		uint32_t newcnt = outer_count * ndim;
+		if( i == concat_dim){
+			inner_size = outer_count;	// set inner_size, out_stride
+			out_stride = newcnt;
+			newcnt = 1;					// and restart for out_count.
 		}
-		if (input_tensors[i]->shape.height != in_height) {
-			return errlog(nn,"height mismatch tensor %d",i);
-		}
-		if (input_tensors[i]->shape.batches != in_batches) {
-			return errlog(nn,"batches mismatch tensor %d",i);
-		}
-		out_elements += tensor_elements(input_tensors[i]);
-		total_depth += input_tensors[i]->shape.depth;
+		outer_count = newcnt;
 	}
-	out_bytes = out_elements * elementsize;
-	if (out_bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	tensor_set_shape(out_tensor,in_batches,in_height,in_width,total_depth);
-	out_tensor->data_size = out_bytes;
+
+	// allocate
+	int out_typ = ( self->node_type == OP_ConcatV2_int32)? NN_TYPE_INT32: NN_TYPE_FLOAT;
+	if(tensor_out_prepare_normal_fromshape( out_tensor,  &out_shape, out_typ) != 0 ){
+		return errlog(nn,"out too small");
+	}
+
+	// copy
+
 	for (i = 0; i < n_input_tensors; i++) {
 		t = input_tensors[i];
-		in_data = (const float *)t->data;
-		uint32_t t_depth_bytes = t->shape.depth * elementsize;
-		for (j = 0; j < iters; j++) {
-			memcpy(out_data + j*total_depth,in_data,t_depth_bytes);
-			in_data += t->shape.depth;
+		in_data = t->data;
+		int input_dim = t->shape.dimension[concat_dim];
+		uint32_t copylen = input_dim  * inner_size;
+		for( j = 0; j < outer_count; j++){
+			memcpy(out_data + out_stride * j, in_data + copylen * j, copylen);
 		}
-		out_data += t->shape.depth;
+		out_data += copylen;
 	}
 	logmsg(nn,2,"concat %p done",self);
 	return 0;
@@ -129,38 +170,34 @@ static int concatv2_int_execute(struct nn_node *self, struct nn_graph *nn)
 
 static int concat_check(struct nn_node *self, struct nn_graph *nn)
 {
-	int i;
+	int k;
 	logmsg(nn,2,"Checking concat node %p",self);
-	if (self->n_inputs < 2) return errlog(nn,"at least 1 input");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
-	for (i = 0; i < self->n_inputs; i++) {
-		if (self->inputs[i] == NULL) return errlog(nn,"NULL input");
-	}
-	for (i = 0; i < self->n_outputs; i++) {
-		if (self->outputs[i] == NULL) return errlog(nn,"NULL output");
-	}
+	k = node_check_inputs_range( self,nn, "concat", 1, 32);
+	if( k == 0) k = node_check_outputs_n( self,nn, "concat", 1);
+	if( k != 0) return k;
+
 	logmsg(nn,2,"concat node %p check OK",self);
 	return 0;
 }
 
 struct nn_node_ops nn_ops_for_Concat_f = {
-	SFINIT(.execute, concat_execute),
-	SFINIT(  .check, concat_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = concat_execute,
+	.check = concat_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_ConcatV2_f = {
-	SFINIT(.execute, concatv2_execute),
-	SFINIT(  .check, concat_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = concatv2_execute,
+	.check = concat_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_ConcatV2_int32 = {
-	SFINIT(.execute, concatv2_int_execute),
-	SFINIT(  .check, concat_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = concatv2_int_execute,
+	.check = concat_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

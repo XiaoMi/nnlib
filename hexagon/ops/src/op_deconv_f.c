@@ -59,8 +59,8 @@ static int deconv_f_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	int32_t stride_width = stride_tensor->shape.width;
 	int32_t stride_height = stride_tensor->shape.height;
 	int32_t out_batches = in_batches;
-	int32_t out_width = nn_pad_compute_outsize(in_width,filt_width,stride_width,self->padding);
-	int32_t out_height = nn_pad_compute_outsize(in_height,filt_height,stride_height,self->padding);
+	int32_t out_width = nn_pad_compute_outsize_inverse(in_width,filt_width,stride_width,self->padding);
+	int32_t out_height = nn_pad_compute_outsize_inverse(in_height,filt_height,stride_height,self->padding);
 	int32_t out_depth = filt_batches;
 
 	int32_t adj_x;
@@ -79,9 +79,9 @@ static int deconv_f_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	int32_t in_y;
 	int32_t in_x;
 
-	const float *in = (const float *)in_tensor->data;
-	const float *filt = (const float *)filt_tensor->data;
-	float *out = (float *)out_tensor->data;
+	const float *in = in_tensor->data;
+	const float *filt = filt_tensor->data;
+	float *out = out_tensor->data;
 
 	const float *instripe;
 	const float *filtstripe;
@@ -98,19 +98,10 @@ static int deconv_f_execute_ref(struct nn_node *self, struct nn_graph *nn)
 		(int)stride_height,(int)stride_width,
 		(int)self->padding);
 #endif
-	while (in_width != nn_pad_compute_outsize(
-		out_width,
-		filt_width,
-		stride_width,
-		self->padding)) out_width++;
-	while (in_height != nn_pad_compute_outsize(
-		out_height,
-		filt_height,
-		stride_height,
-		self->padding)) out_height++;
+	// note, this is based on *output* size
+	nn_pad_compute_outsize_and_padbefore( out_width, filt_width, stride_width, self->padding , & adj_x);
+	nn_pad_compute_outsize_and_padbefore( out_height, filt_height, stride_height, self->padding , & adj_y);
 
-	adj_x = ((in_width-1) * stride_width + filt_width - out_width) / 2;
-	adj_y = ((in_height-1) * stride_height + filt_height - out_height) / 2;
 	//printf("adj_x = %d adj_y = %d\n",(int)adj_x,(int)adj_y);
 
 	int32_t out_size = out_batches * out_width * out_height * out_depth * sizeof(float);
@@ -191,10 +182,10 @@ static int deconv_check_ref(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Deconv_f = {
-	SFINIT(.execute, deconv_f_execute_ref),
-	SFINIT(  .check, deconv_check_ref),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = deconv_f_execute_ref,
+	.check = deconv_check_ref,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 

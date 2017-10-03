@@ -131,7 +131,7 @@ static inline float compute_lrn_at(
 	tmp = bias + sum * alpha;
 	//logmsg(nn,1,"%f + %f * %f: %f",bias,alpha,sum,tmp);
 	/* Then we pow by -beta... that's the same as exp(ln(x)*-beta) */
-	tmp2 = expf(log(tmp) * -beta);
+	tmp2 = expf(logf(tmp) * -beta);
 	//logmsg(nn,1,"pow(%f,%f): %f",tmp,-beta,tmp2);
 	/* Then we multiply by input value and return the product */
 	input = data[fourd_index(b,y_start,x_start,z_start,batches,height,width,depth)];
@@ -150,7 +150,7 @@ static int lrn_f_execute(struct nn_node *self, struct nn_graph *nn)
 	const float beta = tensor_get_float(beta_tensor,0);
 	
 	struct tensor *out_tensor = self->outputs[0];
-	float *out = (float *)out_tensor->data;
+	float *out = out_tensor->data;
 	
 	const float window_size = tensor_get_float(shape_tensor, 0);
 	const float scaling = alpha / window_size;
@@ -167,14 +167,11 @@ static int lrn_f_execute(struct nn_node *self, struct nn_graph *nn)
 	int32_t out_idx;
 	float out_data;
 	
-	if (in_tensor->data_size > (out_tensor->max_size)) {
+	if( tensor_out_prepare_normal_fromshape( out_tensor, &in_tensor->shape, NN_TYPE_FLOAT)!= 0){
 		return errlog(nn,"output too small, %d < %d",
 			out_tensor->max_size,
 			in_tensor->data_size);
 	}
-	
-	out_tensor->shape = in_tensor->shape;
-	out_tensor->data_size = in_tensor->data_size;
 	
 	if (shape_tensor->shape.batches != 1) return errlog(nn,"LRN by batches?");
 	for (b = 0; b < batches; b++) {
@@ -182,7 +179,7 @@ static int lrn_f_execute(struct nn_node *self, struct nn_graph *nn)
 	    for (x = 0; x < width; x++) {
 	      for (z = 0; z < depth; z++) {
 	        out_data = compute_lrn_at(
-		        (float *)in_tensor->data,
+		        in_tensor->data,
 			b,
 			y,
 			x,
@@ -233,9 +230,11 @@ static int lrn_check(struct nn_node *self, struct nn_graph *nn)
 	if (bias_value < 0.0) {
 		return errlog(nn, "LRN unsupported bias-value (< 0.0)");
 	}
+#if 0
 	if (bias_value < 1.0) {
 		return errlog(nn, "LRN unsupported bias-value (< 1.0)"); // NOTE: added based on team-member comments - may need review
 	}
+#endif
 	const float alpha_value = tensor_get_float(self->inputs[3], 0);
 	if (alpha_value < 0.0) {
 		return errlog(nn, "LRN unsupported alpha-value (< 0.0)");
@@ -252,10 +251,10 @@ static int lrn_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_LRN_f = {
-	lrn_f_execute,
-	lrn_check,
-	node_alloc_common,
-	node_free_common,
+	.execute = lrn_f_execute,
+	.check = lrn_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 

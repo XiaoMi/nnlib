@@ -62,38 +62,10 @@ static int nop_check(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-static struct nn_node *nop_ctor(
-	struct nn_graph *nn,
-	uint32_t node_id,
-	op_type operation,
-	padding_type padding,
-	uint32_t num_inputs,
-	uint32_t num_outputs,
-	const struct input *inputs,
-	const struct output *outputs)
-{
-	logmsg(nn,2,"nop node id %x ctor",node_id);
-	return node_alloc_common(
-		nn,
-		node_id,
-		operation,
-		padding,
-		num_inputs,
-		num_outputs,
-		inputs,
-		outputs);
-}
-
-static int nop_dtor(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"nop node %p dtor",self);
-	return node_free_common(self,nn);
-}
-
 struct nn_node_ops nn_ops_for_Nop = {
-	SFINIT(.execute, nop_execute),
-	SFINIT(  .check, nop_check),
-	SFINIT(   .ctor, nop_ctor),
-	SFINIT(   .dtor, nop_dtor),
+	.execute = nop_execute,
+	.check = nop_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

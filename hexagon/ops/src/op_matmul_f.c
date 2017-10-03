@@ -65,16 +65,13 @@ static int matmul_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	int32_t y;
 	int32_t i;
 
-	const float *a = (const float *)a_tensor->data;
-	const float *b = (const float *)b_tensor->data;
-	float *out = (float *)out_tensor->data;
+	const float *a = a_tensor->data;
+	const float *b = b_tensor->data;
+	float *out = out_tensor->data;
 
 	float adata;
 	float bdata;
 	float sum;
-
-	uint32_t out_elements = out_batches*out_height*out_width*out_depth;
-	size_t out_size = out_elements*sizeof(float);
 
 	logmsg(nn,2,"matmul execute. self=%p",self);
 	logmsg(nn,2,"matmul in dims: %dx%dx%dx%d * %dx%dx%dx%d",
@@ -84,11 +81,10 @@ static int matmul_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	if (b_height != 1) return errlog(nn,"oops, height != 1");
 	if (a_batches != 1) return errlog(nn,"fixme: support batches");
 	if (b_batches != 1) return errlog(nn,"fixme: support batches");
-	if (out_size > (out_tensor->max_size)) return errlog(nn,"output too small");
 
-	tensor_set_shape(out_tensor,out_batches,out_height,out_width,out_depth);
-	out_tensor->data_size = out_size;
-
+	if( tensor_out_prepare_normal( out_tensor, out_batches,out_height,out_width,out_depth, NN_TYPE_FLOAT)!= 0){
+		return errlog(nn,"output too small");
+	}
 	for (y = 0; y < a_width; y++) {
 		for (x = 0; x < b_depth; x++) {
 			sum = 0.0f;
@@ -118,9 +114,9 @@ static int matmul_check_ref(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_MatMul_f = {
-	matmul_execute_ref,
-	matmul_check_ref,
-	node_alloc_common,
-	node_free_common,
+	.execute = matmul_execute_ref,
+	.check = matmul_check_ref,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

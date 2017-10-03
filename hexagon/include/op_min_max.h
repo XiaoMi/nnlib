@@ -48,7 +48,7 @@ struct NAME##_info {\
 \
 static inline uint8_t q8##NAME##_helper(uint8_t a, uint8_t b, void *v##NAME_info)\
 {\
-	const struct NAME##_info *info = (const struct NAME##_info *)v##NAME_info;\
+	const struct NAME##_info *info = v##NAME_info;\
 	int a_offset = info->a_offset;\
 	int b_offset = info->b_offset;\
 	int a_mult = info->a_mult;\
@@ -88,17 +88,15 @@ static int NAME##_q8_execute_ref(struct nn_node *self, struct nn_graph *nn)\
 \
 	/*int start_time, end_time;\
 	start_time =  nn_os_get_cycles(nn);*/\
-	tensor_set_shape(out_min_tensor,1,1,1,1);\
-	tensor_set_float(out_min_tensor,0,out_min);\
-	tensor_set_shape(out_max_tensor,1,1,1,1);\
-	tensor_set_float(out_max_tensor,0,out_max);\
+	tensor_set_single_float(out_min_tensor,out_min);\
+	tensor_set_single_float(out_max_tensor,out_max);\
 \
 	info.a_offset = quantize_uint8(0.0f,a_min_float,a_max_float);\
 	info.b_offset = quantize_uint8(0.0f,b_min_float,b_max_float);\
 	info.shift = 12;\
-	info.a_mult = ((float)(1<<info.shift))*(a_level_size / out_level_size) + 0.5;\
-	info.b_mult = ((float)(1<<info.shift))*(b_level_size / out_level_size) + 0.5;\
-	info.qzero = -out_min * (255/(out_max-out_min)) + 0.5;\
+	info.a_mult = ((float)(1<<info.shift))*(a_level_size / out_level_size) + 0.5f;\
+	info.b_mult = ((float)(1<<info.shift))*(b_level_size / out_level_size) + 0.5f;\
+	info.qzero = -out_min * (255/(out_max-out_min)) + 0.5f;\
 \
 /*	\
 	printf("amin/max = [%f %f], bmin/max = [%f %f], outmin/max=[%f %f]\n",a_min_float,a_max_float,b_min_float,b_max_float,out_min,out_max);\
@@ -131,10 +129,10 @@ static int NAME##_q8_check(struct nn_node *self, struct nn_graph *nn)\
 }\
 \
 struct nn_node_ops nn_ops_for_Quantized##OPNAME##_8_ref = {\
-	NAME##_q8_execute_ref,\
-	NAME##_q8_check,\
-	node_alloc_common,\
-	node_free_common,\
+	.execute = NAME##_q8_execute_ref,\
+	.check = NAME##_q8_check,\
+	.ctor = node_alloc_common,\
+	.dtor = node_free_common,\
 };
 
 #define COMPUTE_QMAX_QMIN(OPERATOR, ACONST, BCONST, IN1, IN2, VACONST, VBCONST, OUT)\
@@ -184,7 +182,7 @@ struct nn_node_ops nn_ops_for_Quantized##OPNAME##_8_ref = {\
 	else \
 		*PTR = VAL;
 
- static inline void q##NAME##_hvx(\
+static inline void q##NAME##_hvx(\
  		uint8_t *a,\
  		uint8_t *b,\
  		uint8_t *out,\
@@ -248,15 +246,58 @@ struct nn_node_ops nn_ops_for_Quantized##OPNAME##_8_ref = {\
 	l2fetch(ptr_b+128, 128 , 128 , 1);\
  	COMPUTE_QMAX_QMIN(OPERATOR, a_const_value, b_const_value, *ptr_a++, *ptr_b++, vaconst_val, vbconst_val, vout_val)\
  	PREDICATED_STORE(qval, qPred, ptr_out++, vout_val) \
-  \
-  }
+ \
+ }
 #endif
 
 #define CREATE_HVX_OP_MIN_MAX(NAME, OPNAME, OPERATOR) \
+struct NAME##_tdata {\
+	struct nn_node *self;\
+	const struct tensor *a_tensor;\
+	const struct tensor *b_tensor;\
+	struct tensor *out_tensor;\
+	int opt_flag;\
+	struct NAME##_info *info;\
+	nn_sem_t donesem;\
+};\
+static void q##NAME##_thread_process(struct nn_graph *nn, void *vtdata) {\
+\
+	struct NAME##_tdata *td = vtdata;\
+	const struct tensor *a_tensor = td->a_tensor;\
+	const struct tensor *b_tensor = td->b_tensor;\
+	struct tensor *out_tensor = td->out_tensor;\
+	const uint8_t *a_data = a_tensor->data;\
+	const uint8_t *b_data = b_tensor->data;\
+	uint8_t *out_data = out_tensor->data;\
+	struct NAME##_info *info = td->info;\
+	int elements, a_const_value, b_const_value;\
+	struct hvx_info opt_info;\
+	uint8_t *a_data_pad;\
+	uint8_t *b_data_pad;\
+\
+	/* Look for patterns to use HVX intrinsics version of the code and broadcast/prepare the data */\
+	td->opt_flag = check_prepare_hvx_opt(nn, a_tensor, b_tensor, out_tensor, a_data, b_data, &opt_info);\
+\
+	a_data_pad = opt_info.a_data_pad;\
+	b_data_pad = opt_info.b_data_pad;\
+	elements = opt_info.elements;\
+	a_const_value = opt_info.a_const_value;\
+	b_const_value = opt_info.b_const_value;\
+	if(td->opt_flag == 1) {\
+		/* Intrinsic version of qmul */\
+		/* Tool version 7.2.12 does not support Q6_vmaskedstorentq_QAV intrinsics */\
+		/* use generated assembly from 8.1.02 */\
+		l2fetch(a_data_pad, 128 , 128 , 1);\
+		l2fetch(b_data_pad, 128 , 128 , 1);\
+		/*q##NAME##_hvx(a_data_pad, b_data_pad, out_data, info, elements, a_const_value, b_const_value);*/\
+		q##NAME##_asm(a_data_pad, b_data_pad, out_data, info, elements, a_const_value, b_const_value);\
+	}\
+	nn_sem_post(&td->donesem);\
+}\
+\
  static int NAME##_q8_execute_hvx(struct nn_node *self, struct nn_graph *nn) \
  { \
  	struct NAME##_info info;\
- 	struct hvx_info opt_info;\
  \
  	const struct tensor *a_tensor = self->inputs[0];\
  	const struct tensor *b_tensor = self->inputs[1];\
@@ -267,15 +308,6 @@ struct nn_node_ops nn_ops_for_Quantized##OPNAME##_8_ref = {\
  	struct tensor *out_tensor = self->outputs[0];\
  	struct tensor *out_min_tensor = self->outputs[1];\
  	struct tensor *out_max_tensor = self->outputs[2];\
- 	int opt_flag = 0;\
- 	uint8_t *a_data_pad;\
- 	uint8_t *b_data_pad;\
-	int elements, a_const_value, b_const_value;\
- \
-	const uint8_t *a_data = (const uint8_t *)a_tensor->data;\
-	const uint8_t *b_data = (const uint8_t *)b_tensor->data;\
-	uint8_t *out_data = (uint8_t *)out_tensor->data;\
- \
  	/*int start_time, end_time;\
  	start_time =  nn_os_get_cycles(nn);*/\
 	float a_min_float = tensor_get_float(a_min_tensor,0);\
@@ -291,17 +323,15 @@ struct nn_node_ops nn_ops_for_Quantized##OPNAME##_8_ref = {\
 	float out_level_size = (out_max - out_min)/255;\
 	int retval;\
 \
-	tensor_set_shape(out_min_tensor,1,1,1,1);\
-	tensor_set_float(out_min_tensor,0,out_min);\
-	tensor_set_shape(out_max_tensor,1,1,1,1);\
-	tensor_set_float(out_max_tensor,0,out_max);\
+	tensor_set_single_float(out_min_tensor,out_min);\
+	tensor_set_single_float(out_max_tensor,out_max);\
 \
 	info.a_offset = quantize_uint8(0.0f,a_min_float,a_max_float);\
 	info.b_offset = quantize_uint8(0.0f,b_min_float,b_max_float);\
 	info.shift = 12;\
-	info.a_mult = ((float)(1<<info.shift))*(a_level_size / out_level_size) + 0.5;\
-	info.b_mult = ((float)(1<<info.shift))*(b_level_size / out_level_size) + 0.5;\
-	info.qzero = -out_min * (255/(out_max-out_min)) + 0.5;\
+	info.a_mult = ((float)(1<<info.shift))*(a_level_size / out_level_size) + 0.5f;\
+	info.b_mult = ((float)(1<<info.shift))*(b_level_size / out_level_size) + 0.5f;\
+	info.qzero = -out_min * (255/(out_max-out_min)) + 0.5f;\
 \
 	/*\
 	printf("amin/max = [%f %f], bmin/max = [%f %f], outmin/max=[%f %f]\n",a_min_float,a_max_float,b_min_float,b_max_float,out_min,out_max);\
@@ -316,31 +346,21 @@ struct nn_node_ops nn_ops_for_Quantized##OPNAME##_8_ref = {\
 		b_level_size,\
 		b_level_size * info.b_offset - b_min_float);\
 	*/\
- 	/* Look for patterns to use HVX intrinsics version of the code and broadcast/prepare the data */\
- 	opt_flag = check_prepare_hvx_opt(nn, a_tensor, b_tensor, out_tensor, a_data, b_data, &opt_info);\
- 	a_data_pad = opt_info.a_data_pad;\
- 	b_data_pad = opt_info.b_data_pad;\
- 	elements = opt_info.elements;\
-	a_const_value = opt_info.a_const_value;\
-	b_const_value = opt_info.b_const_value;\
- \
- 	if(opt_flag == 1) {\
- \
- 		/* Intrinsic version of q##NAME */\
- 		/*t4 =  nn_os_get_cycles(nn);*/\
-		l2fetch(a_data_pad, 128 , 128 , 1);\
-		l2fetch(b_data_pad, 128 , 128 , 1);\
-		/*q##NAME##_hvx(a_data_pad, b_data_pad, out_data, &info, elements, a_const_value, b_const_value);*/\
-		q##NAME##_asm(a_data_pad, b_data_pad, out_data, &info, elements, a_const_value, b_const_value);\
- \
- /*\
- 		int i;\
- 		for(i=0;i<elements;i++){\
- 			out_data_pad[i] = OPERATOR( (((a_data_pad[i] - info.a_offset) * info.a_mult)>>info.shift)+info.qzero, (((b_data_pad[i] - info.b_offset) * info.b_mult)>>info.shift)+info.qzero );\
- 			printf("a_data=%d, b_data=%d\n",a_data_pad[i], a_data_pad[i]);\
- 			printf("out_data=0x%8x %d C out=%ld\n",out_data[i],out_data[i],out_data_pad[i]);\
- 		}\
- */\
+	\
+	struct NAME##_tdata td = {\
+		.self = self,\
+		.a_tensor = a_tensor,\
+		.b_tensor = b_tensor,\
+		.out_tensor = out_tensor,\
+		.opt_flag = 0,\
+		.info = &info,\
+	};\
+	\
+	nn_sem_init(&td.donesem,0);\
+	nn_os_work_for_vector(nn, q##NAME##_thread_process, &td);\
+	nn_sem_wait(&td.donesem);\
+	\
+	if(td.opt_flag == 1) {\
 		retval = 0;\
  	}\
  	else {\
@@ -352,10 +372,10 @@ struct nn_node_ops nn_ops_for_Quantized##OPNAME##_8_ref = {\
  }\
  \
  struct nn_node_ops nn_ops_for_Quantized##OPNAME##_8 = {\
-	NAME##_q8_execute_hvx,\
-	NAME##_q8_check,\
-	node_alloc_common,\
-	node_free_common,\
+ 	.execute = NAME##_q8_execute_hvx,\
+ 	.check = NAME##_q8_check,\
+ 	.ctor = node_alloc_common,\
+ 	.dtor = node_free_common,\
  };\
 
 #endif

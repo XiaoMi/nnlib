@@ -45,11 +45,6 @@ static int biasadd_f_execute(struct nn_node *self, struct nn_graph *nn)
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *bias_tensor = self->inputs[1];
 	struct tensor *out_tensor = self->outputs[0];
-	size_t bytes = in_tensor->shape.batches 
-		* in_tensor->shape.height
-		* in_tensor->shape.width
-		* in_tensor->shape.depth
-		* sizeof(float);
 
 	uint32_t batches = in_tensor->shape.batches;
 	uint32_t width = in_tensor->shape.width;
@@ -58,9 +53,9 @@ static int biasadd_f_execute(struct nn_node *self, struct nn_graph *nn)
 
 	int32_t stripe;
 
-	const float *in = (const float *)in_tensor->data;
-	const float *bias = (const float *)bias_tensor->data;
-	float *out = (float *)out_tensor->data;
+	const float *in = in_tensor->data;
+	const float *bias = bias_tensor->data;
+	float *out = out_tensor->data;
 
 	int32_t i;
 
@@ -74,9 +69,8 @@ static int biasadd_f_execute(struct nn_node *self, struct nn_graph *nn)
 	}
 
 	logmsg(nn,2,"biasadd execute. self=%p ",self);
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	tensor_set_shape(out_tensor,batches,height,width,depth);
-	out_tensor->data_size = bytes;
+	if( tensor_out_prepare_normal( out_tensor, batches,height,width,depth, NN_TYPE_FLOAT)!= 0 )
+		return errlog(nn,"out too small");
 
 	for (stripe = 0; stripe < width*height*batches; stripe++) {
 		for (i = 0; i < depth; i++) {
@@ -99,10 +93,10 @@ static int biasadd_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_BiasAdd_f = {
-	SFINIT(.execute, biasadd_f_execute),
-	SFINIT(  .check, biasadd_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = biasadd_f_execute,
+	.check = biasadd_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 

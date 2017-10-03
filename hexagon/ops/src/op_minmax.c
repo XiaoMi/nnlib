@@ -96,46 +96,46 @@ static int minmax_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Min_f = {
-	SFINIT(.execute, min_execute),
-	SFINIT(  .check, minmax_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = min_execute,
+	.check = minmax_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_Min_f_ref = {
-	SFINIT(.execute, min_execute),
-	SFINIT(  .check, minmax_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = min_execute,
+	.check = minmax_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_Max_f = {
-	SFINIT(.execute, max_execute),
-	SFINIT(  .check, minmax_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = max_execute,
+	.check = minmax_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_Max_f_ref = {
-	SFINIT(.execute, max_execute),
-	SFINIT(  .check, minmax_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = max_execute,
+	.check = minmax_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 
 struct nn_node_ops nn_ops_for_Minimum_f = {
-	SFINIT(.execute, minimum_execute),
-	SFINIT(  .check, minmax_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = minimum_execute,
+	.check = minmax_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_Maximum_f = {
-	SFINIT(.execute, maximum_execute),
-	SFINIT(  .check, minmax_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = maximum_execute,
+	.check = minmax_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 #if defined(__hexagon__)
@@ -148,4 +148,3 @@ CREATE_REF_OP_MIN_MAX(minimum, Minimum, min)
 
 CREATE_HVX_OP_MIN_MAX(maximum, Maximum, max)
 CREATE_HVX_OP_MIN_MAX(minimum, Minimum, min)
-

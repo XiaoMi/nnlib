@@ -54,38 +54,10 @@ static int prefree_check(struct nn_node *self, struct nn_graph *nn)
 	return errlog(nn,"PreFree node should not be checked!");
 }
 
-static struct nn_node *prefree_ctor(
-	struct nn_graph *nn,
-	uint32_t node_id,
-	op_type operation,
-	padding_type padding,
-	uint32_t num_inputs,
-	uint32_t num_outputs,
-	const struct input *inputs,
-	const struct output *outputs)
-{
-	logmsg(nn,2,"prefree node id %x ctor",node_id);
-	return node_alloc_common(
-		nn,
-		node_id,
-		operation,
-		padding,
-		num_inputs,
-		num_outputs,
-		inputs,
-		outputs);
-}
-
-static int prefree_dtor(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"prefree node %p dtor",self);
-	return node_free_common(self,nn);
-}
-
 struct nn_node_ops nn_ops_for_PreFree = {
-	SFINIT(.execute, prefree_execute),
-	SFINIT(  .check, prefree_check),
-	SFINIT(   .ctor, prefree_ctor),
-	SFINIT(   .dtor, prefree_dtor),
+	.execute = prefree_execute,
+	.check = prefree_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

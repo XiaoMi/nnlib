@@ -377,6 +377,9 @@ gvconvsum2dbbb_asm:
        } {
            sum5_sum4 += vraddub(x2fx2cx2bx28, x27x24x23x20) //[0, 9]
            z2.uw += vrmpy(y0.ub, x23x20.ub)       //[0, 9]
+       } {
+           p0 = cmp.eq(filt_width,#0)
+           if (p0.new) jump:nt .L_skip
        } 
        .balign 32
 .L_filt_width:
@@ -431,6 +434,7 @@ gvconvsum2dbbb_asm:
            z2.uw += vrmpy(y0.ub, x23x20.ub)       //[1, 9]
            if(p3) pre_x = add(pre_x, stride3_1)   //[1, 9]
        }:endloop0 
+.L_skip:
        {
            sum7_sum6 += vraddub(x3fx3cx3bx38, x37x34x33x30) //[1,10]
            z3.uw += vrmpy(y0.ub, x33x30.ub)       //[1,10]
@@ -487,16 +491,16 @@ gvconvsum2dbbb_asm:
            z0.w = vadd(z0.w, biasvec.w)           //
            q0 = vand(vpreds, sel0)                // 
            sum2 += mpyi(in_offset, sum3)          //#1
-       } {
+       } /*{
            max_shr = memw(sp+#31<<2)		  // 20<<2+11<<2
-       } {
+       } */{
            one = mux(p0, #1, #16)                 //#1
            x1 = vsplat(sum2)                      //#1
            y1 = rndvec                            //#1y1 = 0x8000
            p1 = cmp.gt(col_count, #2)             //#2
-       } {
+       } /*{
            z0.w = vasr(z0.w, max_shr)
-       } {
+       } */{
            pre_x = add(ptr_x0, PREFETCH)          //pre_x, next_outputs)      // 
            y0.w += vmpyie(z0.w, recipvec.uh)      //
            if(p0)memw(ptr_datasum++#1<<2) = sum2  //#1
@@ -511,9 +515,9 @@ gvconvsum2dbbb_asm:
            maxe.w = vmax(maxe.w, z1.w)            //#1
            sum4 += mpyi(in_offset, sum5)          //#2
            y2 = rndvec                            //#2y2 = 0x8000
-       } {
+       } /*{
            x1.w = vasr(x1.w, max_shr)
-       } {
+       }*/ {
            y1.w += vmpyie(x1.w, recipvec.uh)      //#1
            if(p1)memw(ptr_datasum++#1<<2) = sum4  //#2
            p2 = cmp.gt(col_count, #3)             //#3
@@ -538,9 +542,9 @@ gvconvsum2dbbb_asm:
            sum6 = zsum                            //#3
            sum7 = add(sum6, sum7)                 //#3
            sel1 = vsplatb(sel1)                   //#102 -> 02020202
-       } {
+       } /*{
            x2.w = vasr(x2.w, max_shr)
-       } {
+       }*/ {
            maxe.w = vmax(maxe.w, z2.w)            //#2
            y2.w += vmpyie(x2.w, recipvec.uh)      //#2
            sum6 += mpyi(in_offset, sum7)          //#3
@@ -559,9 +563,9 @@ gvconvsum2dbbb_asm:
            if(p2)memw(ptr_datasum++#1<<2) = sum6  //#3
            x3.w = vadd(z3.w, biasvec.w)           //#3
            y2.h = vpacko(y2.w, y2.w)              //#2>>16
-       } {
+       } /* {
            x3.w = vasr(x3.w, max_shr)
-       } {
+       } */ {
            sel2 = extractu(tmp_ptr_z, #2, #5)         //#2
            y3.w += vmpyie(x3.w, recipvec.uh)      //#3
            if(p1)tmp_ptr_z = add(tmp_ptr_z, mstride) //#2

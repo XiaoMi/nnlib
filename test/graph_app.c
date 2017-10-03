@@ -36,6 +36,7 @@
 
 /*
  */
+#define DONT_REDEF_ALLOC 1
 #include "hexagon_nn.h"
 #include <stdlib.h>
 #include <stdio.h>
@@ -56,12 +57,19 @@
 #endif
 
 #ifdef ANDROID
+#if 0
 #include "adspmsgd.h"
+#else
+#define adspmsgd_start(_a, _b, _c)
+#define adspmsgd_stop()
+#endif
 #include "dspCV.h"
 #include "AEEStdErr.h"
 #include <sys/types.h>
 #include <sys/time.h>
 #include "rpcmem.h" // RCPMEM_HEAP_DEFAULT?
+#define ION_HEAP_ID_SYSTEM 25
+
 void fastrpc_setup()
 {
 	int MCPS = 1000;
@@ -70,6 +78,7 @@ void fastrpc_setup()
 	int retVal;
 
 	adspmsgd_start(0,RPCMEM_HEAP_DEFAULT,4096);
+	rpcmem_init();
 	dspCV_Attribute attrib[] = {
 		{DSP_TOTAL_MCPS, MCPS},
 		{DSP_MCPS_PER_THREAD, MCPS / 2},
@@ -87,8 +96,9 @@ void fastrpc_setup()
 
 void fastrpc_teardown()
 {
-	adspmsgd_stop();
 	dspCV_deinitQ6();
+	rpcmem_deinit();
+	adspmsgd_stop();
 }
 
 unsigned long long GetTime(void)
@@ -105,6 +115,8 @@ unsigned long long GetTime(void)
 static inline void fastrpc_setup() {}
 static inline void fastrpc_teardown() {}
 //static inline unsigned long long GetTime() { return 0ULL; }
+#define rpcmem_free(a) free((a))
+#define rpcmem_alloc(a, b, c) malloc(c)
 
 #endif
 
@@ -204,39 +216,34 @@ static void pprint_floats(float *values, int n_floats)
 	printf("\n");
 }
 
-static int run(uint32_t id, void *input, int elementsize, int width, int height, struct options *options, struct basicperf *basicperf)
+static int run(uint32_t id, void *input, int elementsize, int width, int height, struct options *options, struct basicperf *basicperf, void *output, int is_last)
 {
 	/* TBD: output buffer */
-	void *output;
+	//void *output;
 	float msecs;
-	unsigned long long int pcycles;
+	unsigned long long int pcycles = 0;
 	uint32_t output_size = OUTPUT_SIZE;
-	uint32_t sum = 0;
-	const char *ctmp = input;
-	int i;
-	printf("Run!\n");
-	for (i = 0; i < height*width*options->depth*elementsize; i++) {
-		sum += *ctmp++;
-	}
-	printf("sum=%d\n",(int)sum);
-	if ((output = malloc(OUTPUT_SIZE)) == NULL) {
-		return -1;
-	}
-	printf("Executing!\n");
+	int ret;
+	if (!options->benchmark) printf("Run!\n");
 	/* execute */
 	RESET_PMU();
-	graph_execute(id,output,&output_size,input,elementsize,options->depth,width,height,&msecs,&pcycles);
+	ret = graph_execute(id,output,&output_size,input,elementsize,options->depth,width,height,&msecs,&pcycles,options);
+	if (is_last) {
+		DUMP_PMU();
+	}
 	/* Accumulate basic perf */
 	basicperf->executions++;
 	basicperf->total_msecs += msecs;
 	basicperf->total_pcycles += pcycles;
-	printf("output size=%d\n",(int)output_size);
+#ifdef __hexagon__
+	if (options->node_perf && !ret) print_node_perf(id);
+#endif
+	if (!options->benchmark) printf("output size=%d\n",(int)output_size);
 	/* If option says so, pretty print float data in some way */
 	if (options->pprint_floats) pprint_floats(output,output_size/sizeof(float));
 	/* If option says so, pretty print imagenet data */
 	if (options->pprint_imagenet) imagenet_top5(output,output_size/sizeof(float));
-	free(output);
-	return 0;
+	return ret;
 }
 
 static void do_a_reorder(char *data, int elementsize, int depth, const char *layer_reorder)
@@ -277,7 +284,7 @@ static int do_layer_reorder(char *data, int elementsize, int depth, int area, co
 	return 0;
 }
 
-static int load_and_run(uint32_t id, const char *filename, struct options *options, struct basicperf *basicperf, unsigned long long int *appreported)
+static int load_and_run(uint32_t id, const char *filename, struct options *options, struct options *assumed, struct basicperf *basicperf, unsigned long long int *appreported)
 {
 	FILE *f;
 	int elementsize = options->elementsize;
@@ -290,8 +297,14 @@ static int load_and_run(uint32_t id, const char *filename, struct options *optio
 	int elements;
 	int area;
 	void *data;
+	void *output;
 	int i;
 	int ret;
+	unsigned long long int lastreport = 0;
+	if ((output = rpcmem_alloc(ION_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, OUTPUT_SIZE)) == NULL) {
+		printf("error: malloc fail");
+		return -1;
+	}
 	if ((f = fopen(filename,"rb")) == NULL) {
 		printf("File not found: %s",filename);
 		return -1;
@@ -303,6 +316,8 @@ static int load_and_run(uint32_t id, const char *filename, struct options *optio
 	area = elements / depth;
 	if (height * width == 0) {
 		height = width = sqrt(area);
+		assumed->height = height;
+		assumed->width = width;
 	}
 	if ((filesize % elementsize != 0)
 		|| (elements % depth != 0)
@@ -321,7 +336,7 @@ static int load_and_run(uint32_t id, const char *filename, struct options *optio
 	}
 	printf("filesize=%d elementsize=%d height=%d width=%d depth=%d\n",
 		filesize,elementsize,height,width,depth);
-	if ((data = malloc(filesize)) == NULL) {
+	if ((data = rpcmem_alloc(ION_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, filesize)) == NULL) {
 		printf("malloc failed\n");
 		return -1;
 	}
@@ -337,13 +352,17 @@ static int load_and_run(uint32_t id, const char *filename, struct options *optio
 		}
 	}
 	for (i = 0; i < iters; i++) {
-		if ((ret = run(id,data,elementsize,width,height,options,basicperf)) != 0) {
+		if ((ret = run(id,data,elementsize,width,height,options,basicperf,output,(i==iters-1))) != 0) {
 			printf("run failed: %d\n",ret);
 			break;
 		}
-		*appreported = basicperf->total_pcycles - *appreported; // only care about last one
+		*appreported = basicperf->total_pcycles - lastreport; // only care about last one
+		lastreport = basicperf->total_pcycles;
 	}
-	free(data);
+	if (!options->benchmark) {
+		rpcmem_free(output);
+		rpcmem_free(data);
+	}
 	return ret;
 }
 
@@ -352,11 +371,13 @@ int main(int argc, const char **argv)
 	int i;
 	uint32_t graph_id;
 	struct options options;
+	struct options assumed;
 	struct basicperf basicperf;
 	unsigned long long int appreported = 0;
 
 	memset(&basicperf,0,sizeof(basicperf));
 	option_init(&options);
+	option_init(&assumed);
 
 	/* Give help if nothing is specified. */
 	if (argc <= 1) {
@@ -375,7 +396,20 @@ int main(int argc, const char **argv)
 	/* Set up environment */
 	fastrpc_setup();
 	hexagon_nn_config();
-	graph_id = graph_setup(options.debug);
+	if ((graph_id = graph_setup(options.debug)) == 0) {
+		return 1;
+	}
+
+	/* Teardown and rebuild the graph as many times as desired */
+	int rebuild = options.graph_rebuild;
+	while (rebuild-->0) {
+		printf("Teardown and rebuild graph\n");
+		graph_teardown(graph_id);
+		if ((graph_id = graph_setup(options.debug)) == 0) {
+			return 1;
+		}
+	}
+
 
 	for (i = 1; i < argc; ) {
 		/* Skip flags */
@@ -385,18 +419,43 @@ int main(int argc, const char **argv)
 		}
 		/* Process each test */
 		printf("Using <%s>\n",argv[i]);
-		if (load_and_run(graph_id,argv[i],&options,&basicperf, &appreported) != 0) {
+		if (load_and_run(graph_id,argv[i],&options,&assumed,&basicperf, &appreported) != 0) {
 			return -1;
 		}
 		i++;
 	}
 
-	DUMP_PMU();
-	printf("AppReported: %lld\n", appreported);
+	if (!options.benchmark) printf("AppReported: %llu\n", appreported);
+	if (options.benchmark) return 0;
 
 #ifdef BAIL_EARLY
 	goto out;
 #endif
+
+	if (options.bus_bw) {
+		if (options.height * options.width == 0) {
+			printf("For PMU run, please specify height/width\n");
+			return -1;
+		}
+		graph_get_a_perf(graph_id,
+			options.elementsize,
+			options.depth,
+			options.width,
+			options.height,
+			0);
+		graph_get_a_perf(graph_id,
+			options.elementsize,
+			options.depth,
+			options.width,
+			options.height,
+			63);
+		graph_get_a_perf(graph_id,
+			options.elementsize,
+			options.depth,
+			options.width,
+			options.height,
+			70);
+	}
 
 	if (options.perfdump) {
 		printf("%f msecs for %d iterations (%f / iter)\n",
@@ -406,6 +465,10 @@ int main(int argc, const char **argv)
 	}
 
 	if (options.pmu) {
+		if (options.height * options.width == 0) {
+			options.height = assumed.height;
+			options.width = assumed.width;
+		}
 		if (options.height * options.width == 0) {
 			printf("For PMU run, please specify height/width\n");
 			return -1;

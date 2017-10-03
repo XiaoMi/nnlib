@@ -42,10 +42,10 @@
 
 static int resizenear_f_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	const struct tensor *in_tensor = (const struct tensor *)self->inputs[0];
-	const struct tensor *newdim_tensor = (const struct tensor *)self->inputs[1];
-	struct tensor *out_tensor = (struct tensor *)self->outputs[0];
-	const int32_t *newdims = (const int32_t *)newdim_tensor->data;
+	const struct tensor *in_tensor = self->inputs[0];
+	const struct tensor *newdim_tensor = self->inputs[1];
+	struct tensor *out_tensor = self->outputs[0];
+	const int32_t *newdims = newdim_tensor->data;
 	const int32_t newheight = newdims[0];
 	const int32_t newwidth = newdims[1];
 	const int32_t b_in = in_tensor->shape.batches;
@@ -57,8 +57,8 @@ static int resizenear_f_execute(struct nn_node *self, struct nn_graph *nn)
 	uint32_t close_h;
 	uint32_t close_w;
 	int b,h,w;
-	char *out = (char *)out_tensor->data;
-	const float *in = (const float *)in_tensor->data;
+	char *out = out_tensor->data;
+	const float *in = in_tensor->data;
 	const float *bstart;
 	const float *hstart;
 	const float *wstart;
@@ -96,9 +96,9 @@ static int resizenear_f_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_ResizeNearestNeighbor_f = {
-	SFINIT(.execute, resizenear_f_execute),
-	SFINIT(  .check, resizenear_f_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = resizenear_f_execute,
+	.check = resizenear_f_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

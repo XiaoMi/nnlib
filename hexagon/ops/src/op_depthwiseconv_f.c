@@ -70,15 +70,10 @@ static int depthwiseconv2d_execute_f(struct nn_node *self, struct nn_graph *nn)
 	float *outstripe;
 
 	int32_t out_batches = in_batches;
-	int32_t out_width = nn_pad_compute_outsize(in_width,filt_width,stride_width,self->padding);
-	int32_t out_height = nn_pad_compute_outsize(in_height,filt_height,stride_height,self->padding);
+	int32_t adj_x, adj_y;
+	int32_t out_width = nn_pad_compute_outsize_and_padbefore(in_width,filt_width,stride_width,self->padding, & adj_x);
+	int32_t out_height = nn_pad_compute_outsize_and_padbefore(in_height,filt_height,stride_height,self->padding, & adj_y);
 	int32_t out_depth = in_depth * filt_batches;
-
-	int32_t out_elements = out_batches*out_height*out_width*out_depth;
-	size_t out_size = out_elements*sizeof(float);
-
-	int32_t adj_x = nn_pad_compute_before(out_width,filt_width,stride_width,self->padding);
-	int32_t adj_y = nn_pad_compute_before(out_height,filt_height,stride_height,self->padding);
 
 	int32_t batch;
 	int32_t out_y;
@@ -100,14 +95,13 @@ static int depthwiseconv2d_execute_f(struct nn_node *self, struct nn_graph *nn)
 	logmsg(nn,2,"depthwiseconv2d f padding %d",self->padding);
 	logmsg(nn,2,"expected out shape %dx%dx%dx%d",out_batches,out_height,out_width,out_depth);
 	if (in_depth != filt_depth) return errlog(nn,"oops, depth != depth");
-	if (out_size > (out_tensor->max_size)) {
-		return errlog(nn,"output too small, %d < %d",out_tensor->max_size,out_size);
-	}
+
 	if (stride_tensor->shape.batches != 1) return errlog(nn,"bad stride batch");
 	if (stride_tensor->shape.depth != 1) return errlog(nn,"bad stride depth");
 
-	tensor_set_shape(out_tensor,out_batches,out_height,out_width,out_depth);
-	out_tensor->data_size = out_size;
+	if ( tensor_out_prepare_normal( out_tensor, out_batches,out_height,out_width,out_depth, NN_TYPE_FLOAT)!=0 ){
+		return errlog(nn,"output too small");
+	}
 
 	for (batch = 0; batch < out_batches; batch++) {
 	  for (out_y = 0; out_y < out_height; out_y++) {

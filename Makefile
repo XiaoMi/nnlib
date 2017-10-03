@@ -1,6 +1,6 @@
 # You can change this line to be another graph setup file
-GRAPHINIT := test/graphinit_med.c
-GRAPHINIT := /prj/dsp/qdsp6/arch/cnn/setup/inceptionv3_uint8in.c
+#GRAPHINIT := test/graphinit_med.c
+GRAPHINIT := /prj/dsp/qdsp6/arch/cnn/setup/inceptionv3_rank8.c
 #GRAPHINIT := test/graphinit_test.c
 
 # You can change this line to be image data

@@ -42,34 +42,46 @@
 #include <nn_graph.h>
 #include <stdio.h>
 #include <stdint.h>
+//#ifdef USE_OS_QURT
+#if 0
+#include <HAP_farf.h>
+#ifndef FARF_ITERS
+#define FARF_ITERS 1
+#endif
+#endif
 
 void logv(const char *filename, unsigned int line, struct nn_graph *nn, int level, const char *fmt, va_list ap)
 {
-#if 1
+#ifdef USE_OS_QURT
 	char *pos;
 	uint32_t bytes_left;
 	uint32_t total_bytes = 0;
 	int printbytes;
+	nn_mutex_lock(&nn->log_mutex);
 	pos = nn->logbuf + nn->logbuf_pos;
 	bytes_left = nn->logbuf_size - nn->logbuf_pos;
-	if ((printbytes = snprintf(pos,bytes_left,"%s:%d:",filename,line)) >= bytes_left) return;
+	if ((printbytes = snprintf(pos,bytes_left,"%s:%d:",filename,line)) >= bytes_left) goto done;
 	bytes_left -= printbytes;
 	pos += printbytes;
 	total_bytes += printbytes;
-	if ((printbytes = vsnprintf(pos,bytes_left,fmt,ap)) >= bytes_left) return;
+	if ((printbytes = vsnprintf(pos,bytes_left,fmt,ap)) >= bytes_left) goto done;
 	bytes_left -= printbytes;
 	pos += printbytes;
 	total_bytes += printbytes;
-	if ((printbytes = snprintf(pos,bytes_left,"\n")) >= bytes_left) return;
+	if ((printbytes = snprintf(pos,bytes_left,"\n")) >= bytes_left) goto done;
 	bytes_left -= printbytes;
 	pos += printbytes;
 	total_bytes += printbytes;
 	nn->logbuf_pos += total_bytes;
+done:
+	nn_mutex_unlock(&nn->log_mutex);
 #else
 	/* EJP: for now, just printf */
+	nn_mutex_lock(&nn->log_mutex);
 	printf("%s:%d:",filename,line);
 	vprintf(fmt,ap);
 	printf("\n");
+	nn_mutex_unlock(&nn->log_mutex);
 #endif
 }
 

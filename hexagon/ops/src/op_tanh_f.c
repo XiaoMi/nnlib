@@ -39,30 +39,23 @@
 #include <quantize.h>
 #include <math.h>
 
+
+
+static void tanh_operator( float * pout, float const *pin, int elements, void *info)
+{
+	int i;
+	for (i = 0; i < elements; i++) {
+		pout[i] = tanhf(pin[i]);
+	}
+}
+
 static int tanh_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	const struct tensor *in_tensor = self->inputs[0];
-	struct tensor *out_tensor = self->outputs[0];
-	size_t elements = in_tensor->shape.batches 
-		* in_tensor->shape.height
-		* in_tensor->shape.width
-		* in_tensor->shape.depth;
-	size_t bytes = elements * sizeof(float);
-	const float *in_data = (const float *)in_tensor->data;
-	float *out_data = (float *)out_tensor->data;
-	uint32_t i;
-
 	logmsg(nn,2,"tanh execute. self=%p ",self);
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	out_tensor->shape = in_tensor->shape;
-	out_tensor->data_size = bytes;
-
-	for (i = 0; i < elements; i++) {
-		out_data[i] = tanhf(in_data[i]);
-	}
-
-	logmsg(nn,2,"tanh %p done",self);
-	return 0;
+	int res = nn_generic_unary_float_op( self,nn, tanh_operator, NULL,0);
+	if (res == 0)
+		logmsg(nn,2,"tanh %p done",self);
+	return res;
 }
 
 static int tanh_check(struct nn_node *self, struct nn_graph *nn)
@@ -75,9 +68,9 @@ static int tanh_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_Tanh_f = {
-	SFINIT(.execute, tanh_execute),
-	SFINIT(  .check, tanh_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = tanh_execute,
+	.check = tanh_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

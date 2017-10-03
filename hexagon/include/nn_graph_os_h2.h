@@ -42,14 +42,38 @@
 #define RESET_PMU() __asm__ __volatile__ (" r0 = #0x48 ; trap0(#0); \n" : : : "r0","r1","r2","r3","r4","r5","r6","r7","memory")
 #define DUMP_PMU() __asm__ __volatile__ (" r0 = #0x4a ; trap0(#0); \n" : : : "r0","r1","r2","r3","r4","r5","r6","r7","memory")
 
+#ifndef ARCHV
+#define ARCHV __HEXAGON_ARCH__
+#endif
+
 #include <h2.h>
 #endif
 struct nn_graph;
 typedef h2_sem_t nn_sem_t;
 typedef h2_mutex_t nn_mutex_t;
-typedef struct nn_pipe nn_pipe_t;
+typedef h2_pipe_t nn_pipe_t;
+typedef pthread_t nn_thread_t;
+typedef pthread_attr_t nn_thread_attr_t;
 
 #include "nn_graph_pipe.h"
+
+static inline int nn_thread_join(nn_thread_t id, void **retval) { return pthread_join(id,retval); }
+static inline int nn_thread_attr_init(nn_thread_attr_t *attrs) { return pthread_attr_init(attrs); }
+static inline int nn_thread_create(
+	struct nn_graph *nn,
+	nn_thread_t *tid,
+	const nn_thread_attr_t *attrs,
+	void *(*f)(void *),
+	void *arg) 
+{
+	return pthread_create(tid,attrs,f,arg);
+}
+static inline int nn_thread_attr_setstack(nn_thread_attr_t *attrs, void *stackaddr, size_t stacksize)
+{
+	if (stackaddr == NULL) return pthread_attr_setstacksize(attrs,stacksize);
+	return pthread_attr_setstack(attrs,stackaddr,stacksize);
+}
+
 
 static inline void nn_mutex_init(nn_mutex_t *mutex) { h2_mutex_init_type(mutex,H2_MUTEX_PLAIN); }
 static inline void nn_mutex_lock(nn_mutex_t *mutex) {h2_mutex_lock(mutex); }
@@ -60,17 +84,33 @@ static inline void nn_sem_post(nn_sem_t *sem) { h2_sem_up(sem); }
 static inline void nn_sem_wait(nn_sem_t *sem) { h2_sem_down(sem); }
 static inline nn_pipe_t *nn_pipe_alloc(struct nn_graph *nn, uint32_t pipe_elements) 
 {
-	return nn_pipe_alloc_portable(nn,pipe_elements);
+	return h2_pipe_alloc(sizeof(h2_pipe_t)+sizeof(h2_pipe_data_t)*pipe_elements);
 }
+static inline void nn_pipe_free(nn_pipe_t *pipe) { h2_pipe_free(pipe); }
 static inline void nn_pipe_send(nn_pipe_t *pipe, unsigned long long int val)
 {
-	nn_pipe_send_portable(pipe,val);
+	h2_pipe_send(pipe,val);
 }
-static inline unsigned long long int nn_pipe_recv(nn_pipe_t *pipe) { return nn_pipe_recv_portable(pipe); }
+
+static inline unsigned long long int nn_os_get_guest_pmucnt10()
+{
+	unsigned long long int ret;
+	asm volatile (" %0 = g27:26 " : "=r"(ret));
+	return ret;
+}
+
+static inline unsigned long long int nn_pipe_recv(nn_pipe_t *pipe) { return h2_pipe_recv(pipe); }
 static inline void nn_os_hvx_power_on(struct nn_graph *nn) {};
 static inline void nn_os_hvx_power_off(struct nn_graph *nn) {};
-static inline uint64_t nn_os_get_cycles(struct nn_graph *nn) { return h2_get_core_pcycles(); }
-static inline uint64_t nn_os_get_perfcount(struct nn_graph *nn) { return nn_os_get_cycles(nn); }
+static inline uint64_t nn_os_get_cycles(struct nn_graph *nn) {
+	uint64_t retval = 0;
+	asm volatile ("");
+	retval = h2_get_core_pcycles();
+	asm volatile ("");
+	return retval;
+}
+uint64_t nn_os_get_perfcount(struct nn_graph *nn);
+
 int nn_os_vector_acquire();
 void nn_os_vector_release(int idx);
 void nn_os_vector_init();

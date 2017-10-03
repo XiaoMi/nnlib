@@ -49,8 +49,7 @@ static int addn_execute(struct nn_node *self, struct nn_graph *nn)
 	uint32_t w = in_tensor->shape.width;
 	uint32_t d = in_tensor->shape.depth;
 	size_t elements = b*h*w*d;
-	size_t bytes = elements * sizeof(float);
-	float *out_data = (float *)out_tensor->data;
+	float *out_data = out_tensor->data;
 	float sum;
 	uint32_t i,j;
 
@@ -61,9 +60,9 @@ static int addn_execute(struct nn_node *self, struct nn_graph *nn)
 		if (ins[i]->shape.width != w) return errlog(nn,"shape mismatch");
 		if (ins[i]->shape.depth != d) return errlog(nn,"shape mismatch");
 	}
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	out_tensor->shape = in_tensor->shape;
-	out_tensor->data_size = bytes;
+	if(  tensor_out_prepare_normal_fromshape( out_tensor, &in_tensor->shape, NN_TYPE_FLOAT)!= 0){
+		 return errlog(nn,"out too small");
+	}
 
 	for (i = 0; i < elements; i++) {
 		sum = 0.0f;
@@ -87,9 +86,9 @@ static int addn_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_AddN_f = {
-	SFINIT(.execute, addn_execute),
-	SFINIT(  .check, addn_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = addn_execute,
+	.check = addn_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

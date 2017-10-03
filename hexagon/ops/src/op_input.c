@@ -44,24 +44,45 @@
  * This contains the code for an input node.
  */
 
-static int input_execute(struct nn_node *self, struct nn_graph *nn)
+static void input_execute_worker(struct nn_graph *nn, void *vself)
 {
-	logmsg(nn,2,"output execute. self=%p ",self);
+	struct nn_node *self = vself;
 	int i;
 	struct tensor *out;
 	const struct tensor *in;
 	/* Copy input tensor to output */
-	if (nn->n_inputs != self->n_outputs) return errlog(nn,"oops, input #");
+	logmsg(nn,2,"input execute. self=%p ",self);
 	for (i = 0; i < self->n_outputs; i++) {
 		out = self->outputs[i];
 		in = &nn->inputs[i];
 		/* Warning! Inputs come in as max_size not data_size! */
-		if (out->max_size < in->max_size) return errlog(nn,"out too small: %d < %d",out->max_size,in->max_size);
+		logmsg(nn,9,"in: [%d,%d,%d,%d] size=%d",
+			in->shape.batches,
+			in->shape.height,
+			in->shape.width,
+			in->shape.depth,
+			in->max_size);
+		if (out->max_size < in->max_size) {
+			logmsg(nn,0,"out too small");
+			continue;
+		}
 		out->shape = in->shape;
 		out->data_size = in->max_size;
 		vmemcpy_asm(out->data,in->data,in->max_size);
 	}
+	nn_sem_post(self->opaque);
 	logmsg(nn,2,"input %d tensors",nn->n_inputs);
+}
+
+static int input_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	if (nn->n_inputs != self->n_outputs) return errlog(nn,"oops, input #");
+	nn_sem_t donesem;
+	nn_sem_init(&donesem,0);
+	self->opaque = &donesem;
+	nn_os_work_for_vector(nn,input_execute_worker,self);
+	nn_sem_wait(&donesem);
+	self->opaque = NULL;
 	return 0;
 }
 
@@ -79,9 +100,9 @@ static int input_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_INPUT = {
-	SFINIT(.execute, input_execute),
-	SFINIT(  .check, input_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = input_execute,
+	.check = input_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

@@ -144,7 +144,7 @@ static int lrn_8_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	float in_max = tensor_get_float(in_max_tensor,0);
 	const float in_step = (in_max-in_min)/255.0f;
 	float in_data;
-	uint8_t *in = (uint8_t *)in_tensor->data;
+	uint8_t *in = in_tensor->data;
 	
 	struct tensor *out_tensor = self->outputs[0];
 	struct tensor *out_min_tensor = self->outputs[1];
@@ -152,8 +152,8 @@ static int lrn_8_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	float out_min = 0.0f;
 	float out_max = 0.0f;
 	float out_data;
-	float *tmpdata = (float *)nn->scratch;
-	uint8_t *out = (uint8_t *)out_tensor->data;
+	float *tmpdata = nn->scratch;
+	uint8_t *out = out_tensor->data;
 	
 	const int32_t window_size = (int32_t) tensor_get_float(shape_tensor, 0);
 	const float scaling = alpha / (float)window_size;
@@ -172,7 +172,7 @@ static int lrn_8_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	int32_t i;
 	
 	/* check parameters and report errors to skip calc */
-	if (in_tensor->data_size > (out_tensor->max_size)) {
+	if( tensor_out_prepare_normal_fromshape( out_tensor, &in_tensor->shape, NN_TYPE_QUINT8)!=0){
 		return errlog(nn,"output too small, %d < %d",
 			out_tensor->max_size,
 			in_tensor->data_size);
@@ -187,13 +187,10 @@ static int lrn_8_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	int start_time =  nn_os_get_cycles(nn);
 #endif
 	
-	/* set output shape/size */
-	out_tensor->shape = in_tensor->shape;
-	out_tensor->data_size = in_tensor->data_size;
 	
 	/* Use elementwise calc */
 	for (b = 0; b < batches; b++) {
-	  tmpdata = (float *)nn->scratch;
+	  tmpdata = nn->scratch;
 	  for (y_start = 0; y_start < height; y_start++) {
 	    for (x_start = 0; x_start < width; x_start++) {
 	      for (z_start = 0; z_start < depth; z_start++) {
@@ -206,8 +203,8 @@ static int lrn_8_execute_ref(struct nn_node *self, struct nn_graph *nn)
 			/* then quantize and write output value */
 			in_data = in_min + in_step * *in++;
 			lrn_multiplier = compute_ref_lrn_at(
-							(int16_t *)nn->scratch,
-							(const uint8_t *)in_tensor->data,
+							nn->scratch,
+							in_tensor->data,
 							in_min,
 							in_max,
 							b,
@@ -230,27 +227,26 @@ static int lrn_8_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	      }
 	    }
 	  }
-	  tmpdata = (float *)nn->scratch;
+	  tmpdata = nn->scratch;
 	  for (i = 0; i < height*width*depth; i++) {
 	    *out++ = quantize_uint8(*tmpdata++,out_min,out_max);
 	  }
 	}
 	
 	/* report output min/max */
-	tensor_set_shape(out_min_tensor,1,1,1,1);
-	tensor_set_float(out_min_tensor,0,out_min);
-	out_min_tensor->data_size = sizeof(float);
-	tensor_set_shape(out_max_tensor,1,1,1,1);
-	tensor_set_float(out_max_tensor,0,out_max);
-	out_max_tensor->data_size = sizeof(float);
+	tensor_set_single_float( out_min_tensor, out_min);
+	tensor_set_single_float( out_max_tensor, out_max);
+
 #ifdef DEBUG_PRINT_LRN_REF_PERFORMANCE
 	int end_time =  nn_os_get_cycles(nn);
 	int elem_size = elemcount;
-	printf("qlrn ref cycles = %d (elements = %d)\n", (end_time-start_time), elem_size);
+	logmsg(nn, 2, "qlrn ref cycles = %d (elements = %d)\n", (end_time-start_time), elem_size);
 #endif
 	
 	return 0;
 }
+
+#if 0
 
 struct tdata {
 	struct nn_node *self;
@@ -260,11 +256,10 @@ struct tdata {
 	void * iextraptr;
 	void * optr;
 	void * oextraptr;
-	void * minptr;
 	void * maxptr;
+	void * minptr;
 	void * padfillptr;
 	void * padfillextraptr;
-	int32_t elemfunctusecount;
 	int32_t arg01;
 	int32_t arg02;
 	int32_t arg03;
@@ -272,17 +267,55 @@ struct tdata {
 	int32_t arg05;
 	int32_t arg06;
 	int32_t arg07;
+	int32_t elemfunctusecount;
 };
 
-static inline void copy_thread_args(struct tdata * othread, struct tdata ithread)
+static inline void set_thread_pointers(struct tdata * td, void * iptr, void * iextraptr, void * optr, void * oextraptr,
+	void * maxptr, void * minptr, void * padfillptr, void * padfillextraptr)
 {
-	othread->arg01 = ithread.arg01;
-	othread->arg02 = ithread.arg02;
-	othread->arg03 = ithread.arg03;
-	othread->arg04 = ithread.arg04;
-	othread->arg05 = ithread.arg05;
-	othread->arg06 = ithread.arg06;
-	othread->arg07 = ithread.arg07;
+	td->iptr = iptr;
+	td->iextraptr = iextraptr;
+	td->optr = optr;
+	td->oextraptr = oextraptr;
+	td->maxptr = maxptr;
+	td->minptr = minptr;
+	td->padfillptr = padfillptr;
+	td->padfillextraptr = padfillextraptr;
+} 
+
+static inline void set_thread_args(struct tdata * td, int32_t a1, int32_t a2, int32_t a3, int32_t a4, int32_t a5, int32_t a6, int32_t a7)
+{
+	td->arg01 = a1;
+	td->arg02 = a2;
+	td->arg03 = a3;
+	td->arg04 = a4;
+	td->arg05 = a5;
+	td->arg06 = a6;
+	td->arg07 = a7;
+} 
+
+static inline void copy_thread_args(struct tdata * otd, const struct tdata * itd)
+{
+	otd->arg01 = itd->arg01;
+	otd->arg02 = itd->arg02;
+	otd->arg03 = itd->arg03;
+	otd->arg04 = itd->arg04;
+	otd->arg05 = itd->arg05;
+	otd->arg06 = itd->arg06;
+	otd->arg07 = itd->arg07;
+} 
+
+static inline void execute_threads(struct tdata * tds, int32_t td_num, struct nn_graph *nn, void (*f)(struct nn_graph *, void *))
+{
+	for (int32_t td_cur = 0; td_cur < td_num; td_cur++) {
+		nn_sem_init(&tds[td_cur].donesem, 0);
+	}
+	for (int32_t td_cur = 0; td_cur < td_num; td_cur++) {
+		nn_os_work_for_vector(nn, f, &tds[td_cur]);
+	}
+	for (int32_t td_cur = 0; td_cur < td_num; td_cur++) {
+		nn_sem_wait(&tds[td_cur].donesem);
+	}
 } 
 
 static inline void update_q8_min_max_params(int32_t qinzero, float step, float *pmin, float *pmax)
@@ -397,11 +430,11 @@ static int32_t compute_qlrn_sum_sq_scalar_hvx_at(
 static void compute_qlrn_sum_sq_vector_hvx(struct nn_graph *nn, void *vinfo)
 {
 	/* parameters */
-	struct tdata *info = (struct tdata *)vinfo;
-	uint8_t *in = (uint8_t *)(info->iptr);
-	uint8_t *in_pad = (uint8_t *)(info->iextraptr);
-	int32_t *out = (int32_t *)(info->optr);
-	int32_t *out_pad = (int32_t *)(info->oextraptr);
+	struct tdata * info = vinfo;
+	uint8_t * in = (uint8_t *)(info->iptr);
+	uint8_t * in_pad = (uint8_t *)(info->iextraptr);
+	int32_t * out = (int32_t *)(info->optr);
+	int32_t * out_pad = (int32_t *)(info->oextraptr);
 	int32_t elemidx = (int32_t)(info->elemfunctusecount);
 	int32_t depth = (int32_t)(info->arg01);
 	int32_t window_depth = (int32_t)(info->arg02);
@@ -523,7 +556,7 @@ static void compute_qlrn_sum_sq_vector_hvx(struct nn_graph *nn, void *vinfo)
 static void compute_qlrn_beta_mult_log_vector_hvx(struct nn_graph *nn, void *vinfo)
 {
 	/* parameters */
-	struct tdata *info = (struct tdata *)vinfo;
+	struct tdata * info = vinfo;
 	HVX_Vector * pvsumsq  = (HVX_Vector *)(info->iptr);
 	HVX_Vector * pvbasefract = (HVX_Vector *)(info->optr);
 	HVX_Vector * pvbaseinteg = (HVX_Vector *)(info->oextraptr);
@@ -678,7 +711,7 @@ static void compute_qlrn_beta_mult_log_vector_hvx(struct nn_graph *nn, void *vin
 	// note scalar loop should be ok to fill 32bit values in pad region
 	// loop only runs for count of (elemusecountwithalignment-elemcount)
 	// which would in worst case be count of vectorsize/sizeof(int32_t)
-	if (info->whoami == 1) {
+	if (info->whoami == 0) {
 		for (int32_t count = 0; count < elempadcount; count++) {
 			// fill exp2in fract part padded region with extreme scalar value (max-val-fill since min-search)
 			*pfendpad++ = INT32_MAX;
@@ -733,7 +766,7 @@ static void compute_qlrn_beta_mult_log_vector_hvx(struct nn_graph *nn, void *vin
 static void compute_qlrn_fract_exp_hvx(struct nn_graph *nn, void *vinfo)
 {
 	/* parameters */
-	struct tdata *info = (struct tdata *)vinfo;
+	struct tdata * info = vinfo;
 	HVX_Vector * pvbasefract = (HVX_Vector *)(info->optr);
 	HVX_Vector * pvbaseinteg = (HVX_Vector *)(info->oextraptr);
 	int32_t elemfunctusecount = info->elemfunctusecount;
@@ -788,7 +821,7 @@ static void compute_qlrn_fract_exp_hvx(struct nn_graph *nn, void *vinfo)
 static void compute_qlrn_exp_mult_data_hvx(struct nn_graph *nn, void *vinfo)
 {
 	/* parameters */
-	struct tdata *info = (struct tdata *)vinfo;
+	struct tdata * info = vinfo;
 	HVX_Vector * pvin = (HVX_Vector *)(info->iptr);
 	HVX_Vector * pvbasefract = (HVX_Vector *)(info->optr);
 	HVX_Vector * pvbaseinteg = (HVX_Vector *)(info->oextraptr);
@@ -960,7 +993,7 @@ static void compute_qlrn_exp_mult_data_hvx(struct nn_graph *nn, void *vinfo)
 	// note scalar loop should be ok to fill 32bit values in pad region
 	// loop only runs for count of (elemusecountwithalignment-elemcount)
 	// which would in worst case be count of vectorsize/sizeof(int32_t)
-	if (info->whoami == 1) {
+	if (info->whoami == 0) {
 		const int32_t BIT_SHIFT_FOR_NUM_ELEM_WRD_VECT_PAIR = (int32_t)log2f(2*NUM_ELEM_WRD_VECTOR);
 		int32_t startelemindexvectpair = ((elemcount >> BIT_SHIFT_FOR_NUM_ELEM_WRD_VECT_PAIR) * NUM_ELEM_WRD_VECTOR * 2);
 		int32_t endelemindexvectpair = (startelemindexvectpair + (NUM_ELEM_WRD_VECTOR * 2) - 1);
@@ -1013,7 +1046,7 @@ static void compute_qlrn_exp_mult_data_hvx(struct nn_graph *nn, void *vinfo)
 static void compute_qlrn_qzero_based_data_hvx(struct nn_graph *nn, void *vinfo)
 {
 	/* parameters */
-	struct tdata *info = (struct tdata *)vinfo;
+	struct tdata * info = vinfo;
 	HVX_Vector * pvout = (HVX_Vector *)(info->optr);
 	HVX_Vector * pvbasefract = (HVX_Vector *)(info->oextraptr);
 	int32_t elemfunctusecount = info->elemfunctusecount;
@@ -1105,23 +1138,23 @@ static int lrn_8_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	int32_t height = in_tensor->shape.height;
 	int32_t depth = in_tensor->shape.depth;
 	int32_t elemcount = batches*height*width*depth;
-	
-	struct tdata worker_info = {
-			self,
-			0,
-	};
-	struct tdata my_info = {
-			self,
-			1,
-	};
+	int32_t elemusecountwithalignment = (elemcount + ALIGN_SIZE - 1) & ~(ALIGN_SIZE - 1);
 
+	int32_t use_multi_thread = ((elemusecountwithalignment <= ALIGN_SIZE) ? 0 : 1);
+	int32_t td_num = 2;
+	struct tdata tds[td_num];
+	for (int32_t td_cur = 0; td_cur < td_num; td_cur++) {
+		tds[td_cur].whoami = td_cur;
+		tds[td_cur].self = self;
+	}
+	
 	/* fallback to ref for certain parameters */
 	if (beta >= 1.0f) {
 		return lrn_8_execute_ref(self,nn);
 	}
 	
 	/* check parameters and report errors to skip calc */
-	if (in_tensor->data_size > (out_tensor->max_size)) {
+	if( tensor_out_prepare_normal_fromshape( out_tensor, &in_tensor->shape, NN_TYPE_QUINT8)!=0){
 		return errlog(nn,"output too small, %d < %d",
 			out_tensor->max_size,
 			in_tensor->data_size);
@@ -1131,25 +1164,21 @@ static int lrn_8_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	
 	/* calc LRN at all idx */
 	/* LRN math (normal formula): out = in * [{scaling *(bias/scaling + sum_squared_inputs_over_win)} ** -beta] */
-	/* impl: qoutdata = qoutzero+(qindata-qinzero)*exp2[log2{qscaling*(qbias/qscaling+qsum_squared_inputs_over_win)}*-qbeta] */
+	/* impl: qoutdat = qoutzero+(qindat-qinzero)*exp2[log2{qscaling*(qbias/qscaling+qsum_squared_inputs_over_win)}*-qbeta] */
 	/* => stepA: calc A = qsum_squared_inputs_over_win */
 	/* => stepB: calc B = (qbiasbyscaling+A) */
 	/* => stepC: calc C = log2{B*qscaling}*qbeta */
 	/* => stepD: calc D = exp2[-C] */
 	/* => stepE: calc E = (qindata-qinzero) */
 	/* => stepF: calc F = D*E */
-	/* => stepG: calc out/G = qoutzero+F */
+	/* => stepG: calc G = qoutzero+F (qoutdat) */
 #ifdef DEBUG_PRINT_LRN_PERFORMANCE
 	int start_time = nn_os_get_cycles(nn);
 #endif
 #ifdef DEBUG_PRINT_LRN_CYCLECOUNT
 	int32_t step_time = nn_os_get_cycles(nn);
 #endif
-	
-	/* set output shape/size */
-	out_tensor->shape = in_tensor->shape;
-	out_tensor->data_size = in_tensor->data_size;
-	
+
 	/* set window shape/size */
 	int32_t window_batches = shape_tensor->shape.batches;
 	int32_t window_width = shape_tensor->shape.width;
@@ -1193,21 +1222,17 @@ static int lrn_8_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	int32_t finalstagemultfactor = 0x7FL;
 	int32_t finalstagedwnshift = 0;
 	int32_t finalstageupshift = 0;
-	
-	/* allocate element-usage size for vector operations */
-	int32_t elemusecountwithalignment = (elemcount + ALIGN_SIZE - 1) & ~(ALIGN_SIZE - 1);
-	int32_t elem32bitusesizewithpad = ((elemcount*sizeof(int32_t)) + MAXPAD - 1) & ~(MAXPAD - 1);
-	
+			
 	/* allocate pointers for scratch as needed */
 	/* note: nn->scratch initial pad reserved for sqlempad use at scratchpad space prior to other pads */
-	int32_t * const integpartpadptr = (int32_t *)pad_and_align(nn->scratch, elem32bitusesizewithpad);
-	int32_t * const sumsqpadptr = (int32_t *)pad_and_align(integpartpadptr, elem32bitusesizewithpad);
-	int32_t * const fractpartpadptr = (int32_t *)pad_and_align(sumsqpadptr, elem32bitusesizewithpad);
+	int32_t elem32bitusesizewithpad = ((elemcount*sizeof(int32_t)) + MAXPAD - 1) & ~(MAXPAD - 1);
+	int32_t * const integpartpadptr = pad_and_align(nn->scratch, elem32bitusesizewithpad);
+	int32_t * const sumsqpadptr = pad_and_align(integpartpadptr, elem32bitusesizewithpad);
+	int32_t * const fractpartpadptr = pad_and_align(sumsqpadptr, elem32bitusesizewithpad);
 	HVX_Vector * const vecpadptr = (HVX_Vector *)pad_and_align(fractpartpadptr,elem32bitusesizewithpad);
 	HVX_Vector * const vecpadptr2 = vecpadptr + 1;
 	HVX_Vector * const vecextrapadptr = vecpadptr2 + 1;
 	HVX_Vector * const vecextrapadptr2 = vecextrapadptr + 1;
-	int32_t use_multi_thread = ((elemusecountwithalignment <= ALIGN_SIZE) ? 0 : 1);
 	int32_t idx;
 	
 	/* step1 -> calc A = qsum(squared_inputs_over_win) in 32-bit => sumsq_step: (in_step)^2 */
@@ -1216,7 +1241,6 @@ static int lrn_8_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 #else
 	int32_t force_use_lrn_scalar_innerloop = 0;
 #endif
-	uint8_t * iptr = (uint8_t *)in_tensor->data;
 	if ((window_batches != 1) || (window_width != 1) || (window_height != 1) || (force_use_lrn_scalar_innerloop == 1)) {
 		/* Use non-optimal (scalar version) sum of in squares if window has more than depth dimension */
 		/* No Intermediate buffers used */
@@ -1228,6 +1252,7 @@ static int lrn_8_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 		int32_t window_eachside_y = (window_height - 1) / 2;
 		int32_t window_eachside_x = (window_width - 1) / 2;
 		int32_t window_eachside_z = (window_depth - 1) / 2;
+		uint8_t * iptr = in_tensor->data;
 		/* Compute sum of input squares along all dimensions */
 		idx = 0;
 		for (b = 0; b < batches; b++) {
@@ -1235,7 +1260,7 @@ static int lrn_8_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 				for (x_start = 0; x_start < width; x_start++) {
 					for (z_start = 0; z_start < depth; z_start++) {
 						sumsqpadptr[idx++] = compute_qlrn_sum_sq_scalar_hvx_at(
-									(int16_t *)nn->scratch,
+									nn->scratch,
 									iptr,
 									in_min,
 									in_max,
@@ -1263,47 +1288,37 @@ static int lrn_8_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 		int32_t bhw = batches * height * width;
 		int32_t window_eachside_z = (window_depth - 1) / 2;
 		int32_t depth_pad = (depth + 2*window_eachside_z + ALIGN_SIZE - 1) & ~(ALIGN_SIZE - 1);
-		int32_t * const sumsqextrapadptr = (int32_t * const)pad_and_align(sumsqpadptr, elem32bitusesizewithpad);
-		int32_t * const sumsqextrapadptr2 = (int32_t * const)pad_and_align(sumsqextrapadptr, depth_pad*sizeof(int32_t));
+		int32_t * const sumsqextrapadptr = pad_and_align(sumsqpadptr, elem32bitusesizewithpad);
+		int32_t * const sumsqextrapadptr2 = pad_and_align(sumsqextrapadptr, depth_pad*sizeof(int32_t));
 		uint8_t * const iextraptr = (uint8_t *)pad_and_align(sumsqextrapadptr2, depth_pad*sizeof(int32_t));
 		uint8_t * const iextraptr2 = (uint8_t *)pad_and_align(iextraptr, (depth_pad+window_eachside_z)*sizeof(uint8_t));
+		uint8_t * iptr = in_tensor->data;
 		/* Compute sum of input squares along window depth dimension */
 		if (use_multi_thread == 0) {
-			my_info.iptr = iptr;
-			my_info.iextraptr = iextraptr;
-			my_info.optr = sumsqpadptr;
-			my_info.oextraptr = sumsqextrapadptr;
-			my_info.elemfunctusecount = bhw;
-			my_info.arg01 = depth;
-			my_info.arg02 = window_depth;
-			my_info.arg03 = qinzero;
-			
-			nn_sem_init(&my_info.donesem,0);
-			compute_qlrn_sum_sq_vector_hvx(nn, &my_info);
+			td_num = 1;
+			struct tdata * td_worker0 = &tds[0];
+			set_thread_pointers(td_worker0, iptr, iextraptr, 
+				sumsqpadptr, sumsqextrapadptr, 
+				nn->scratch, nn->scratch, nn->scratch, nn->scratch);
+			set_thread_args(td_worker0, depth, window_depth, qinzero, 0, 0, 0, 0);
+			td_worker0->elemfunctusecount = bhw;
 		}
 		else {
-			worker_info.iptr = iptr;
-			worker_info.iextraptr = iextraptr;
-			worker_info.optr = sumsqpadptr;
-			worker_info.oextraptr = sumsqextrapadptr;
-			worker_info.elemfunctusecount = (bhw / 2);
-			worker_info.arg01 = depth;
-			worker_info.arg02 = window_depth;
-			worker_info.arg03 = qinzero;
-			
-			my_info.iptr = &iptr[worker_info.elemfunctusecount*worker_info.arg01];
-			my_info.iextraptr = iextraptr2;
-			my_info.optr = &sumsqpadptr[worker_info.elemfunctusecount*worker_info.arg01];
-			my_info.oextraptr = sumsqextrapadptr2;
-			my_info.elemfunctusecount = (bhw - worker_info.elemfunctusecount);
-			copy_thread_args(&my_info, worker_info);
-			
-			nn_sem_init(&worker_info.donesem,0);
-			nn_os_work_for_vector(nn, compute_qlrn_sum_sq_vector_hvx, &worker_info);
-			nn_sem_init(&my_info.donesem,0);
-			compute_qlrn_sum_sq_vector_hvx(nn, &my_info);
-			nn_sem_wait(&worker_info.donesem);
+			td_num = 2;
+			struct tdata * td_worker1 = &tds[td_num-1];
+			set_thread_pointers(td_worker1, iptr, iextraptr, 
+				sumsqpadptr, sumsqextrapadptr, 
+				nn->scratch, nn->scratch, nn->scratch, nn->scratch);
+			set_thread_args(td_worker1, depth, window_depth, qinzero, 0, 0, 0, 0);
+			td_worker1->elemfunctusecount = (bhw / 2);
+			struct tdata * td_worker0 = &tds[0];
+			set_thread_pointers(td_worker0, &iptr[td_worker1->elemfunctusecount * td_worker1->arg01], iextraptr2, 
+				&sumsqpadptr[td_worker1->elemfunctusecount * td_worker1->arg01], sumsqextrapadptr2,
+				nn->scratch, nn->scratch, nn->scratch, nn->scratch);
+			copy_thread_args(td_worker0, td_worker1);
+			td_worker0->elemfunctusecount = (bhw - td_worker1->elemfunctusecount);
 		}
+		execute_threads(tds, td_num, nn, compute_qlrn_sum_sq_vector_hvx);
 	}
 	
 #ifdef DEBUG_PRINT_LRN_CYCLECOUNT
@@ -1339,70 +1354,51 @@ static int lrn_8_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	// long long int adjusted_ll = (long long int)(ilogval_q1516) * beta_frac;
 	// if (adjusted_ll < 0) adjusted_ll = 0;
 	// int adjusted = (adjusted_ll >> 7) - ilogoutstep_q1516;
-	if (use_multi_thread == 0) {
-		my_info.iptr = sumsqpadptr;
-		my_info.optr = fractpartpadptr;
-		my_info.oextraptr = integpartpadptr;
-		my_info.minptr = vecpadptr;
-		my_info.maxptr = vecextrapadptr;
-		my_info.padfillptr = &fractpartpadptr[elemcount];
-		my_info.padfillextraptr = &integpartpadptr[elemcount];
-		my_info.elemfunctusecount = elemusecountwithalignment;
-		my_info.arg01 = (elemusecountwithalignment - elemcount);
-		my_info.arg02 = NUM_BITS_USED_BY_QBETA;
-		my_info.arg03 = qbetaval;
-		my_info.arg04 = qbiasdivbyscalewrd;
-		my_info.arg05 = qlogscalewrd;
-		my_info.arg06 = qlogsumsqstep;
-		my_info.arg07 = scaledrecipstep_shift;
+	{
+		if (use_multi_thread == 0) {
+			td_num = 1;
+			struct tdata * td_worker0 = &tds[0];
+			set_thread_pointers(td_worker0, sumsqpadptr, nn->scratch, 
+				fractpartpadptr, integpartpadptr,
+				vecpadptr, vecextrapadptr, &fractpartpadptr[elemcount], &integpartpadptr[elemcount]);
+			set_thread_args(td_worker0, (elemusecountwithalignment - elemcount), NUM_BITS_USED_BY_QBETA, qbetaval,
+							qbiasdivbyscalewrd, qlogscalewrd, qlogsumsqstep, scaledrecipstep_shift);
+			td_worker0->elemfunctusecount = elemusecountwithalignment;
+		}
+		else {
+			td_num = 2;
+			struct tdata * td_worker1 = &tds[td_num-1];
+			set_thread_pointers(td_worker1, sumsqpadptr, nn->scratch, 
+				fractpartpadptr, integpartpadptr,
+				vecpadptr, vecextrapadptr, &fractpartpadptr[elemcount], &integpartpadptr[elemcount]);
+			set_thread_args(td_worker1, (elemusecountwithalignment - elemcount), NUM_BITS_USED_BY_QBETA, qbetaval,
+							qbiasdivbyscalewrd, qlogscalewrd, qlogsumsqstep, scaledrecipstep_shift);
+			td_worker1->elemfunctusecount = (((elemusecountwithalignment / 2) + ALIGN_SIZE - 1) & ~(ALIGN_SIZE - 1));
+			struct tdata * td_worker0 = &tds[0];
+			set_thread_pointers(td_worker0, &sumsqpadptr[td_worker1->elemfunctusecount], nn->scratch, 
+				&fractpartpadptr[td_worker1->elemfunctusecount], &integpartpadptr[td_worker1->elemfunctusecount],
+				vecpadptr2, vecextrapadptr2, &fractpartpadptr[elemcount], &integpartpadptr[elemcount]);
+			copy_thread_args(td_worker0, td_worker1);
+			td_worker0->elemfunctusecount = (elemusecountwithalignment - td_worker1->elemfunctusecount);
+		}
+		execute_threads(tds, td_num, nn, compute_qlrn_beta_mult_log_vector_hvx);
 		
-		nn_sem_init(&my_info.donesem,0);
-		compute_qlrn_beta_mult_log_vector_hvx(nn, &my_info);
-		
-		exp2infractminval = *(int32_t *)(my_info.minptr);
-		exp2inintegermaxval = *(int32_t *)(my_info.maxptr);
+		int32_t worker_min = *(int32_t *)(tds[0].minptr);
+		exp2infractminval = worker_min;
+		int32_t worker_max = *(int32_t *)(tds[0].maxptr);
+		exp2inintegermaxval = worker_max;
+		for (int32_t td_cur = 1; td_cur < td_num; td_cur++) {
+			worker_max = *(int32_t *)(tds[td_cur].maxptr);
+			if (exp2inintegermaxval < worker_max) {
+				exp2inintegermaxval = worker_max;
+			}
+			worker_min = *(int32_t *)(tds[td_cur].minptr);
+			if (exp2infractminval > worker_min) {
+				exp2infractminval = worker_min;
+			}
+		}
 	}
-	else {
-		worker_info.iptr = sumsqpadptr;
-		worker_info.optr = fractpartpadptr;
-		worker_info.oextraptr = integpartpadptr;
-		worker_info.minptr = vecpadptr;
-		worker_info.maxptr = vecextrapadptr;
-		worker_info.padfillptr = &fractpartpadptr[elemcount];
-		worker_info.padfillextraptr = &integpartpadptr[elemcount];
-		worker_info.elemfunctusecount = (((elemusecountwithalignment / 2) + ALIGN_SIZE - 1) & ~(ALIGN_SIZE - 1));
-		worker_info.arg01 = (elemusecountwithalignment - elemcount);
-		worker_info.arg02 = NUM_BITS_USED_BY_QBETA;
-		worker_info.arg03 = qbetaval;
-		worker_info.arg04 = qbiasdivbyscalewrd;
-		worker_info.arg05 = qlogscalewrd;
-		worker_info.arg06 = qlogsumsqstep;
-		worker_info.arg07 = scaledrecipstep_shift;
-		
-		my_info.iptr = &sumsqpadptr[worker_info.elemfunctusecount];
-		my_info.optr = &fractpartpadptr[worker_info.elemfunctusecount];
-		my_info.oextraptr = &integpartpadptr[worker_info.elemfunctusecount];
-		my_info.minptr = vecpadptr2;
-		my_info.maxptr = vecextrapadptr2;
-		my_info.padfillptr = &fractpartpadptr[elemcount];
-		my_info.padfillextraptr = &integpartpadptr[elemcount];
-		my_info.elemfunctusecount = (elemusecountwithalignment - worker_info.elemfunctusecount);
-		copy_thread_args(&my_info, worker_info);
-		
-		nn_sem_init(&worker_info.donesem,0);
-		nn_os_work_for_vector(nn, compute_qlrn_beta_mult_log_vector_hvx, &worker_info);
-		nn_sem_init(&my_info.donesem,0);
-		compute_qlrn_beta_mult_log_vector_hvx(nn, &my_info);
-		nn_sem_wait(&worker_info.donesem);
-		
-		int32_t worker_min = *(int32_t *)(worker_info.minptr);
-		int32_t my_min = *(int32_t *)(my_info.minptr);
-		int32_t worker_max = *(int32_t *)(worker_info.maxptr);
-		int32_t my_max = *(int32_t *)(my_info.maxptr);
-		exp2infractminval = ((worker_min <= my_min) ? worker_min: my_min);
-		exp2inintegermaxval = ((worker_max >= my_max) ? worker_max: my_max);
-	}
-	
+
 #ifdef DEBUG_PRINT_LRN_CYCLECOUNT
 	step_time = get_and_display_step_time_cycles(nn, step_time, "qlrn step 2+3+4 - calc C = qbeta*log2{allparts(B)}:");
 #endif
@@ -1460,31 +1456,32 @@ static int lrn_8_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	/* here exp2 operates on 16bit-values provided with double the desired number of elements with alignment */
 	// Pseudocode:
 	// int outfrac = exp_negx_q1516(adjusted);
-	if (use_multi_thread == 0) {
-		my_info.optr = fractpartpadptr;
-		my_info.oextraptr = integpartpadptr;
-		my_info.elemfunctusecount = elemusecountwithalignment;
-		my_info.arg01 = qlog2_of_out_step;
-		
-		nn_sem_init(&my_info.donesem,0);
-		compute_qlrn_fract_exp_hvx(nn, &my_info);
-	}
-	else {
-		worker_info.optr = fractpartpadptr;
-		worker_info.oextraptr = integpartpadptr;
-		worker_info.elemfunctusecount = (((elemusecountwithalignment / 2) + ALIGN_SIZE - 1) & ~(ALIGN_SIZE - 1));
-		worker_info.arg01 = qlog2_of_out_step;
-		
-		my_info.optr = &fractpartpadptr[worker_info.elemfunctusecount];
-		my_info.oextraptr = &integpartpadptr[worker_info.elemfunctusecount];
-		my_info.elemfunctusecount = (elemusecountwithalignment - worker_info.elemfunctusecount);
-		copy_thread_args(&my_info, worker_info);
-		
-		nn_sem_init(&worker_info.donesem,0);
-		nn_os_work_for_vector(nn, compute_qlrn_fract_exp_hvx, &worker_info);
-		nn_sem_init(&my_info.donesem,0);
-		compute_qlrn_fract_exp_hvx(nn, &my_info);
-		nn_sem_wait(&worker_info.donesem);
+	{
+		if (use_multi_thread == 0) {
+			td_num = 1;
+			struct tdata * td_worker0 = &tds[0];
+			set_thread_pointers(td_worker0, nn->scratch, nn->scratch, 
+				fractpartpadptr, integpartpadptr,
+				nn->scratch, nn->scratch, nn->scratch, nn->scratch);
+			set_thread_args(td_worker0, qlog2_of_out_step, 0, 0, 0, 0, 0, 0);
+			td_worker0->elemfunctusecount = elemusecountwithalignment;
+		}
+		else {
+			td_num = 2;
+			struct tdata * td_worker1 = &tds[td_num-1];
+			set_thread_pointers(td_worker1, nn->scratch, nn->scratch, 
+				fractpartpadptr, integpartpadptr,
+				nn->scratch, nn->scratch, nn->scratch, nn->scratch);
+			set_thread_args(td_worker1, qlog2_of_out_step, 0, 0, 0, 0, 0, 0);
+			td_worker1->elemfunctusecount = (((elemusecountwithalignment / 2) + ALIGN_SIZE - 1) & ~(ALIGN_SIZE - 1));
+			struct tdata * td_worker0 = &tds[0];
+			set_thread_pointers(td_worker0, nn->scratch, nn->scratch, 
+				&fractpartpadptr[td_worker1->elemfunctusecount], &integpartpadptr[td_worker1->elemfunctusecount],
+				nn->scratch, nn->scratch, nn->scratch, nn->scratch);
+			copy_thread_args(td_worker0, td_worker1);
+			td_worker0->elemfunctusecount = (elemusecountwithalignment - td_worker1->elemfunctusecount);
+		}
+		execute_threads(tds, td_num, nn, compute_qlrn_fract_exp_hvx);
 	}
 	
 #ifdef DEBUG_PRINT_LRN_CYCLECOUNT
@@ -1498,50 +1495,41 @@ static int lrn_8_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	/* step9 -> & calc F = D*E = exp2[log2{qscaling*(qbias/qscaling+qsum_squared_inputs_over_win)}*-qbeta]*(qindata-qinzero) */
 	/* also find max{F} & min{F} */
 	/* note the F value is stored in 32bitvecpair */
-	iptr = (uint8_t *)in_tensor->data;
-	if (use_multi_thread == 0) {
-		my_info.iptr = iptr;
-		my_info.optr = fractpartpadptr;
-		my_info.oextraptr = integpartpadptr;
-		my_info.maxptr = vecextrapadptr;
-		my_info.elemfunctusecount = elemusecountwithalignment;
-		my_info.arg01 = elemcount;
-		my_info.arg02 = qinzero;
-		my_info.arg03 = exp2outmult16bitfactor;
-		my_info.arg04 = exp2outleftshift;
-		
-		nn_sem_init(&my_info.donesem,0);
-		compute_qlrn_exp_mult_data_hvx(nn, &my_info);
-		
-		exp2outqdataproductmaxval = *(int32_t *)(my_info.maxptr);
-	}
-	else {
-		worker_info.iptr = iptr;
-		worker_info.optr = fractpartpadptr;
-		worker_info.oextraptr = integpartpadptr;
-		worker_info.maxptr = vecextrapadptr;
-		worker_info.elemfunctusecount = (((elemusecountwithalignment / 2) + ALIGN_SIZE - 1) & ~(ALIGN_SIZE - 1));
-		worker_info.arg01 = elemcount;
-		worker_info.arg02 = qinzero;
-		worker_info.arg03 = exp2outmult16bitfactor;
-		worker_info.arg04 = exp2outleftshift;
-		
-		my_info.iptr = &iptr[worker_info.elemfunctusecount];
-		my_info.optr = &fractpartpadptr[worker_info.elemfunctusecount];
-		my_info.oextraptr = &integpartpadptr[worker_info.elemfunctusecount];
-		my_info.maxptr = vecextrapadptr2;
-		my_info.elemfunctusecount = (elemusecountwithalignment - worker_info.elemfunctusecount);
-		copy_thread_args(&my_info, worker_info);
-		
-		nn_sem_init(&worker_info.donesem,0);
-		nn_os_work_for_vector(nn, compute_qlrn_exp_mult_data_hvx, &worker_info);
-		nn_sem_init(&my_info.donesem,0);
-		compute_qlrn_exp_mult_data_hvx(nn, &my_info);
-		nn_sem_wait(&worker_info.donesem);
-		
-		int32_t worker_max = *(int32_t *)(worker_info.maxptr);
-		int32_t my_max = *(int32_t *)(my_info.maxptr);
-		exp2outqdataproductmaxval = ((worker_max >= my_max) ? worker_max: my_max);
+	{
+		uint8_t * iptr = in_tensor->data;
+		if (use_multi_thread == 0) {
+			td_num = 1;
+			struct tdata * td_worker0 = &tds[0];
+			set_thread_pointers(td_worker0, iptr, nn->scratch,
+				fractpartpadptr, integpartpadptr,
+				vecextrapadptr, nn->scratch, nn->scratch, nn->scratch);
+			set_thread_args(td_worker0, elemcount, qinzero, exp2outmult16bitfactor, exp2outleftshift, 0, 0, 0);
+			td_worker0->elemfunctusecount = elemusecountwithalignment;
+		}
+		else {
+			td_num = 2;
+			struct tdata * td_worker1 = &tds[td_num-1];
+			set_thread_pointers(td_worker1, iptr, nn->scratch,
+				fractpartpadptr, integpartpadptr,
+				vecextrapadptr, nn->scratch, nn->scratch, nn->scratch);
+			set_thread_args(td_worker1, elemcount, qinzero, exp2outmult16bitfactor, exp2outleftshift, 0, 0, 0);
+			td_worker1->elemfunctusecount = (((elemusecountwithalignment / 2) + ALIGN_SIZE - 1) & ~(ALIGN_SIZE - 1));
+			struct tdata * td_worker0 = &tds[0];
+			set_thread_pointers(td_worker0, &iptr[td_worker1->elemfunctusecount], nn->scratch,
+				&fractpartpadptr[td_worker1->elemfunctusecount], &integpartpadptr[td_worker1->elemfunctusecount],
+				vecextrapadptr2, nn->scratch, nn->scratch, nn->scratch);
+			copy_thread_args(td_worker0, td_worker1);
+			td_worker0->elemfunctusecount = (elemusecountwithalignment - td_worker1->elemfunctusecount);
+		}
+		execute_threads(tds, td_num, nn, compute_qlrn_exp_mult_data_hvx);
+		int32_t worker_max = *(int32_t *)(tds[0].maxptr);
+		exp2outqdataproductmaxval = worker_max;
+		for (int32_t td_cur = 1; td_cur < td_num; td_cur++) {
+			worker_max = *(int32_t *)(tds[td_cur].maxptr);
+			if (exp2outqdataproductmaxval < worker_max) {
+				exp2outqdataproductmaxval = worker_max;
+			}
+		}
 	}
 	
 #ifdef DEBUG_PRINT_LRN_CYCLECOUNT
@@ -1586,38 +1574,33 @@ static int lrn_8_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	/* step12 -> compute 8bits output = G which only uses 8bits in 16bits */
 	/* note at this point output is already changed from 16bits to 8bits because of quantized zero addition */
 	/* so just need to pack the output to 8bit vectors from 16bit vectors (no bit loss) */
-	uint8_t * optr = (uint8_t *)out_tensor->data;
-	if (use_multi_thread == 0) {
-		my_info.optr = optr;
-		my_info.oextraptr = fractpartpadptr;
-		my_info.elemfunctusecount = elemusecountwithalignment;
-		my_info.arg01 = out_qzeero;
-		my_info.arg02 = finalstagemultfactor;
-		my_info.arg03 = finalstagedwnshift;
-		my_info.arg04 = finalstageupshift;
-		
-		nn_sem_init(&my_info.donesem,0);
-		compute_qlrn_qzero_based_data_hvx(nn, &my_info);
-	}
-	else {
-		worker_info.optr = optr;
-		worker_info.oextraptr = fractpartpadptr;
-		worker_info.elemfunctusecount = (((elemusecountwithalignment / 2) + ALIGN_SIZE - 1) & ~(ALIGN_SIZE - 1));
-		worker_info.arg01 = out_qzeero;
-		worker_info.arg02 = finalstagemultfactor;
-		worker_info.arg03 = finalstagedwnshift;
-		worker_info.arg04 = finalstageupshift;
-		
-		my_info.optr = &optr[worker_info.elemfunctusecount];
-		my_info.oextraptr = &fractpartpadptr[worker_info.elemfunctusecount];
-		my_info.elemfunctusecount = (elemusecountwithalignment - worker_info.elemfunctusecount);
-		copy_thread_args(&my_info, worker_info);
-		
-		nn_sem_init(&worker_info.donesem,0);
-		nn_os_work_for_vector(nn, compute_qlrn_qzero_based_data_hvx, &worker_info);
-		nn_sem_init(&my_info.donesem,0);
-		compute_qlrn_qzero_based_data_hvx(nn, &my_info);
-		nn_sem_wait(&worker_info.donesem);
+	{
+		uint8_t * optr = out_tensor->data;
+		if (use_multi_thread == 0) {
+			td_num = 1;
+			struct tdata * td_worker0 = &tds[0];
+			set_thread_pointers(td_worker0, nn->scratch, nn->scratch, 
+				optr, fractpartpadptr,
+				nn->scratch, nn->scratch, nn->scratch, nn->scratch);
+			set_thread_args(td_worker0, out_qzeero, finalstagemultfactor, finalstagedwnshift, finalstageupshift, 0, 0, 0);
+			td_worker0->elemfunctusecount = elemusecountwithalignment;
+		}
+		else {
+			td_num = 2;
+			struct tdata * td_worker1 = &tds[td_num-1];
+			set_thread_pointers(td_worker1, nn->scratch, nn->scratch, 
+				optr, fractpartpadptr,
+				nn->scratch, nn->scratch, nn->scratch, nn->scratch);
+			set_thread_args(td_worker1, out_qzeero, finalstagemultfactor, finalstagedwnshift, finalstageupshift, 0, 0, 0);
+			td_worker1->elemfunctusecount = (((elemusecountwithalignment / 2) + ALIGN_SIZE - 1) & ~(ALIGN_SIZE - 1));
+			struct tdata * td_worker0 = &tds[0];
+			set_thread_pointers(td_worker0, nn->scratch, nn->scratch, 
+				&optr[td_worker1->elemfunctusecount], &fractpartpadptr[td_worker1->elemfunctusecount],
+				nn->scratch, nn->scratch, nn->scratch, nn->scratch);
+			copy_thread_args(td_worker0, td_worker1);
+			td_worker0->elemfunctusecount = (elemusecountwithalignment - td_worker1->elemfunctusecount);
+		}
+		execute_threads(tds, td_num, nn, compute_qlrn_qzero_based_data_hvx);
 	}
 	
 #ifdef DEBUG_PRINT_LRN_CYCLECOUNT
@@ -1625,21 +1608,17 @@ static int lrn_8_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 #endif
 	
 	/* report output w/min/max */
-	tensor_set_shape(out_min_tensor,1,1,1,1);
-	tensor_set_float(out_min_tensor,0,out_min);
-	out_min_tensor->data_size = sizeof(float);
-	tensor_set_shape(out_max_tensor,1,1,1,1);
-	tensor_set_float(out_max_tensor,0,out_max);
-	out_max_tensor->data_size = sizeof(float);
+	tensor_set_single_float( out_min_tensor, out_min);
+	tensor_set_single_float( out_max_tensor, out_max);
 #ifdef DEBUG_PRINT_LRN_PERFORMANCE
 	int end_time =  nn_os_get_cycles(nn);
 	int elem_size = elemcount;
-	printf("qlrn hvx cycles = %d (elements = %d)\n", (end_time-start_time), elem_size);
+	logmsg(nn, 2, "qlrn hvx cycles = %d (elements = %d)\n", (end_time-start_time), elem_size);
 #endif
 	
 	return 0;
 }
-
+#endif
 
 static int lrn_check(struct nn_node *self, struct nn_graph *nn)
 {
@@ -1679,17 +1658,17 @@ static int lrn_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_QuantizedLRN_8_ref = {
-	SFINIT(.execute, lrn_8_execute_ref),
-	SFINIT(  .check, lrn_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = lrn_8_execute_ref,
+	.check = lrn_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedLRN_8 = {
-	SFINIT(.execute, lrn_8_execute_hvx),
-	SFINIT(  .check, lrn_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = lrn_8_execute_ref,
+	.check = lrn_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 

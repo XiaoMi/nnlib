@@ -51,13 +51,23 @@ typedef uint8_t quint8;
 #define NN_PAD_ANY NN_PAD_NA
 
 static hexagon_nn_output outputs_for_1024a[] = {
- { .max_size = 1072812, .unused = 0, }, // 1x299x299x3 x4
+ { .rank=4,
+   .max_sizes={ 1, 299, 299, 3 },
+   .elementsize=4,
+   .zero_offset=0,
+   .stepsize=0
+ }
 };
 static hexagon_nn_input inputs_for_10300[] = {
  { .src_id = 0x1024a, .output_idx = 0, },
 };
 static hexagon_nn_output outputs_for_10300[] = {
- { .max_size = 1072812, .unused = 0, }, // 1x299x299x3 x4
+  { .rank=4,
+    .max_sizes={ 1, 299, 299, 3 },
+    .elementsize=4,
+    .zero_offset=0,
+    .stepsize=0
+  }
 };
 static hexagon_nn_input inputs_for_1044d[] = {
  { .src_id = 0x10300, .output_idx = 0, },

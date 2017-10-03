@@ -44,7 +44,7 @@ static inline int is_dim_compatible(int a, int b)
 	return ((a == b) || (a == 1) || (b == 1));
 }
 /* Are all the dimensions compatible? */
-static inline int are_dims_compatible(struct shape a, struct shape b)
+static inline int are_dims_compatible(const struct shape a, const struct shape b)
 {
 	return is_dim_compatible(a.batches,b.batches)
 		&& is_dim_compatible(a.height,b.height)
@@ -87,16 +87,16 @@ static inline int output_dim(int a, int b)
  * is the simplest I could think of.
  */
 
-#define CREATE_ELEMENTWISE_INLINE(NAME,INTYPE,OUTTYPE) \
+#define CREATE_ELEMENTWISE_INLINE(NAME,INTYPE,OUTTYPE,OUTTYPECODE) \
 static inline int NAME( \
 	struct nn_node *self, \
 	struct nn_graph *nn, \
 	OUTTYPE (*f)(INTYPE, INTYPE, void *), \
 	void *opaque) \
 { \
-	const struct tensor *a_tensor = (const struct tensor *)self->inputs[0]; \
-	const struct tensor *b_tensor = (const struct tensor *)self->inputs[1]; \
-	struct tensor *out_tensor = (struct tensor *)self->outputs[0]; \
+	const struct tensor *a_tensor = self->inputs[0]; \
+	const struct tensor *b_tensor = self->inputs[1]; \
+	struct tensor *out_tensor = self->outputs[0]; \
 	int32_t ab = a_tensor->shape.batches; \
 	int32_t ah = a_tensor->shape.height; \
 	int32_t aw = a_tensor->shape.width; \
@@ -124,9 +124,9 @@ static inline int NAME( \
 	int32_t bhstride = (bh == 1) ? 0 : (bd*bw); \
 	int32_t abstride = (ab == 1) ? 0 : (ad*aw*ah); \
 	int32_t bbstride = (bb == 1) ? 0 : (bd*bw*bh); \
-	const INTYPE *a_data = (const INTYPE *)a_tensor->data; \
-	const INTYPE *b_data = (const INTYPE *)b_tensor->data; \
-	OUTTYPE *out_data = (OUTTYPE *)out_tensor->data; \
+	const INTYPE *a_data = a_tensor->data; \
+	const INTYPE *b_data = b_tensor->data; \
+	OUTTYPE *out_data = out_tensor->data; \
 	int32_t b,w,h,d; \
 	const INTYPE *abstart; \
 	const INTYPE *bbstart; \
@@ -158,9 +158,8 @@ static inline int NAME( \
 			b_tensor->shape.width, \
 			b_tensor->shape.depth, \
 			ob,oh,ow,od); \
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small (id=%x): %d > %d",self->node_id,bytes,out_tensor->max_size); \
-	tensor_set_shape(out_tensor,ob,oh,ow,od); \
-	out_tensor->data_size = bytes; \
+	if( tensor_out_prepare_normal( out_tensor, ob,oh,ow,od, OUTTYPECODE)!= 0)\
+		return errlog(nn,"out too small (id=%x): %d > %d",self->node_id,bytes,out_tensor->max_size); \
 	for (b = 0; b < ob; b++) { \
 		abstart = a_data + b*abstride; \
 		bbstart = b_data + b*bbstride; \
@@ -186,10 +185,10 @@ static inline int NAME( \
 	return 0; \
 }
 
-CREATE_ELEMENTWISE_INLINE(broadcast_elementwise_execute_f,float,float)
-CREATE_ELEMENTWISE_INLINE(broadcast_elementwise_execute_int32,int32_t,int32_t)
-CREATE_ELEMENTWISE_INLINE(broadcast_elementwise_execute_qint32_quint8,uint8_t,int32_t)
-CREATE_ELEMENTWISE_INLINE(broadcast_elementwise_execute_quint8,uint8_t,uint8_t)
+CREATE_ELEMENTWISE_INLINE(broadcast_elementwise_execute_f,float,float,NN_TYPE_FLOAT)
+CREATE_ELEMENTWISE_INLINE(broadcast_elementwise_execute_int32,int32_t,int32_t,NN_TYPE_INT32)
+CREATE_ELEMENTWISE_INLINE(broadcast_elementwise_execute_qint32_quint8,uint8_t,int32_t,NN_TYPE_INT32)
+CREATE_ELEMENTWISE_INLINE(broadcast_elementwise_execute_quint8,uint8_t,uint8_t,NN_TYPE_QUINT8)
 
 #undef CREATE_ELEMENTWISE_INLINE
 
@@ -239,7 +238,7 @@ static inline int check_prepare_hvx_opt(
 		elements = bb*bh*bw*bd;
 
 		b_data_pad = (uint8_t *)b_data;// since b_data is already aligned to 128, no need to create padded buffer
-		a_data_pad = (uint8_t *)nn->scratch;
+		a_data_pad = nn->scratch;
 
 		tensor_set_shape(out_tensor,bb,bh,bw,bd);
 
@@ -300,14 +299,14 @@ static inline int check_prepare_hvx_opt(
 		bhw = bb*bh*bw;
 
 		b_data_pad = (uint8_t *)b_data ;// since b_data is already aligned to 128, no need to create padded buffer
-		a_data_pad = (uint8_t *)nn->scratch;
+		a_data_pad = nn->scratch;
 
 		// Broadcast elements in b to match a dimensions
 		for(i=0;i<bhw;i++) {
 			vmemcpy_asm(a_data_pad,a_data,ad);
 			a_data_pad += ad;
 		}
-		a_data_pad = (uint8_t *)nn->scratch;
+		a_data_pad = nn->scratch;
 
 		tensor_set_shape(out_tensor,bb,bh,bw,bd);
 

@@ -43,7 +43,6 @@
 #include "hexagon_types.h"
 #endif
 #include <op_tanh.h>
-#include <op_non_lin_gen_hvx_common.h>
 //#define TEST_PERFORMANCE
 
 static int qtanh_execute_ref(struct nn_node *self, struct nn_graph *nn)
@@ -54,13 +53,10 @@ static int qtanh_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	struct tensor *out_tensor = self->outputs[0];
 	struct tensor *out_min_tensor = self->outputs[1];
 	struct tensor *out_max_tensor = self->outputs[2];
-	size_t elements = in_tensor->shape.batches 
-		* in_tensor->shape.height
-		* in_tensor->shape.width
-		* in_tensor->shape.depth;
-	size_t bytes = elements * sizeof(uint8_t);
-	const uint8_t *in_data = (const uint8_t *)in_tensor->data;
-	uint8_t *out_data = (uint8_t *)out_tensor->data;
+	size_t elements = tensor_element_count(in_tensor);
+
+	const uint8_t *in_data = in_tensor->data;
+	uint8_t *out_data = out_tensor->data;
 	uint32_t i;
 	float inval,tmpval,outval;
 	float in_min = tensor_get_float(in_min_tensor,0);
@@ -68,9 +64,9 @@ static int qtanh_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	float stepsize = (in_max - in_min)/255.0f;
 
 	logmsg(nn,2,"tanh execute. self=%p ",self);
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	out_tensor->shape = in_tensor->shape;
-	out_tensor->data_size = bytes;
+	if( tensor_out_prepare_normal_fromshape( out_tensor, &in_tensor->shape, NN_TYPE_QUINT8)!= 0){
+		return errlog(nn,"out too small");
+	}
 
 #ifdef TEST_PERFORMANCE
 	int start_time, end_time;
@@ -84,24 +80,49 @@ static int qtanh_execute_ref(struct nn_node *self, struct nn_graph *nn)
 		if (outval > 255.0f) outval = 255.0f;
 		out_data[i] = outval;
 	}
-	
+	// FIXME: -1.0  .. 1.0 is not a proper range, 0 code is 127.5
+	// Should be -1.0 .. 1.007874
 #ifdef TEST_PERFORMANCE
 	end_time =  nn_os_get_cycles(nn);
 	printf("qtanh ref cycles = %d (elements = %d)\n", (end_time-start_time), elements);
 #endif
-	
-	tensor_set_shape(out_min_tensor,1,1,1,1);
-	tensor_set_float(out_min_tensor,0,-1.0f);
-	out_min_tensor->data_size = sizeof(float);
-	tensor_set_shape(out_max_tensor,1,1,1,1);
-	tensor_set_float(out_max_tensor,0,1.0f);
-	out_max_tensor->data_size = sizeof(float);
+	tensor_set_single_float(out_min_tensor,-1.0f);
+	tensor_set_single_float(out_max_tensor,1.0f);
 
 	logmsg(nn,2,"tanh %p done",self);
 	return 0;
 }
 
-static int qtanh_execute_hvx(struct nn_node *self, struct nn_graph *nn)
+struct tdata {
+	struct nn_node *self;
+	void *in_data;
+	void *out_data;
+	size_t bytes;
+	size_t pad_size;
+	float in_min;
+	float in_max;
+	float out_min;
+	float out_max;
+	nn_sem_t donesem;
+};
+
+static void non_lin_execute_td(struct nn_graph *nn, void *vtdata)
+{
+	struct tdata *td = vtdata;
+	uint8_t *in_data = td->in_data;
+	int8_t *out_data = td->out_data;
+	size_t bytes = td->bytes;
+	size_t pad_size = td->pad_size;
+	float in_min = td->in_min;
+	float in_max = td->in_max;
+	float out_min = td->out_min;
+	float out_max = td->out_max;
+	requant_s8u8(out_data, in_data, bytes, in_min, in_max, out_min, out_max);
+	non_lin_i_tanh_8(out_data, out_data, pad_size);
+	nn_sem_post(&td->donesem);
+}
+
+static int __attribute__((unused)) qtanh_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 {
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *in_min_tensor = self->inputs[1];
@@ -109,53 +130,49 @@ static int qtanh_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	struct tensor *out_tensor = self->outputs[0];
 	struct tensor *out_min_tensor = self->outputs[1];
 	struct tensor *out_max_tensor = self->outputs[2];
-	size_t elements = in_tensor->shape.batches 
-		* in_tensor->shape.height
-		* in_tensor->shape.width
-		* in_tensor->shape.depth;
+	size_t elements = tensor_element_count(in_tensor);
 	size_t bytes = elements * sizeof(uint8_t);
 	size_t pad_size = (bytes+MAXPAD-1)&~(MAXPAD-1);
-	const uint8_t *in_data = (const uint8_t *)in_tensor->data;
-	uint8_t *out_data = (uint8_t *)out_tensor->data;
+	uint8_t *in_data = in_tensor->data;
+	uint8_t *out_data = out_tensor->data;
 	float in_min = tensor_get_float(in_min_tensor,0);
 	float in_max = tensor_get_float(in_max_tensor,0);
-	float rng_min = (float)(MIN_RNG);
-	float rng_max = (float)(MAX_RNG);
+	float rng_min = (float)(MIN_RNG_TANH_8);
+	float rng_max = (float)(MAX_RNG_TANH_8);
 	
 	logmsg(nn,2,"tanh execute. self=%p ",self);
-	if (bytes > out_tensor->max_size) return errlog(nn,"out too small");
-	out_tensor->shape = in_tensor->shape;
-	out_tensor->data_size = bytes;
 	
+	if( tensor_out_prepare_normal_fromshape( out_tensor, &in_tensor->shape, NN_TYPE_QUINT8)!= 0){
+		return errlog(nn,"out too small");
+	}
+
 #ifdef TEST_PERFORMANCE
 	int start_time, end_time;
 	start_time =  nn_os_get_cycles(nn);
 #endif
-
-#ifdef USE_SCRATCH_PAD
-	uint8_t *scratch_pad = nn->scratch;
-	vmemcpy_asm(scratch_pad,in_data,bytes);
-	requant_u8u8_inplace(scratch_pad, bytes, in_min, in_max, rng_min, rng_max);
-	qnonlinear_execute_i(scratch_pad,scratch_pad,pad_size,lut_non_lin_asm_tanh);
-	vmemcpy_asm(out_data,scratch_pad,bytes);
-#else
-	vmemcpy_asm(out_data,in_data,bytes);
-	requant_u8u8_inplace(out_data,bytes,in_min,in_max,rng_min,rng_max);
-	qnonlinear_execute_i(out_data,out_data,pad_size,lut_non_lin_asm_tanh);
-#endif
+	
+	struct tdata td = {
+		.self = self,
+		.in_data = in_data,
+		.out_data = out_data,
+		.bytes = bytes,
+		.pad_size = pad_size,
+		.in_min = in_min,
+		.in_max = in_max,
+		.out_min = rng_min,
+		.out_max = rng_max,
+	};
+	nn_sem_init(&td.donesem,0);
+	nn_os_work_for_vector(nn, non_lin_execute_td, &td);
+	nn_sem_wait(&td.donesem);
 	
 #ifdef TEST_PERFORMANCE
 	end_time =  nn_os_get_cycles(nn);
 	printf("qtanh hvx cycles = %d (elements = %d)\n", (end_time-start_time), elements);
 #endif
 	
-	tensor_set_shape(out_min_tensor,1,1,1,1);
-	tensor_set_float(out_min_tensor,0,-1.0f);
-	out_min_tensor->data_size = sizeof(float);
-	tensor_set_shape(out_max_tensor,1,1,1,1);
-	tensor_set_float(out_max_tensor,0,+1.0f);
-	out_max_tensor->data_size = sizeof(float);
-	
+	tensor_set_single_float(out_min_tensor,-1.0f);
+	tensor_set_single_float(out_max_tensor,1.0f);
 	logmsg(nn,2,"tanh %p done",self);
 	return 0;
 }
@@ -170,16 +187,17 @@ static int qtanh_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 struct nn_node_ops nn_ops_for_QuantizedTanh_8_ref = {
-	SFINIT(.execute, qtanh_execute_ref),
-	SFINIT(  .check, qtanh_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	.execute = qtanh_execute_ref,
+	.check = qtanh_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedTanh_8 = {
-	SFINIT(.execute, qtanh_execute_hvx),
-	SFINIT(  .check, qtanh_check),
-	SFINIT(   .ctor, node_alloc_common),
-	SFINIT(   .dtor, node_free_common),
+	//.execute = qtanh_execute_hvx,
+	.execute = qtanh_execute_ref,
+	.check = qtanh_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
 };
 

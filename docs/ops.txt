@@ -45,23 +45,69 @@ Close_qint32:
 	2 inputs
 	No output
 	Checks that input 0 is close to input 1 
+	
+for Close_f:
+	optional 2nd parameter is allowable error, default 0.07, expressed as % of the range of the
+	reference input.
+	
+	
 
 Close_q_quint8:
 	6 inputs: DUT,DUT_min,DUT_max,REF,REF_min,REF_max
 	No output
 	Dequantizes elements of DUT and REF and checks that they are close
 
+Close_d32:
+	inputs 0,1,2:   qu8 input (d32 format), scalar min,max
+	input 3: float scalar; reference result
+	input 4 (optional): max excess error allowable (default 0.2)
+	input 5 (optional): max frac of outputs allowed to have nonzero excess error (default: 0.05)
+	No output
+	converts the float reference to quantized signal range (without quantizing) and checks each point.
+	 'excess error' =  abs( dut_result - flt_result)  - abs( round(flt_result) - flt_result)
+	 E.g if the 'reference' result is 13.4, a result of 13 represents an excess error of 0, a result
+	 of 14 represents an excess error of 0.6-0.4= 0.2
+	 The block will also report stats on rms error, and on correlation between the two signals. Specify
+	 input 4 as a -ve number to force logging of stats even when there is no violation.
+	  
+
 PPrint_8:
+PPrint_8_d32:
+PPrintWithPadding_8_d32:
 PPrint_32:
 PPrint_f:
-	1 input
+	1 input (+3 optional)
 	No output
 	Pretty-prints a tensor
+		Optional additional inputs are scalar ints, and can be used to limit display to a range
+		on a given axis:
+	     1: dimension to limit (0..3 for B,H,W,D;  default= -1, no limiting)
+	     2: start index on dimension (default, 0)
+	     3: 1st index to *not* display on dimension  (default, 1 more than start index)
+
+     PPrintWithPadding_8_d32 displays the padding bytes as well ('before' padding is shown with
+     negative indices). The optional inputs can be used with this, e.g. inps 1..3 = {2,-100,0} will show only
+     the 'width left' padding (the implied range of -100 .. -1 is truncated according to the actual dims).
 
 Flatten:
 	1 input
 	No output
 	Flattens into a 1D Tensor. DEPRECATED, changing to "reshape"
+
+Convert_from_d32:
+    Converts a quint8 tensor to d32 format. The padding can be specifed using four
+    optional inputs, which are integer scalars.
+	Inputs:
+		0: input tensor with quint8 data
+		1: (optional) depth-before padding; 0..31; default is 0
+		2: (optional) width-left padding: 0..7,  default is 4
+		3: (optional) minimum width-right padding; 0..7; default is 0
+		4: (optional) top/bottom padding, default is 4
+	Outputs:
+		0: Output tensor with the same data in d32 format
+		
+	The width-right padding is determined by rounding the minimum up to make the total a muliple of 4. If
+	this results in right-padding exceeding 7, it is reduced by 4.
 
 QuantizedFlatten:
 	3 inputs:
@@ -167,6 +213,17 @@ QuantizedAvgPool_8:
 		2: Output max
 	Max and Average Pooling operations
 
+Concat_f:
+	N+1 inputs:
+		0: Dimension tensor.  Single integer specifying concat dimension. 0=batches,1=height,2=width,3=depth
+		1-N: Input data tensors (float)
+	1 outputs:
+		0: Output data (float)
+	Concatenate tensors. dimensions must all match amongst all inputs, except on the concatenation dimension. 
+
+ConcatV2_f: 
+	(same as Concat_f, except that the 'dimension' input is last). 
+	
 QuantizedConcat_8:
 	3N+1 inputs:
 		0: Dimension tensor.  Currently only depthwise concatenation (3) is supported.
@@ -180,6 +237,133 @@ QuantizedConcat_8:
 	Concatenate tensors.  Currently we only support along the depth dimension.  
 	This requantizes values.  In the future we will remove the requantization work if 
 	all the minima/maxima are the same (or require that will be true?).
+
+QuantizedConcat_8_d32:
+	3N+1 inputs:
+		0: Dimension tensor.   Single integer specifying concat dimension. 0=batches,1=height,2=width,3=depth
+		1-N: Input data tensors (quint8, d32)
+		N+1-2N: minima
+		2N+1-3N: maxima
+	3 outputs:
+		0: Output data (quint8,d32)
+		1: Output min
+		2: Output max
+	Concatenate tensors. dimensions must all match amongst all inputs, except on the concatenation dimension. 
+	This requantizes values to accomodate the merged min/max range; for any inputs have the same range as
+	the merged range, those values will be simply copied. Inputs may have arbitrary alignments relative to
+	each other on width and depth dimensions.
+
+QuantizedMul_8x8to8
+	6 inputs:
+		0: Input A data (qint8)
+		1: Input B data (qint8)
+		2: Input A min
+		3: Input A max
+		4: Input B min
+		5: Input B max
+	3 outputs:
+		0: Output data (quint8)
+		1: Output min
+		2: Output max
+     Elementwise Multiply
+
+QuantizedMul_8x8to8_d32
+	6 inputs:
+		0: Input A data (qint8)
+		1: Input B data (qint8)
+		2: Input A min
+		3: Input A max      
+		4: Input B min
+		5: Input B max
+	3 outputs:
+		0: Output data (quint8)
+		1: Output min
+		2: Output max
+     Elementwise Multiply; inputs and output are in d32 format.
+     Supports broadcast from B input to A, however, broadcast along w, d dimensions is
+     only supported when B input has batches=1, height=1.
+
+QuantizedAdd_8x8to8:
+	8 inputs:
+		0: Input A data (qint8)
+		1: Input B data (qint8)
+		2: Input A min
+		3: Input A max
+		4: Input B min
+		5: Input B max
+		6: Output min
+		7: Output max
+	3 outputs:
+		0: Output data (quint8)
+		1: Output min
+		2: Output max
+     Elementwise Add
+
+     
+QuantizedAdd_8x8to8_d32
+	8 inputs:
+		0: Input A data (qint8)
+		1: Input B data (qint8)
+		2: Input A min
+		3: Input A max
+		4: Input B min
+		5: Input B max
+		6: Output min  (optional)
+		7: Output max  (optional)
+	3 outputs:
+		0: Output data (quint8)
+		1: Output min
+		2: Output max
+     Elementwise Add; inputs and output are in d32 format.
+     Supports broadcast from B input to A, however, broadcast along w, d dimensions is
+     only supported when B input has batches=1, height=1.
+
+QuantizedSub_8x8to8_d32
+	8 inputs:
+		0: Input A data (qint8)
+		1: Input B data (qint8)
+		2: Input A min
+		3: Input A max
+		4: Input B min
+		5: Input B max
+		6: Output min  (optional)
+		7: Output max  (optional)
+	3 outputs:
+		0: Output data (quint8)
+		1: Output min
+		2: Output max
+     Elementwise Subtract; inputs and output are in d32 format.
+     Supports broadcast from B input to A, however, broadcast along w, d dimensions is
+     only supported when B input has batches=1, height=1.
+     Also supports broadcast from A to B (with same restrictions; done as rsub(B,A))
+
+AutoQuantize
+	Finds the range of the input float values, and quantizes them to quint8
+	Inputs:
+		0: input tensor with float data
+	Outputs:
+		0: Output tensor quint8, same shape
+		1: Output min
+		1: Output max
+		
+AutoQuantize_d32:
+	Finds the range of the input float values, and quantizes them to quint8, with
+	the output in d32 format. The output padding may be specified with four optional
+	inputs, as in Convert_to_d32
+	Inputs:
+		0: input tensor with float data
+		1: (optional) depth-before padding; 0..31; default is 0
+		2: (optional) width-left padding: 0..7,  default is 4
+		3: (optional) minimum width-right padding; 0..7; default is 0
+		4: (optional) top/bottom padding, default is 4
+	Outputs:
+		0: Output tensor, quantized data, quint8, d32 format
+		1: Output min
+		1: Output max
+		
+	The width-right padding is determined by rounding the minimum up to make the total a muliple of 4. If
+	this results in right-padding exceeding 7, it is reduced by 4.
+
 
 Quantize:
 	3 inputs:
@@ -200,6 +384,23 @@ Dequantize:
 	1 output:
 		0: Output data (float)
 	Dequantize back to floating point
+
+QuantizeForTestd32:
+    This is the same as AutoQuantize_d32 (without the hvx accel) but it also
+    generates a 'requantized' version of the input, in float format, which is intended
+    to be passed to a float 'reference' chain in a test bench.
+	1-5 inputs:
+		0: Input data (float)
+		1: (optional) depth-before padding; 0..31; default is 0
+		2: (optional) width-left padding: 0..7,  default is 4
+		3: (optional) minimum width-right padding; 0..7; default is 0
+		4: (optional) top/bottom padding, default is 4		
+	4 (or 3) outputs:
+		0: Output data (quint8)
+		1: Output min
+		2: Output max
+		3  [optional] Output float tensor (corrected to match quantized data)
+
 
 Min_f:
 Max_f:
@@ -249,6 +450,72 @@ Sigmoid_f:
 	1 output:
 		0: output data (float)
 	The function (1.0 + tanh(x))/2
+
+Gather_f:
+Gather_int32:
+	2..4 inputs:
+		0 : index tensor (always int32)
+		1 : table tensor (float, or int32 according)
+		2 : (optional) index_dim,  dim of table which is the 'table index' (0..3, or -1 to ignore)
+		3 : (optional) index_rank,  actual rank of  index tensor (0..4, or -1 to ignore)
+     1 output:
+     	0 : output tensor (same type as table input tensor)
+    Generalized table lookup; 'index_tensor' contains indices, and 'table_tensor' is a lookup table.
+  - rank of index tensor is inferred by stripping leading 1's (can be increased by 'index_rank')
+  - rank if table tensor is inferred by stripping leading 1's; the 'index dimension' is normally the
+    first dim >1, but 'index_dim' can specify a larger one. Size must be >=2 in that dim.
+  - Output shape is formed by removing the 'index dim' from the table shape, replacing it with the shape of the
+    index tensor (with leading 1's stripped, and according to index_rank). The lookups are done accordingly.
+  - Output rank is thus index-rank + table-rank-1, and this must be <=4. 1's will added on the left if <4.
+  - The values in the 'index tensor' are normally 0..TABN-1, where TABN is the size of the table tensor
+    on the index dimension. If values are outside this range, results depend on padding:
+    		NN_PAD_NA - whatever is fastest (while still 'safe'); use this if all values are in range. 
+    		NN_PAD_SAME - will raise an error if any out of range
+    		NN_PAD_VALID :  out-of-range indices will be clipped to range
+    		Others are reserved.
+   -Note that index_rank has no effect unless index_dim is used to select an index dimension *after* the
+    first one which is >1, so that some table dimensions appear before the index dimensions in the output shape.
+     Examples:
+              index     table     ->  result.
+     		(1,1,1,6)  (1,32,5,9)  ->  (1,6,5,9)		# 6 lookup in table of 32 of [5,9]
+     		(1,1,4,7)  (1,32,5,9)  ->  (4,7,5,9)        # 4x7 lookup in table of 32 of [5,9]
+     		(2,5,5,12) (1,1,1,256) -> (2,5,5,12)       # 2x5x5x12 lookups in one linear table [256] 
+     		(1,1,4,20) (1,5,64,12), index_dim = 2
+     								-> (5,4,20,12)		# 4x20 lookup in table of 64 of [5,*,12]
+     		(1,1,1,8) (1,5,64,12), index_dim = 2
+     								-> (1,5,8,12)		# 8 lookup in table of 64 of [5,*,12]
+     		(1,1,1,1) (1,5,64,12), index_dim = 2		# (index is taken to be rank 0 here)
+     								-> (1,1,5,12)		# 1 lookup in table of 64 of [5,*,12]
+     		(1,1,1,8) (1,5,64,12), index_dim = 2, index_rank =2    # force index to (1,8)
+     								-> (5,1,8,12)		# 1x8 lookup in table of 64 of [5,*,12]
+			     								 
+Gather_8:     								
+	4..6 inputs:
+		0 : index tensor (int32)
+		1 : table tensor (quint8)
+		2 : table min
+		3 : table max
+		4 : (optional) index_dim,  dim of table which is the 'table index' (0..3, or -1 to ignore)
+		5 : (optional) index_rank,  actual rank of  index tensor (0..4, or -1 to ignore)
+     3 outputs:
+     	0 : output tensor (quint8)
+     	1 : output min
+     	2 : output max
+     See description of Gather_f. The output min/max are copied from the table min/max
+
+FillPadding_8_d32:
+	1..3 inputs:
+		0: input tensor (d32 format)
+		1: optional spatial fill byte; 0..0xFF or -1 for random. Default is 0xFF
+		2: optional depth fill byte; 0..0xFF or -1 for random. Default is same as spatial fill.
+    1 output:
+    	0: output, same data and format as input 0; padding areas filled.
+    	
+     This is for testing, to help ensure that d32 nodes don't rely on data in padding areas.
+     The top/left/right/bottom padding areas, if any, are filled according to 'spatial fill' and
+     depth before/after (if any) according to 'depth fill'. 
+     Also: if space allows, up to 4 additional rows after the last batch are filled according to 'spatial fill'.
+
 
 Variable:
 	N inputs (optional):

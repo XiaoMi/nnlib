@@ -9,7 +9,17 @@ include $(QURT_IMAGE_DIR)/qurt_libs.min
 
 include hexagon/files.mak
 
-CC_FLAGS += -DUSE_OS_QURT $(MHVX_DOUBLE_FLAG) -Ihexagon/include
+CC_FLAGS += -DNN_LOG_MAXLEV=9 -DUSE_OS_QURT $(MHVX_DOUBLE_FLAG) -Ihexagon/include
+ASM_FLAGS += $(MHVX_DOUBLE_FLAG)
+CXX_FLAGS += $(MHVX_DOUBLE_FLAG)
+
+ifeq ($(V65), 1)
+CC_FLAGS += -DV65=1 -DHEXAGON_V65=1 -mv65
+HEXAGON_NN_ASM_SRCS += hexagon/asm_src/gvconv2dbbb_circ_d64_v65_h.S \
+	hexagon/asm_src/gvconv2dbbb_circ_d32_v65_h.S \
+	hexagon/asm_src/repstream2_h.S
+endif
+
 
 # Use -O0 temporarily when trying to debug C code.
 #_OPT = -O0

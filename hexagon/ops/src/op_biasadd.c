@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -98,7 +98,7 @@ static int biasadd_32p32to32_execute(struct nn_node *self, struct nn_graph *nn)
 	for (stripe = 0; stripe < height*width*batches; stripe++) {
 		for (i = 0; i < depth; i++) {
 			out[stripe*depth+i] = in[stripe*depth+i]+fast_roundf(bias[i]*bias_to_in);
-			logmsg(nn,2,"in=%x bias=%x bias_to_in=%f out=%x",in[stripe*depth+i],bias[i],bias_to_in,out[stripe*depth+i]);
+			//logmsg(nn,2,"in=%x bias=%x bias_to_in=%f out=%x",in[stripe*depth+i],bias[i],bias_to_in,out[stripe*depth+i]);
 		}
 	}
 	return 0;

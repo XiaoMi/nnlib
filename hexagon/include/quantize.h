@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -296,7 +296,7 @@ static inline void quantize_adjust_range(float *out_min, float *out_max, float *
 			// avoid divide by 0) otherwise choose based on which can be moved
 			// the least.
 			//
-			if( zi > 0.0f && ( zi > 253.0f || (zf-1.0f)*minval> zf*maxval )) {
+			if( zi > 0.0f && ( zi > 253.0f || (zf-1.0f)*minval>= zf*maxval )) {
 				// increase max, change z to zi
 				range = -255.0f*minval/zi;
 				maxval = minval+ range;

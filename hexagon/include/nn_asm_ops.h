@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -238,10 +238,27 @@ static inline void l2pref(const void *p, uint32_t height, uint32_t width, uint32
 #endif
 }
 
-
 static inline void l2fetch(const void *p, uint32_t stride, uint32_t width, uint32_t height)
 {
 	return l2pref(p,height,width,stride);
+}
+
+static inline void l2fetch_v(const void *p, uint32_t stride, uint32_t width, uint32_t height)
+{
+#if defined(__hexagon__)
+	uint64_t control = Q6_P_combine_RR(Q6_R_combine_RlRl(1,stride),Q6_R_combine_RlRl(width,height));
+	asm volatile (" l2fetch(%0,%1) " : :"r"(p),"r"(control));
+#endif
+}
+
+static inline void wait_for_l2fetch()
+{
+#if defined(__hexagon__)
+	int32_t usr;
+	do {
+		asm volatile ("%0 = usr" :"=r"(usr));
+	} while(usr < 0);
+#endif
 }
 
 static inline int32_t fast_roundf(float f)
@@ -513,7 +530,24 @@ void dwconv2dbbb_unsigned_v60_asm(
 	int32_t stride_height,
 	int32_t zshift,
 	const uint8_t *ctrl,
-        int32_t filt_offset);
+	int32_t filt_offset);
+
+void dwconv3x3bbb_unsigned_v60_asm(
+	const uint8_t *input, 
+	const uint8_t *weights,
+	const int32_t *ptr_wsum,
+	uint8_t *output,
+	int32_t next_in_width_depth, 
+	int32_t next_in_width_32, 
+	int32_t indepth, 
+	int32_t out_width, 
+	int32_t next_out_width_depth,
+	int32_t num_out_lines, 
+	int32_t recip_level, 
+	int32_t zshift,
+	int32_t *ptr_max,
+	int32_t stride_height,
+	int32_t filt_offset);
 
 void dwconv2dbbb_s2_v60_asm(
 	const uint8_t *input, 
@@ -552,7 +586,25 @@ void dwconv2dbbb_unsigned_s2_v60_asm(
 	int32_t stride_height,
 	int32_t zshift,
 	int32_t padding_shift,
-        int32_t filt_offset);
+	int32_t filt_offset);
+
+void dwconv3x3bbb_unsigned_s2_v60_asm(
+	const uint8_t *input, 
+	const uint8_t *weights,
+	const int32_t *ptr_wsum,
+	uint8_t *output,
+	int32_t next_in_width_depth, 
+	int32_t next_in_width_32, 
+	int32_t indepth, 
+	int32_t out_width, 
+	int32_t next_out_width_depth,
+	int32_t num_out_lines, 
+	int32_t recip_level, 
+	int32_t zshift,
+	int32_t *ptr_max,
+	int32_t stride_height,
+	int32_t filt_offset,
+	int32_t padding );
 
 void scalemem_d32_hvx(
 	uint8_t * ptr_out,

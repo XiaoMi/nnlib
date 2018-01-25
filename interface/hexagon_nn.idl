@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -87,6 +87,18 @@ struct tensordef {
 	unsigned long data_valid_len;	/* Return location for valid data out */
 	unsigned long unused;		/* Unused */
 };
+
+/* 
+ * 
+ * Please put new functions at the end
+ * 
+ * This helps during the transitioning of a change in the interface
+ * 
+ * Otherwise, if the DSP library and ARM side were built with a mismatch,
+ * you might not get the correct function call and will observe strange 
+ * behavior.
+ * 
+ */
 
 /* Actual functions in the interface */
 /* Returns 0 on success, nonzero on error unless otherwise noted */
@@ -179,6 +191,8 @@ long PrintLog(in sequence<octet> buf);
 long execute_new(in nn_id id,
 	in sequence<tensordef> inputs,
 	rout sequence<tensordef> outputs);
+
+unsigned long get_dsp_offset();
 
 }; /* interface hexagon_nn */
 

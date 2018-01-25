@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -41,6 +41,7 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <time.h>
+#include <pmu_control_linux.h>
 
 #ifndef DONT_REDEF_ALLOC
 #define DONT_REDEF_ALLOC 1
@@ -114,7 +115,7 @@ static inline uint64_t nn_os_get_cycles(struct nn_graph *nn)
 	return ret;
 }
 
-static inline uint64_t nn_os_get_perfcount(struct nn_graph *nn) { return nn_os_get_cycles(nn); }
+unsigned long long int nn_os_get_perfcount(struct nn_graph *nn);
 
 int nn_os_workers_spawn(struct nn_graph *nn);
 void nn_os_workers_kill(struct nn_graph *nn);

@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -57,7 +57,8 @@ static int convert_from_d32_execute(struct nn_graph *nn, void *vself)
 	int in_d32_stride = tensor_d32_stride_d32( in_tensor);
 	int b,h,w,d;
 	if (tensor_out_prepare_normal(out_tensor,b_in,h_in,w_in,d_in,NN_TYPE_QUINT8)) {
-		return errlog(nn,"can't prepare output");
+		return errlog(nn,"can't prepare output bhwd=%d,%d,%d,%d out_size=%d",
+			b_in,h_in,w_in,d_in,out_tensor->max_size);
 	}
 
 	int d_left = in_tensor->format.depth_pad[0];

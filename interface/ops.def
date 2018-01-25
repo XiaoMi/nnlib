@@ -1,3 +1,4 @@
+
 /* 
  * You probably want to 
  * 
@@ -219,9 +220,8 @@ DEF_OP_WREF(QuantizedTanh_8_d32)
 DEF_OP_WREF(QuantizedSigmoid_8_d32)
 DEF_OP_WREF(QuantizedSoftmax_8_d32)
 
-#if 0
+
 DEF_OP_WREF(QuantizedL2Pool_8_d32)
-#endif
 
 DEF_OP(Gather_f)
 DEF_OP(Gather_int32)

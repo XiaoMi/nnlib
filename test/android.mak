@@ -19,8 +19,13 @@ $(COMPILE_GRAPHINIT) \
 
 graph_app_C_SRCS += $(TESTDATA:.c=)
 
-graph_app_DLLS += libadsprpc 
-graph_app_LIBS += rpcmem 
+graph_app_LIBS += rpcmem
+ifeq ($(CDSP_FLAG), 1)
+	graph_app_DLLS += libcdsprpc
+	CC_FLAGS += -DCDSP_FLAG
+else
+	graph_app_DLLS += libadsprpc
+endif
 graph_app_LD_FLAGS += -llog
 CC_FLAGS += -Iinterface
 graph_app_DEFINES += VERIFY_PRINT_ERROR

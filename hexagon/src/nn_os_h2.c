@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -89,8 +89,16 @@ void *nn_os_get_vtcm(struct nn_graph *nn, uint32_t *size)
 	return (void *)VTCM_ADDRESS;
 }
 
+int nn_os_vtcm_acquire(struct nn_graph *nn) {
+	nn->vtcm_ptr = (void *)VTCM_ADDRESS;
+	nn->vtcm_size = 256*1024;
+        return 0;
+}
 
-int nn_os_vtcm_acquire(struct nn_graph *nn) { return 0; }
-int nn_os_vtcm_release(struct nn_graph *nn) { return 0; }
+int nn_os_vtcm_release(struct nn_graph *nn) {
+	nn->vtcm_ptr = NULL;
+	nn->vtcm_size = 0;
+        return 0;
+}
 
 #endif

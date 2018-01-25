@@ -125,6 +125,7 @@ Other nodes are appended with:
 		NN_PAD_NA,
 		NN_PAD_SAME,
 		NN_PAD_VALID,
+		NN_PAD_SAME_CAFFE
 	} padding_type;
 
 	typedef struct {
@@ -134,7 +135,7 @@ Other nodes are appended with:
 
 	typedef struct {
 		uint32_t max_size;
-		uint32_t unused;
+		uint32_t reserved;
 	} hexagon_nn_output;
 
 	int hexagon_nn_append_node(

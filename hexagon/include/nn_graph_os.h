@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -206,7 +206,7 @@ static inline void *nn_memalign_debug(size_t a, size_t size, const char *filenam
 static inline void *nn_realloc_debug(void *ptr, size_t size, const char *filename, int line) 
 {
 	void *ret = nn_realloc(ptr,size);
-	printf("MEMDBG:%s:%d:FREE:%p\n",filename,line,ptr);
+	if (ptr != NULL) printf("MEMDBG:%s:%d:FREE:%p\n",filename,line,ptr);
 	printf("MEMDBG:%s:%d:ALLOC(%d):%p\n",filename,line,size,ret);
 	return ret;
 }

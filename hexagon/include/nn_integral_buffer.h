@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -295,12 +295,17 @@ setup_integ_buffer_vscan( struct integ_buff_vscan *vscan, struct integral_buffer
 	// set up the producer's read pointer
 	//
 	uint8_t const *prod_rd_ptr = ibp->tin.data +  batch_idx * ibp->tin.batch_stride + d32_idx * ibp->tin.d32_stride;
-	int wid_in = ibp->inshape.width;
+	int in_wid = ibp->inshape.width;
+	int in_ht = ibp->inshape.height;
+
+	// l2 prefetch
+	l2fetch( prod_rd_ptr, ibp->tin.height_stride, in_wid*32, in_ht);
+
 	// pointer is 32-aligned but maybe not 128 aligned...
 	int producer_w0 = ((size_t)prod_rd_ptr >> 5) & 3;		// # of width units to suppress on the left.
 	// if producer_w0 > 0, adj pointer to the left and expand width
 	vscan->producer_in_row = (uint8_t const*)( (size_t)prod_rd_ptr & ~127);
-	vscan->producer_widvecs = ( producer_w0+ wid_in+3) >>2;	// # of full vecs.
+	vscan->producer_widvecs = ( producer_w0+ in_wid+3) >>2;	// # of full vecs.
 	vscan->producer_w0 = producer_w0;
 	vscan->producer_nrows = 0;
 
@@ -317,7 +322,7 @@ setup_integ_buffer_vscan( struct integ_buff_vscan *vscan, struct integral_buffer
 	//  (assuming stride_h =1). This is always >= 0.
 	vscan->row_offset = (win_h-1)-wpad_top;
 
-	vscan->input_height = ibp->inshape.height;
+	vscan->input_height = in_ht;
 	vscan->bot_pad_count = 0;
 
 
@@ -399,11 +404,92 @@ avgpool_inner_load1_loop( int32_t * row0_ptr, int32_t const * ref_row_ptr, const
 	}
 }
 
+
+static inline void
+avgpool_inner_load2_loop( int32_t * row0_ptr,
+		int32_t *row1_ptr,
+		int32_t const * ref_row_ptr,
+		const uint8_t * inrow0,
+		const uint8_t * inrow1,
+		int wid_proc,
+		int parm )
+{
+	for(int id = 0; id < 32; id ++){
+		int32_t hsum0=0;	// sum of pixels on 0 row
+		int32_t hsum1=0;	// sum of pixels on 0 and 1 rows
+		int32_t prevsum= 0;	// sum from above.
+		for( int j = 0; j < wid_proc; j++){
+			row0_ptr[32*j+id]= hsum0*256 + prevsum;
+			row1_ptr[32*j+id]= hsum1*256 +prevsum;
+			prevsum = ref_row_ptr[32*(j+1)+id];
+			int pix0 = inrow0[32*j+id];
+			int pix1 = inrow1[32*j+id];
+			hsum0 += pix0;
+			hsum1 += (pix1+pix0);
+		}
+		row0_ptr[32*wid_proc+id] = hsum0*256+prevsum;
+		row1_ptr[32*wid_proc+id] = hsum1*256+prevsum;
+	}
+}
+
+
+
+
+#else
+static inline void
+l2pool_inner_load1_loop( int32_t * row0_ptr, int32_t const * ref_row_ptr, const uint8_t * inrow0, int wid_proc , int zcode){
+	for(int id = 0; id < 32; id ++){
+		int32_t hsum0=0;	// sum of pixels^2 on 0 row
+		int32_t prevsum= 0;	// sum from above.
+		for( int j = 0; j < wid_proc; j++){
+			row0_ptr[32*j +id]= hsum0 + prevsum;
+			prevsum = ref_row_ptr[32*(j+1) + id];
+			int pix0 = inrow0[32*j+id]-zcode;
+			hsum0 += pix0*pix0;
+		}
+		row0_ptr[32*wid_proc+id] = hsum0+prevsum;
+	}
+}
+static inline void
+l2pool_inner_load2_loop( int32_t * row0_ptr,
+		int32_t *row1_ptr,
+		int32_t const * ref_row_ptr,
+		const uint8_t * inrow0,
+		const uint8_t * inrow1,
+		int wid_proc,
+		int zcode )
+{
+	for(int id = 0; id < 32; id ++){
+		int32_t hsum0=0;	// sum of pixels^2 on 0 row
+		int32_t hsum1=0;	// sum of pixels^2 on 0 and 1 rows
+		int32_t prevsum= 0;	// sum from above.
+		for( int j = 0; j < wid_proc; j++){
+			row0_ptr[32*j+id]= hsum0 + prevsum;
+			row1_ptr[32*j+id]= hsum1 +prevsum;
+			prevsum = ref_row_ptr[32*(j+1)+id];
+			int pix0 = inrow0[32*j+id]-zcode;
+			int pix1 = inrow1[32*j+id]-zcode;
+			pix0 *= pix0;
+			pix1 *= pix1;
+			hsum0 += pix0;
+			hsum1 += (pix1+pix0);
+		}
+		row0_ptr[32*wid_proc+id] = hsum0+prevsum;
+		row1_ptr[32*wid_proc+id] = hsum1+prevsum;
+	}
+}
+#endif
+
 #ifdef __hexagon__
 #define FAKEDEP_VV( vec,vec2)	asm ("/*%0 %1*/": "=v"(vec), "=v"(vec2): "0"(vec), "1"(vec2))
 #else
 #define FAKEDEP_VV( vec,vec2)
 #endif
+
+
+///////////////////////////////////////////////////////////////////////////
+// avgpool loading loops
+#ifndef NN_INTEGRAL_BUF_FOR_L2POOL
 //
 // inner loop, hvx, 1 rows at once
 // - reads nvec vectors from inrow0,
@@ -523,35 +609,8 @@ avgpool_inner_load1_loop_hvx( int32_t * row0_ptr,
 	voutp0[0] = Q6_Vw_vadd_VwVw(Above0,rowBefore);
 }
 
-static inline void
-avgpool_inner_load2_loop( int32_t * row0_ptr,
-		int32_t *row1_ptr,
-		int32_t const * ref_row_ptr,
-		const uint8_t * inrow0,
-		const uint8_t * inrow1,
-		int wid_proc,
-		int parm )
-{
-	for(int id = 0; id < 32; id ++){
-		int32_t hsum0=0;	// sum of pixels on 0 row
-		int32_t hsum1=0;	// sum of pixels on 0 and 1 rows
-		int32_t prevsum= 0;	// sum from above.
-		for( int j = 0; j < wid_proc; j++){
-			row0_ptr[32*j+id]= hsum0*256 + prevsum;
-			row1_ptr[32*j+id]= hsum1*256 +prevsum;
-			prevsum = ref_row_ptr[32*(j+1)+id];
-			int pix0 = inrow0[32*j+id];
-			int pix1 = inrow1[32*j+id];
-			hsum0 += pix0;
-			hsum1 += (pix1+pix0);
-		}
-		row0_ptr[32*wid_proc+id] = hsum0*256+prevsum;
-		row1_ptr[32*wid_proc+id] = hsum1*256+prevsum;
-	}
-}
-
 //
-// inner loop, hvx, 2 rows at once
+// avgpool inner loop, hvx, 2 rows at once
 // - reads nvec vectors from each of inrow0, inrow1
 // - reads nvec*4+1 vectors from ref_row_ptr;
 // - writes nvec*4+1 vector to each of row0_ptr, row1_ptr
@@ -668,7 +727,9 @@ avgpool_inner_load2_loop_hvx( int32_t * row0_ptr,
 		extCD = Q6_Vh_vdmpy_VubRb( Q6_V_hi_W(shuf1), const_0N0N );
 		sumCD = Q6_Vh_vdmpy_VubRb( Q6_V_hi_W(shuf1), const_NNNN );
 	} // end of loop
-
+	// This 'fake asm' prevents the compiler from seeing the below as
+	// being the same as the first 75% of the loop; if it sees that it can
+	// roll them back together with a 'middle exit' and then we don't get a loop0.
 	FAKEDEP_VV( extAB,sumAB);
 	FAKEDEP_VV( extCD,sumCD);
 	{  // >> unpeel
@@ -711,54 +772,292 @@ avgpool_inner_load2_loop_hvx( int32_t * row0_ptr,
 	voutp0[0] = Q6_Vw_vadd_VwVw(Above0,rowBefore);
 	voutp1[0] = Q6_Vw_vadd_VwVw(Above0,row2Before);
 }
-
-
 #else
+////////////////////////// L2pool loading loops
+
+//
+// l2pool inner loop, hvx, 1 rows at once
+// - reads nvec vectors from inrow0,
+// - reads nvec*4+1 vectors from ref_row_ptr;
+// - writes nvec*4+1 vector to each of row0_ptr
+//  The first output on each of those rows is 0.
+//
+// All of the pointers are vec-aligned. The first
+// input vector may contain 0..3 'dead' lanes;
+// this is encoded in in_w0 (e.g. in_w0=1 means the first
+//  32 input bytes are padding; they will be forced to 0
+// when processed)
+
 static inline void
-l2pool_inner_load1_loop( int32_t * row0_ptr, int32_t const * ref_row_ptr, const uint8_t * inrow0, int wid_proc , int zcode){
-	for(int id = 0; id < 32; id ++){
-		int32_t hsum0=0;	// sum of pixels^2 on 0 row
-		int32_t prevsum= 0;	// sum from above.
-		for( int j = 0; j < wid_proc; j++){
-			row0_ptr[32*j +id]= hsum0 + prevsum;
-			prevsum = ref_row_ptr[32*(j+1) + id];
-			int pix0 = inrow0[32*j+id]-zcode;
-			hsum0 += pix0*pix0;
-		}
-		row0_ptr[32*wid_proc+id] = hsum0+prevsum;
+l2pool_inner_load1_loop_hvx( int32_t * row0_ptr,
+		int32_t const * ref_row_ptr,
+		const uint8_t * inrow0,
+		int nvec,
+		int in_w0,
+		int parm )
+{
+	HVX_Vector inzero = q6op_Vb_vsplat_R( parm);
+	HVX_Vector const *refrow = (HVX_Vector const*)ref_row_ptr;
+	HVX_Vector const *vinp0 = (HVX_Vector const*) inrow0;
+
+	HVX_Vector * voutp0 = (HVX_Vector *)row0_ptr;
+	HVX_Vector rowBefore = Q6_V_vzero();
+	HVX_Vector Above0 = Q6_V_vzero();
+
+	// mask to suppress 0,1,2 or 3 initial width units
+	HVX_VectorPred startmask = Q6_Q_vsetq_R( 32*in_w0);
+
+	HVX_Vector difAC,difBD;
+	{ // unpeel half loop...
+		HVX_Vector vin0 = *vinp0++;
+		// replace 'width padding' values with inzero
+		vin0 = Q6_V_vmux_QVV (startmask, inzero, vin0);
+		// shuffle...
+		// A0 C0 A1 ... A31 C31 B0 D0   .. D31
+		vin0 = Q6_Vb_vshuff_Vb( vin0);
+		// subtract inzero from it, promote to int16 in the process
+		HVX_VectorPair x16 = Q6_Wh_vsub_VubVub( vin0, inzero);
+		// A0 A1 .. A31 B0 ..B31
+		// C0 C1 .. C31 D0..D31
+		// Reorder
+		//
+		x16 = Q6_W_vshuff_VVR(  Q6_V_hi_W(x16), Q6_V_lo_W(x16),-2);
+		// A0 C0 A1 C1 ..  B31
+		// B0 D0 ..        D31
+		difAC = Q6_V_lo_W(x16);
+		difBD = Q6_V_hi_W(x16);
+
 	}
+	for( int j = 0; j < nvec-1; j++ ){
+		// square it
+		HVX_VectorPair sqA_C = Q6_Ww_vmpy_VhVh(difAC,difAC);
+		HVX_VectorPair sqAB_CD = Q6_Ww_vmpyacc_WwVhVh(sqA_C, difBD,difBD);
+		// now we have 4 of A0 .. A31, B0 .. B31
+
+		HVX_Vector rowA = Q6_Vw_vadd_VwVw( rowBefore, Q6_V_lo_W(sqA_C));	// before + A
+		HVX_Vector rowAB = Q6_Vw_vadd_VwVw( rowBefore, Q6_V_lo_W(sqAB_CD));	// before + A+B
+		HVX_Vector rowABC = Q6_Vw_vadd_VwVw( rowAB, Q6_V_hi_W(sqA_C));	// before + A+B+C
+		HVX_Vector rowABCD = Q6_Vw_vadd_VwVw( rowAB, Q6_V_hi_W(sqAB_CD));	// before + A+B+C+D
+
+		HVX_Vector AboveA = refrow[1];
+		HVX_Vector AboveB = refrow[2];
+		HVX_Vector AboveC = refrow[3];
+		voutp0[0] = Q6_Vw_vadd_VwVw(Above0,rowBefore);
+		voutp0[1] = Q6_Vw_vadd_VwVw(AboveA,rowA);
+		Above0 = refrow[4];
+		voutp0[2] = Q6_Vw_vadd_VwVw(AboveB,rowAB);
+		voutp0[3] = Q6_Vw_vadd_VwVw(AboveC,rowABC);
+		voutp0 += 4;
+		refrow += 4;
+		rowBefore = rowABCD;
+		//------------- split...
+		HVX_Vector vin0 = *vinp0++;
+		vin0 = Q6_Vb_vshuff_Vb( vin0);
+		HVX_VectorPair x16 = Q6_Wh_vsub_VubVub( vin0, inzero);
+		x16 = Q6_W_vshuff_VVR(  Q6_V_hi_W(x16), Q6_V_lo_W(x16),-2);
+		difAC = Q6_V_lo_W(x16);
+		difBD = Q6_V_hi_W(x16);
+
+	}// end loop
+	// unpeel last half loop
+	// This 'fake asm' prevents the compiler from seeing the below as
+	// being the same as the first 75% of the loop; if it sees that it can
+	// roll them back together with a 'middle exit' and then we don't get a loop0.
+	FAKEDEP_VV( difAC,difBD);
+	{
+		HVX_VectorPair sqA_C = Q6_Ww_vmpy_VhVh(difAC,difAC);
+		HVX_VectorPair sqAB_CD = Q6_Ww_vmpyacc_WwVhVh(sqA_C, difBD,difBD);
+		HVX_Vector rowA = Q6_Vw_vadd_VwVw( rowBefore, Q6_V_lo_W(sqA_C));	// before + A
+		HVX_Vector rowAB = Q6_Vw_vadd_VwVw( rowBefore, Q6_V_lo_W(sqAB_CD));	// before + A+B
+		HVX_Vector rowABC = Q6_Vw_vadd_VwVw( rowAB, Q6_V_hi_W(sqA_C));	// before + A+B+C
+		HVX_Vector rowABCD = Q6_Vw_vadd_VwVw( rowAB, Q6_V_hi_W(sqAB_CD));	// before + A+B+C+D
+		HVX_Vector AboveA = refrow[1];
+		HVX_Vector AboveB = refrow[2];
+		HVX_Vector AboveC = refrow[3];
+		voutp0[0] = Q6_Vw_vadd_VwVw(Above0,rowBefore);
+		voutp0[1] = Q6_Vw_vadd_VwVw(AboveA,rowA);
+		Above0 = refrow[4];
+		voutp0[2] = Q6_Vw_vadd_VwVw(AboveB,rowAB);
+		voutp0[3] = Q6_Vw_vadd_VwVw(AboveC,rowABC);
+		voutp0 += 4;
+		refrow += 4;
+		rowBefore = rowABCD;
+
+	}
+	voutp0[0] = Q6_Vw_vadd_VwVw(Above0,rowBefore);
 }
+
+
+//
+// l2pool inner loop, hvx, 2 rows at once
+// - reads nvec vectors from each of inrow0, inrow1
+// - reads nvec*4+1 vectors from ref_row_ptr;
+// - writes nvec*4+1 vector to each of row0_ptr, row1_ptr
+//  The first output on each of those rows is 0.
+//
+// All of the pointers are vec-aligned. The first
+// input vector may contain 0..3 'dead' lanes;
+// this is encoded in in_w0 (e.g. in_w0=1 means the first
+//  32 input bytes are padding; they will be forced to 0
+// when processed)
+//
+
 static inline void
-l2pool_inner_load2_loop( int32_t * row0_ptr,
+l2pool_inner_load2_loop_hvx( int32_t * row0_ptr,
 		int32_t *row1_ptr,
 		int32_t const * ref_row_ptr,
 		const uint8_t * inrow0,
 		const uint8_t * inrow1,
-		int wid_proc,
-		int zcode )
+		int nvec,
+		int in_w0,
+		int parm )
 {
-	for(int id = 0; id < 32; id ++){
-		int32_t hsum0=0;	// sum of pixels^2 on 0 row
-		int32_t hsum1=0;	// sum of pixels^2 on 0 and 1 rows
-		int32_t prevsum= 0;	// sum from above.
-		for( int j = 0; j < wid_proc; j++){
-			row0_ptr[32*j+id]= hsum0 + prevsum;
-			row1_ptr[32*j+id]= hsum1 +prevsum;
-			prevsum = ref_row_ptr[32*(j+1)+id];
-			int pix0 = inrow0[32*j+id]-zcode;
-			int pix1 = inrow1[32*j+id]-zcode;
-			pix0 *= pix0;
-			pix1 *= pix1;
-			hsum0 += pix0;
-			hsum1 += (pix1+pix0);
-		}
-		row0_ptr[32*wid_proc+id] = hsum0+prevsum;
-		row1_ptr[32*wid_proc+id] = hsum1+prevsum;
+
+	HVX_Vector inzero = q6op_Vb_vsplat_R( parm);
+	HVX_Vector const *refrow = (HVX_Vector const*)ref_row_ptr;
+	HVX_Vector const *vinp0 = (HVX_Vector const*) inrow0;
+	HVX_Vector const *vinp1 = (HVX_Vector const*) inrow1;
+
+	HVX_Vector * voutp0 = (HVX_Vector *)row0_ptr;
+	HVX_Vector * voutp1 = (HVX_Vector *)row1_ptr;
+
+	HVX_Vector rowBefore = Q6_V_vzero();
+	HVX_Vector row2Before = Q6_V_vzero();
+
+	HVX_Vector Above0 = Q6_V_vzero();
+
+
+	// mask to suppress 0,1,2 or 3 initial width units
+	HVX_VectorPred startmask = Q6_Q_vsetq_R( 32*in_w0);
+
+	HVX_Vector difAC_0, difBD_0, difAC_1, difBD_1;
+
+	{ // unpeel half loop...
+		// read two...
+		HVX_Vector vin0 = *vinp0++;
+		HVX_Vector vin1 = *vinp1++;
+		// replace 'width padding' values with inzero
+		vin0 = Q6_V_vmux_QVV (startmask, inzero, vin0);
+		vin1 = Q6_V_vmux_QVV (startmask, inzero, vin1);
+		HVX_VectorPair inshuf = Q6_W_vshuff_VVR( vin1, vin0, -1);
+
+		// shuffle...  (ABCD from vin0, abcd from vin1)
+		// A0 a0 ... A31 a31 B0 b0   .. b31
+		// C0 c0 ... C31 c31 D0 d0   ...d31
+
+		// subtract inzero from it, promote to int16 in the process
+		HVX_VectorPair x16ab = Q6_Wh_vsub_VubVub( Q6_V_lo_W(inshuf), inzero);
+		HVX_VectorPair x16cd = Q6_Wh_vsub_VubVub( Q6_V_hi_W(inshuf), inzero);
+		// x16ab: A0  .. A31 B0 .. B31
+		//        a0  .. a31 b0 .. b31
+		// x16cd: C0 ..  C31 D0 .. D31
+		//        c0 ..  c31 d0 .. d31
+		// Reorder
+		HVX_VectorPair x16_0 = Q6_W_vshuff_VVR(  Q6_V_lo_W(x16cd), Q6_V_lo_W(x16ab),-2);
+		// A0 C0  ... A31 C31
+		// B0 D0  ... B31 D31
+		HVX_VectorPair x16_1 = Q6_W_vshuff_VVR(  Q6_V_hi_W(x16cd), Q6_V_hi_W(x16ab),-2);
+		// a0 c0  ... a31 c31
+		// b0 d0  ... b31 d31
+		// now we can do the squares of A,B,C,D
+		difAC_0 = Q6_V_lo_W(x16_0);
+		difBD_0 = Q6_V_hi_W(x16_0);
+		difAC_1 = Q6_V_lo_W(x16_1);
+		difBD_1 = Q6_V_hi_W(x16_1);
 	}
+	for( int j = 0; j < nvec-1; j++){
+		// find all the squares; for the lower row, add the upper row's squares.
+		HVX_VectorPair sqA0_C0 = Q6_Ww_vmpy_VhVh(difAC_0,difAC_0);	//A^2, C^2
+		HVX_VectorPair sqB0_D0 = Q6_Ww_vmpy_VhVh(difBD_0,difBD_0);	//B^2, D^2
+		HVX_VectorPair sqA1_C1 = Q6_Ww_vmpyacc_WwVhVh(sqA0_C0, difAC_1,difAC_1);	// +a^2, c^2
+		HVX_VectorPair sqB1_D1 = Q6_Ww_vmpyacc_WwVhVh(sqB0_D0, difBD_1,difBD_1);	// b^2, d^2
+
+		// add across
+		HVX_Vector rowA = Q6_Vw_vadd_VwVw(rowBefore, Q6_V_lo_W(sqA0_C0) );
+		HVX_Vector rowAB = Q6_Vw_vadd_VwVw(rowA, Q6_V_lo_W(sqB0_D0) );
+		HVX_Vector rowABC = Q6_Vw_vadd_VwVw(rowAB, Q6_V_hi_W(sqA0_C0) );
+		HVX_Vector rowABCD = Q6_Vw_vadd_VwVw(rowABC, Q6_V_hi_W(sqB0_D0) );
+
+		HVX_Vector row2A = Q6_Vw_vadd_VwVw(row2Before, Q6_V_lo_W(sqA1_C1) );
+		HVX_Vector row2AB = Q6_Vw_vadd_VwVw(row2A, Q6_V_lo_W(sqB1_D1) );
+		HVX_Vector row2ABC = Q6_Vw_vadd_VwVw(row2AB, Q6_V_hi_W(sqA1_C1) );
+		HVX_Vector row2ABCD = Q6_Vw_vadd_VwVw(row2ABC, Q6_V_hi_W(sqB1_D1) );
+
+
+		HVX_Vector AboveA = refrow[1];
+		HVX_Vector AboveB = refrow[2];
+		HVX_Vector AboveC = refrow[3];
+		voutp0[0] = Q6_Vw_vadd_VwVw(Above0,rowBefore);
+		voutp1[0] = Q6_Vw_vadd_VwVw(Above0,row2Before);
+		voutp0[1] = Q6_Vw_vadd_VwVw(AboveA,rowA);
+		voutp1[1] = Q6_Vw_vadd_VwVw(AboveA,row2A);
+		Above0 = refrow[4];
+		voutp0[2] = Q6_Vw_vadd_VwVw(AboveB,rowAB);
+		voutp1[2] = Q6_Vw_vadd_VwVw(AboveB,row2AB);
+		voutp0[3] = Q6_Vw_vadd_VwVw(AboveC,rowABC);
+		voutp1[3] = Q6_Vw_vadd_VwVw(AboveC,row2ABC);
+		voutp0 += 4;
+		voutp1 += 4;
+		refrow += 4;
+		rowBefore = rowABCD;
+		row2Before = row2ABCD;
+
+		//--------/ middle ...
+		HVX_Vector vin0 = *vinp0++;
+		HVX_Vector vin1 = *vinp1++;
+		HVX_VectorPair inshuf = Q6_W_vshuff_VVR( vin1, vin0, -1);
+		HVX_VectorPair x16ab = Q6_Wh_vsub_VubVub( Q6_V_lo_W(inshuf), inzero);
+		HVX_VectorPair x16cd = Q6_Wh_vsub_VubVub( Q6_V_hi_W(inshuf), inzero);
+		HVX_VectorPair x16_0 = Q6_W_vshuff_VVR(  Q6_V_lo_W(x16cd), Q6_V_lo_W(x16ab),-2);
+		HVX_VectorPair x16_1 = Q6_W_vshuff_VVR(  Q6_V_hi_W(x16cd), Q6_V_hi_W(x16ab),-2);
+		difAC_0 = Q6_V_lo_W(x16_0);
+		difBD_0 = Q6_V_hi_W(x16_0);
+		difAC_1 = Q6_V_lo_W(x16_1);
+		difBD_1 = Q6_V_hi_W(x16_1);
+	} // end of loop
+	// This 'fake asm' prevents the compiler from seeing the below as
+	// being the same as the first 75% of the loop; if it sees that it can
+	// roll them back together with a 'middle exit' and then we don't get a loop0.
+	FAKEDEP_VV( difAC_0,difBD_0);
+	FAKEDEP_VV( difAC_1,difBD_1);
+	{  // >> unpeel
+		HVX_VectorPair sqA0_C0 = Q6_Ww_vmpy_VhVh(difAC_0,difAC_0);	//A^2, C^2
+		HVX_VectorPair sqB0_D0 = Q6_Ww_vmpy_VhVh(difBD_0,difBD_0);	//B^2, D^2
+		HVX_VectorPair sqA1_C1 = Q6_Ww_vmpyacc_WwVhVh(sqA0_C0, difAC_1,difAC_1);	// +a^2, c^2
+		HVX_VectorPair sqB1_D1 = Q6_Ww_vmpyacc_WwVhVh(sqB0_D0, difBD_1,difBD_1);	// b^2, d^2
+		HVX_Vector rowA = Q6_Vw_vadd_VwVw(rowBefore, Q6_V_lo_W(sqA0_C0) );
+		HVX_Vector rowAB = Q6_Vw_vadd_VwVw(rowA, Q6_V_lo_W(sqB0_D0) );
+		HVX_Vector rowABC = Q6_Vw_vadd_VwVw(rowAB, Q6_V_hi_W(sqA0_C0) );
+		HVX_Vector rowABCD = Q6_Vw_vadd_VwVw(rowABC, Q6_V_hi_W(sqB0_D0) );
+
+		HVX_Vector row2A = Q6_Vw_vadd_VwVw(row2Before, Q6_V_lo_W(sqA1_C1) );
+		HVX_Vector row2AB = Q6_Vw_vadd_VwVw(row2A, Q6_V_lo_W(sqB1_D1) );
+		HVX_Vector row2ABC = Q6_Vw_vadd_VwVw(row2AB, Q6_V_hi_W(sqA1_C1) );
+		HVX_Vector row2ABCD = Q6_Vw_vadd_VwVw(row2ABC, Q6_V_hi_W(sqB1_D1) );
+		HVX_Vector AboveA = refrow[1];
+		HVX_Vector AboveB = refrow[2];
+		HVX_Vector AboveC = refrow[3];
+		voutp0[0] = Q6_Vw_vadd_VwVw(Above0,rowBefore);
+		voutp1[0] = Q6_Vw_vadd_VwVw(Above0,row2Before);
+		voutp0[1] = Q6_Vw_vadd_VwVw(AboveA,rowA);
+		voutp1[1] = Q6_Vw_vadd_VwVw(AboveA,row2A);
+		Above0 = refrow[4];
+		voutp0[2] = Q6_Vw_vadd_VwVw(AboveB,rowAB);
+		voutp1[2] = Q6_Vw_vadd_VwVw(AboveB,row2AB);
+		voutp0[3] = Q6_Vw_vadd_VwVw(AboveC,rowABC);
+		voutp1[3] = Q6_Vw_vadd_VwVw(AboveC,row2ABC);
+		voutp0 += 4;
+		voutp1 += 4;
+		refrow += 4;
+		rowBefore = rowABCD;
+		row2Before = row2ABCD;
+	} // << end unpeel
+	voutp0[0] = Q6_Vw_vadd_VwVw(Above0,rowBefore);
+	voutp1[0] = Q6_Vw_vadd_VwVw(Above0,row2Before);
 }
-#endif
 
-
+#endif //  NN_INTEGRAL_BUF_FOR_L2POOL
+///////////////////////////////////////////////////////////////////////////
 // multiply a 32-bit value by a signed 16-bit quantity with 15 fractional bits
 //
 static inline int32_t mul_frac_i32xi16( int32_t val, int16_t scl15)
@@ -1002,6 +1301,13 @@ INTEGRAL_BUF_FUNC(producer_load_rows_hvx)(
 	vscan->producer_nrows = new_nrows;
 
 	int nrows_remain = nrows;
+	// if the left padding is not a multiple of 4: we will process 1..3 'dummy'
+	// width units at the start of each row; the loop will force them to zero
+	// but we need to compensate our write pointer to the left by that many vectors,
+	// so that the results are properly placed; then move it back after loading,
+	int left_margin_adj = 128*(prod_w0&3);
+	ref_row_ptr = PTR_SUB_BYTES( int32_t, ref_row_ptr, left_margin_adj);
+
 	while( nrows_remain > 0){
 		int32_t * row0_ptr= PTR_ADD_BYTES(int32_t, ref_row_ptr, ibuf_row_bytes);
 		// wrap?
@@ -1025,6 +1331,8 @@ INTEGRAL_BUF_FUNC(producer_load_rows_hvx)(
 			nrows_remain -= 2;
 		}
 	}
+
+	ref_row_ptr = PTR_ADD_BYTES( int32_t, ref_row_ptr, left_margin_adj);
 	// store the 'next' "producer_prevrow"
 	vscan->producer_prevrow = ref_row_ptr;
 
@@ -1061,7 +1369,7 @@ INTEGRAL_BUF_FUNC(producer_load_rows_hvx)(
 					int scale = ibp->edgepad_scales_w[p-1];
 					HVX_Vector vscale = q6op_Vh_vsplat_R( scale);	// need it in odd h lanes
 					for(int i = 0; i < nrows; i++ ){
-						p_pad[0] = Q6_Vw_vmpyo_VwVh_s1_sat( p_pad[win_w], vscale );
+						p_pad[0] = Q6_Vw_vmpyo_VwVh_s1_rnd_sat( p_pad[win_w], vscale );
 						p_pad = PTR_SUB_BYTES( HVX_Vector, p_pad, (p_pad >= wrap_thr)?ibuf_row_bytes: wrap_around_adj);
 					}
 				}
@@ -1081,7 +1389,7 @@ INTEGRAL_BUF_FUNC(producer_load_rows_hvx)(
 				for(  int i = 0; i < nrows; i++ ){
 					HVX_Vector allsum = pW[0];
 					HVX_Vector delt = Q6_Vw_vsub_VwVw( allsum, pW[ref_delt]);
-					delt = Q6_Vw_vmpyo_VwVh_s1_sat( delt, vscale );
+					delt = Q6_Vw_vmpyo_VwVh_s1_rnd_sat( delt, vscale );
 					pW[p] = Q6_Vw_vsub_VwVw( allsum, delt );
 					pW = PTR_SUB_BYTES( HVX_Vector, pW, (pW >= wrap_thr)?ibuf_row_bytes: wrap_around_adj);
 				}
@@ -1127,7 +1435,7 @@ INTEGRAL_BUF_FUNC(producer_load_rows_hvx)(
 				HVX_Vector vscale = q6op_Vh_vsplat_R( scale);	// need it in odd h lanes
 				for( int j = 0; j < nwid; j++ ){
 					HVX_Vector delt = refrow[j];
-					padrow[j] = Q6_Vw_vmpyo_VwVh_s1_sat( delt, vscale );
+					padrow[j] = Q6_Vw_vmpyo_VwVh_s1_rnd_sat( delt, vscale );
 				}
 				refrow = PTR_SUB_BYTES( HVX_Vector, refrow, ibuf_row_bytes);	// move up one row
 			}
@@ -1246,8 +1554,8 @@ producer_add_bottom_padding_hvx( struct integ_buff_vscan *vscan, struct integral
 			HVX_Vector delt0 = Q6_Vw_vsub_VwVw(fullsum0,p_ref[0]);
 			HVX_Vector fullsum1 = p_rowH[1];
 			HVX_Vector delt1 = Q6_Vw_vsub_VwVw(fullsum1,p_ref[1]);
-			delt0 = Q6_Vw_vmpyo_VwVh_s1_sat( delt0, vscale);
-			delt1 = Q6_Vw_vmpyo_VwVh_s1_sat( delt1, vscale);
+			delt0 = Q6_Vw_vmpyo_VwVh_s1_rnd_sat( delt0, vscale);
+			delt1 = Q6_Vw_vmpyo_VwVh_s1_rnd_sat( delt1, vscale);
 			p_wrt[0] = Q6_Vw_vsub_VwVw(fullsum0, delt0);
 			p_wrt[1] = Q6_Vw_vsub_VwVw(fullsum1, delt1);
 			p_rowH +=2;
@@ -1257,7 +1565,7 @@ producer_add_bottom_padding_hvx( struct integ_buff_vscan *vscan, struct integral
 		if(nwid&1){
 			HVX_Vector fullsum = p_rowH[0];
 			HVX_Vector delt = Q6_Vw_vsub_VwVw(fullsum,p_ref[0]);
-			delt = Q6_Vw_vmpyo_VwVh_s1_sat( delt, vscale);
+			delt = Q6_Vw_vmpyo_VwVh_s1_rnd_sat( delt, vscale);
 			p_wrt[0] = Q6_Vw_vsub_VwVw(fullsum, delt);
 		}
 		++rows_added;

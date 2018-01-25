@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -197,12 +197,41 @@ void nn_os_vector_workers_release(struct nn_graph *nn)
 	// nn_os_vector_release(nn_os_vecinfo[0]);
 }
 
+int nn_os_careful_free(struct nn_graph *nn, int ret)
+{
+	struct nn_thread_info *worker_info = nn->os_opaque;
+	int i;
+	if (worker_info == NULL) return ret;
+	for (i = 0; i < TOTAL_THREADS; i++) {
+		if (worker_info[i].stack) nn_free(worker_info[i].stack);
+	}
+	nn_free(worker_info);
+	if (nn->vec_work) nn_pipe_free(nn->vec_work);
+	nn->vec_work = NULL;
+	if (nn->nonvec_work) nn_pipe_free(nn->nonvec_work);
+	nn->nonvec_work = NULL;
+	nn->os_opaque = NULL;
+	return ret;
+}
+
+void nn_os_join_n_threads(struct nn_graph *nn, int n_threads)
+{
+	int i;
+	struct nn_thread_info *worker_info = nn->os_opaque;
+	for (i = 0; i < n_threads; i++) {
+		if (i < NUM_VECTOR_THREADS) nn_os_work_for_vector(nn,NULL,NULL);
+		else nn_os_work_for_scalar(nn,NULL,NULL);
+	}
+	for (i = 0; i < TOTAL_THREADS; i++) {
+		nn_thread_join(worker_info[i].tid,NULL);
+	}
+}
+
 int nn_os_workers_spawn(struct nn_graph *nn)
 {
 	struct nn_thread_info *worker_info;
 	int i;
 	struct tinfo info;
-	int alloc_err = 0;
 	nn_thread_attr_t attrs;
 	nn_thread_attr_init(&attrs);
 
@@ -210,29 +239,23 @@ int nn_os_workers_spawn(struct nn_graph *nn)
 	if (nn->os_opaque != NULL) {
 		return errlog(nn,"OS workers already spawned?");
 	}
-	if ((worker_info = nn_malloc(sizeof(*worker_info)*(2+NUM_VECTOR_THREADS))) == NULL) {
-		return errlog(nn,"OS malloc fail");
+	if ((worker_info = nn_calloc(sizeof(*worker_info),(2+NUM_VECTOR_THREADS))) == NULL) {
+		return nn_os_careful_free(nn,errlog(nn,"OS calloc fail"));
 	}
 	nn->os_opaque = worker_info;
 
-	if ((nn->vec_work = nn_pipe_alloc(nn, 128)) == NULL) return errlog(nn,"os pipe alloc fail");
-	if ((nn->nonvec_work = nn_pipe_alloc(nn, 128)) == NULL) return errlog(nn,"os pipe alloc fail");
-
+	if ((nn->vec_work = nn_pipe_alloc(nn, 128)) == NULL) {
+		return nn_os_careful_free(nn,errlog(nn,"os pipe alloc fail"));
+	}
+	if ((nn->nonvec_work = nn_pipe_alloc(nn, 128)) == NULL) {
+		return nn_os_careful_free(nn,errlog(nn,"os pipe alloc fail"));
+	}
 	for (i = 0; i < TOTAL_THREADS; i++) {
 		if ((worker_info[i].stack = nn_malloc(STACK_SIZE)) == NULL) {
-			alloc_err = 1;
+			return nn_os_careful_free(nn,errlog(nn,"thread stack malloc fail"));
 		}
 		nn_sem_init(&worker_info[i].go,0);
 		nn_sem_init(&worker_info[i].ack,0);
-	}
-
-	if (alloc_err) {
-		for (i = 0; i < TOTAL_THREADS; i++) {
-			if (worker_info[i].stack) nn_free(worker_info[i].stack);
-		}
-		nn_free(worker_info);
-		nn->os_opaque = NULL;
-		return errlog(nn,"os stack / thread alloc fail");
 	}
 
 	nn_sem_init(&info.sem,0);
@@ -244,10 +267,12 @@ int nn_os_workers_spawn(struct nn_graph *nn)
 		if (i < NUM_VECTOR_THREADS) info.pipe = nn->vec_work;
 		else info.pipe = nn->nonvec_work;
 		if (nn_thread_create(nn,&worker_info[i].tid,&attrs,nn_os_worker,&info) != 0) {
-			return errlog(nn,"can't create worker thread");
+			nn_os_join_n_threads(nn,i);
+			return nn_os_careful_free(nn,errlog(nn,"thread create fail"));
 		}
 		nn_sem_wait(&info.sem);
 	}
+
 	logmsg(nn,4,"workers spawn done");
 	return 0;
 }
@@ -255,26 +280,13 @@ int nn_os_workers_spawn(struct nn_graph *nn)
 void nn_os_workers_kill(struct nn_graph *nn)
 {
 	struct nn_thread_info *worker_info = nn->os_opaque;
-	int i;
 	logmsg(nn,4,"workers kill");
 	if (worker_info == NULL) {
 		errlog(nn,"OS workers already killed?");
 		return;
 	}
-	for (i = 0; i < TOTAL_THREADS; i++) {
-		if (i < NUM_VECTOR_THREADS) nn_os_work_for_vector(nn,NULL,NULL);
-		else nn_os_work_for_scalar(nn,NULL,NULL);
-	}
-	for (i = 0; i < TOTAL_THREADS; i++) {
-		nn_thread_join(worker_info[i].tid,NULL);
-		nn_free(worker_info[i].stack);
-	}
-	nn_free(worker_info);
-	nn_pipe_free(nn->vec_work);
-	nn_pipe_free(nn->nonvec_work);
-	nn->vec_work = NULL;
-	nn->nonvec_work = NULL;
-	nn->os_opaque = NULL;
+	nn_os_join_n_threads(nn,TOTAL_THREADS);
+	nn_os_careful_free(nn,0);
 	logmsg(nn,4,"workers kill done");
 }
 

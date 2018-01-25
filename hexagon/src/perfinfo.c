@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -55,7 +55,14 @@ static inline void config_event_hw(struct nn_graph *nn, uint32_t event)
 }
 
 #elif !defined(USE_OS_QURT)
-static inline void config_event_hw(struct nn_graph *nn, uint32_t event) {}
+static inline void config_event_hw(struct nn_graph *nn, uint32_t event)
+{
+	uint32_t pmuevtcfg;
+	pmuevtcfg = (event & 0xFF) | 0x0100;
+
+	pmu_write_enable(0xf);
+	pmu_write_pmuevtcfg(pmuevtcfg);
+}
 #else
 #include <qurt.h>
 #include <qurt_event.h>
@@ -89,7 +96,7 @@ int do_perfinfo_reset(struct nn_graph *nn, uint32_t event)
 		node->perfcounter = 0;
 	}
 	nn->perf_event = event;
-	config_event_hw(nn,event);
+	if (event != 0) config_event_hw(nn,event);
 	return 0;
 }
 

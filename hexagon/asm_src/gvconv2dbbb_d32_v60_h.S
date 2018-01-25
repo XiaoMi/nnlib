@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -47,7 +47,6 @@
  *                                                     
  *  Author              Date           Comments       
  *  ------------------------------------------------------------- 
- *  DJH                 05/11/17       created                   
  *
  *  CYCLE-COUNT:                              
  *                                              
@@ -422,7 +421,7 @@ gvconv2dbbb_v60_asm:
            d3 = vsplat(sum3)                            //[P, 4]
        } {
            y3.ub = vpack(y3.h, y1.h):sat                //#sat8  <0, >255 
-           vmem(ptr_z++#1) = y3.new                     //#[E,  ]store 2nd 32bytes
+           vmem(ptr_z++#1):nt = y3.new                  //#[E,  ]store 2nd 32bytes
            s2.w = vadd(wsum.w, d2.w)                    //[P, 4]
            if (p1) jump:t .L_width                      //
        }//end cols per line

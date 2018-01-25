@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -100,7 +100,7 @@ int adjust_minmax_for_zero( float *min_p, float *max_p )
 	// if zi <= 0  or >= 254, the decision is based on that only (to
 	// avoid divide by 0) otherwise choose based on zf.
 	//
-	if( zi > 0.0f && ( zi > 253.0f || (zf-1.0f)*mn > zf*mx )) {
+	if( zi > 0.0f && ( zi > 253.0f || (zf-1.0f)*mn >= zf*mx )) {
 		// move max, change z to zi
 		*max_p = mn - 255.0f*mn/zi;
 		return 2;
@@ -164,7 +164,7 @@ int adjust_minmax_for_zero_with_constraints( float *min_p, float *max_p , int co
 	 default:
 	 case 0:
 		// move whichever requires least change.
-		if( zi >= 1.0f && ( zi >= 254.0f || mnk > mxk ))
+		if( zi >= 1.0f && ( zi >= 254.0f || mnk >= mxk ))
 			goto move_max_out;
 		goto move_min_out;
 	 case 1:		// min is fixed; max is free

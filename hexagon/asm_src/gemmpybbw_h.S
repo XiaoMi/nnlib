@@ -48,10 +48,6 @@
 /*                                                                      */
 /*  Author              Date           Comments                         */
 /*  -------------------------------------------------------------       */
-/*  DJH                 03/07/16       created                          */
-/*  DJH                 05/10/16       added post add for x and y offset*/
-/*  DJH                 07/10/16       rewrote pre-transpose            */
-/*  DJH                 09/16/16       fix over prefetch by 16 now 8    */
 /*======================================================================*/
 /*  CYCLE-COUNT:                                                        */
 /*     ->  16*K*N/32+11*N/4+24                                          */

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -689,4 +689,7 @@ lrn_d32_hvx:
 /* -------------------------------------------------------------*/
       .size lrn_d32_hvx, .L_end-lrn_d32_hvx
 
+/*
+ * Copyright (c) 2017, The Linux Foundation. All rights reserved.
+ */
 /*=============================================================================*/

@@ -14,7 +14,6 @@ hexagon/src/graphops.c \
 hexagon/src/nn_os.c \
 hexagon/src/nn_os_qurt.c \
 hexagon/src/nn_os_h2.c \
-hexagon/src/nn_os_posix.c \
 hexagon/src/nn_pipe_portable.c \
 hexagon/src/pad2d.c \
 hexagon/src/im2col_o.c \
@@ -115,6 +114,7 @@ hexagon/ops/src/op_mul_d32.c \
 hexagon/ops/src/op_fully_connected.c \
 hexagon/ops/src/op_l2pool_f.c \
 hexagon/ops/src/op_l2pool.c \
+hexagon/ops/src/op_l2pool_d32.c \
 hexagon/ops/src/op_quantfortest_d32.c \
 hexagon/ops/src/op_padfill_d32.c \
 hexagon/ops/src/optab.c \
@@ -128,7 +128,6 @@ hexagon/asm_src/gvconv2dbbb_d32_v60_h.S \
 hexagon/asm_src/padzap_d32.S \
 hexagon/asm_src/gemacca_h.S \
 hexagon/asm_src/gemaccb_h.S \
-hexagon/asm_src/l2pref.S \
 hexagon/asm_src/gemaddvvm_h.S \
 hexagon/asm_src/gemmacbbw_h.S \
 hexagon/asm_src/gemmpybbw_h.S \
@@ -172,7 +171,6 @@ hexagon/asm_src/dwconv2dbbb_s2_d32_v60_h.S \
 hexagon/asm_src/scalemem_d32.S \
 hexagon/asm_src/fullyconnected.S \
 hexagon/asm_src/ivint_h.S \
-hexagon/asm_src/copy3to4_h.S \
 hexagon/asm_src/copyNto4_h.S \
 hexagon/asm_src/inconv2dbbb_d32_v60_h.S \
 hexagon/asm_src/inconv2dbbb_s1_d32_v60_h.S \

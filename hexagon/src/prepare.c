@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -545,16 +545,10 @@ static int try_make_supernode_flavored(struct nn_graph *nn, struct nn_node **con
 	/* FIXME: struct vals / ordering. */
 	/* FIXME: Time to merge fastrpc branch back into master */
 	for (i = 0; i < 3; i++) {
-		new_outputs[i].rank = 4; //TODO - When requantize_node->outputs is array of tensors with rank, copy rank and all sizes from it.
-		new_outputs[i].max_sizes[0] =  lastop->outputs[i]->shape.batches;
-		new_outputs[i].max_sizes[1] =  lastop->outputs[i]->shape.height;
-		new_outputs[i].max_sizes[2] =  lastop->outputs[i]->shape.width;
-		new_outputs[i].max_sizes[3] =  lastop->outputs[i]->shape.depth;
-		new_outputs[i].max_sizes[4] =  0;
-		new_outputs[i].elementsize = sizeof(float);  /* FIXME: This is generous.  True data is tensor of chars.  What are min/max? */
-		new_outputs[i].zero_offset = 0;
-		new_outputs[i].stepsize = 0;
+		new_outputs[i] = lastop->output_defs[i]; //TODO - When requantize_node->outputs is array of tensors with rank, copy rank and all sizes from it.
 	}
+	/* Round up depth */
+	//new_outputs[0]->depth = (depth + 31) & (~31);
 	/* Reuse the outputs & ID from the relu node */
 	/* Allocate new node */
 	if ((supernode = optab[operation]->ctor(
@@ -593,7 +587,7 @@ static int dwconv_extrachecks(struct nn_graph *nn, struct nn_node *conv_node)
 	if (stride_node->outputs[stride_idx]->shape.width > 2) return errlog(nn,"horiz stride");
 	if (weights_node->output_defs[weights_idx].max_sizes[3] != 1) return errlog(nn,"depth mult");
 	if (weights_node->output_defs[weights_idx].max_sizes[1] != 3) return errlog(nn,"filt width");
-	if ((weights_node->output_defs[weights_idx].max_sizes[2] % 32) != 0) return errlog(nn,"FIXME: for supernode, depth must be mult of 32 for now.");
+	//if ((weights_node->output_defs[weights_idx].max_sizes[2] % 32) != 0) return errlog(nn,"FIXME: for supernode, depth must be mult of 32 for now.");
 	return 0;
 }
 
@@ -1193,7 +1187,7 @@ static int do_convert_to_depth32(struct nn_graph *nn, struct nn_node **nodeptr)
 		/* If the input depth is small, we want a different op */
 		if (weights->outputs[0]->shape.filt_depth <= 4) return do_convert_to_short_conv(nn,nodeptr);
 		//if (weights->outputs[0]->shape.filt_depth == 3) return do_convert_to_short_conv(nn,nodeptr);
-		if (weights->outputs[0]->shape.filt_depth < 16) return 0;
+		//if (weights->outputs[0]->shape.filt_depth < 16) return 0;
 	}
 	// Don't convert avgpool unless stride=1 and output_width=3
 	if (new_operation == OP_QuantizedAvgPool_8_d32) {

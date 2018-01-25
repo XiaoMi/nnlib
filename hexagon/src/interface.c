@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -77,31 +77,42 @@ static inline nn_id_t nn_graph_to_id(struct nn_graph *graph) {
 	return (nn_id_t)(graph);
 }
 
+uint32_t hexagon_nn_get_dsp_offset()
+{
+	return (uint32_t) &hexagon_nn_get_dsp_offset;
+}
+
 int hexagon_nn_init(hexagon_nn_nn_id *g)
 {
 	if (!g) return AEE_EBADCLASS;
 
 	/* allocate new ID */
+	*g = 0;
 	struct nn_graph *graph;
 	int ret;
 	if ((graph = nn_calloc(1,sizeof(*graph))) == NULL) {
-		return 0;
+		return -1;
 	}
 	graph->state = NN_GRAPH_CONSTRUCTION;
 	nn_mutex_init(&graph->log_mutex);
 	if ((graph->scratch = nn_memalign(128,SCRATCH_SIZE)) == NULL) {
 		nn_free(graph);
-		return 0;
+		return -1;
 	}
 	graph->scratch_size = SCRATCH_SIZE;
 	if ((graph->logbuf = nn_calloc(1,LOGBUF_SIZE)) == NULL) {
 		nn_free(graph->scratch);
 		nn_free(graph);
-		return 0;
+		return -1;
 	}
 	graph->logbuf_size = LOGBUF_SIZE-1;
 	graph->logbuf_pos = 0;
-	if ((ret=nn_os_workers_spawn(graph)) != 0) return ret;
+	if ((ret=nn_os_workers_spawn(graph)) != 0) {
+		nn_free(graph->logbuf);
+		nn_free(graph->scratch);
+		nn_free(graph);
+		return -1;
+	}
 	*g = nn_graph_to_id(graph);
 	return 0;
 }
@@ -442,6 +453,16 @@ int hexagon_nn_config()
 #else
 int hexagon_nn_set_powersave_level(unsigned int level) { return 0; }
 int hexagon_nn_disable_dcvs() { return 0; }
-int hexagon_nn_config() { return 0; }
+
+#if !defined(USE_OS_H2)
+int hexagon_nn_config() {
+	pmu_init();
+	return 0;
+}
+#else
+int hexagon_nn_config() {
+	return 0;
+}
+#endif
 
 #endif

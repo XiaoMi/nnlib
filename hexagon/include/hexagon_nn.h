@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -45,4 +45,5 @@ typedef int32_t hexagon_nn_nn_id;
 typedef int32_t hexagon_nn_padding_type;
 
 #include <nn_graph.h>
+ 
 #endif

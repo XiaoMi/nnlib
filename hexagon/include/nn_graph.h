@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -353,10 +353,18 @@ int node_check_inputs_outputs_n(  struct nn_node *self, struct nn_graph *nn, cha
 
 #else
 
+#ifndef RESET_PMU
 #define RESET_PMU() /* NOTHING */
+#endif
+#ifndef DUMP_PMU
 #define DUMP_PMU() /* NOTHING */
+#endif
+#ifndef DISABLE_PMU
 #define DISABLE_PMU() /* NOTHING */
+#endif
+#ifndef ENABLE_PMU
 #define ENABLE_PMU() /* NOTHING */
+#endif
 
 #endif
 

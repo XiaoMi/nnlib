@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -47,7 +47,6 @@
  *
  *  Author              Date           Comments
  *  -------------------------------------------------------------
- *  DJH                 07/ 6/17       created
  *
  *  MEMORY
  *     CODESIZE = 640 bytes + 512 bytes of control tables
@@ -99,6 +98,7 @@
  * }
 #endif
  */
+#if 0
 /* =========================================================================== */
         .text
         .file "dwconv2dbbb_unsigned_d32_v60_h.S"
@@ -429,3 +429,323 @@ dwconv2dbbb_unsigned_v60_asm:
    }
 .L_end:
       .size dwconv2dbbb_unsigned_v60_asm, .L_end-dwconv2dbbb_unsigned_v60_asm
+#else
+/* =========================================================================== */
+        .text
+        .file "dwconv2dbbb_unsigned_d32_v60_h.S"
+        .global dwconv3x3bbb_unsigned_v60_asm
+        .balign 32
+        .type  dwconv3x3bbb_unsigned_v60_asm, @function
+dwconv3x3bbb_unsigned_v60_asm:
+/* =========================================================================== */
+//h stride assumed 1 vstride 1 or 2 filt width assumed 3 - hstride 2 requires new function
+#define ptr_xi                 r0     //data
+#define ptr_wi                 r1     //weights
+#define filt_sumi              r2     //gemsumb
+#define ptr_zi                 r3     //results
+#define next_in_row            r4     //width*depth*(stride_horz==1)
+#define next_in_width_32       r5     //width*32*(stride_horz==1)
+#define in_depth               r8     //1 total in depth 
+#define out_width              r9     //2is amount of work to be done
+#define next_out_row           r10    //3next output line amount in bytes
+#define out_height             r11    //4 number of vertical lines to perform
+#define recip_level            r12    //5 255 / (MAX - MIN) - used to scale to bytes
+#define zshift                 r13    //6 spare input
+#define ptr_max                r14    //7 maximum and minum buffer
+#define stride_vert            r15    //8 vertical stride is an option to save ops
+#define filt_offset            r16    //9
+#define filt_off210_           r16    //
+#define filt_off_210           r17    //
+#define out_width_in_depth     r9:8   //
+#define out_height_next_out_row r11:10//
+#define zshift_recip_level     r13:12 //    
+#define stride_vert_ptr_max    r15:14 //
+//-----------------------------------------------------------------
+#define s8                     r7     //const = 8
+#define nrot                   r6     //rotate amount
+#define ptr_x                  r6     //
+#define ptr_x0                 r18    //
+#define ptr_x1                 r19    //
+#define ptr_x2                 r20    //
+#define ptr_z                  r21    //
+#define ptr_w                  r22    //
+#define filt_sum               r23    //
+#define PV(VSRC) .word (0x1DFFE020+VSRC) //debug vec reg
+//-----------------------------------------------------------------
+#define vrecip                 v0     //
+#define woffset                v1     //
+#define s00                    v2     //
+#define s01                    v3     //
+#define s01s00                 v3:2   //
+#define s10                    v4     //
+#define s11                    v5     //
+#define s11s10                 v5:4   //
+#define sa0                    v6     //
+#define sa1                    v7     //
+#define sa1sa0                 v7:6   //
+#define sa2                    v8     //
+#define sa3                    v9     //
+#define sa3sa2                 v9:8   //
+#define l0w_210                v10    //
+#define l0w210_                v11    //
+#define l1w_210                v12    //
+#define l1w210_                v13    //
+#define l2w_210                v14    //
+#define l2w210_                v15    //
+#define l0z3210                v16    //
+#define l1z3210                v17    //
+#define l2z3210                v18    //
+#define l0z7654                v19    //
+#define l1z7654                v19    //
+#define l2z7654                v19    //
+#define y0                     v19    //
+#define y1                     v19    //
+#define y2                     v19    //
+#define l0z3232                v20    //
+#define l1z3232                v20    //
+#define l2z3232                v20    //
+#define l0z5432                v20    //
+#define l1z5432                v20    //
+#define l2z5432                v20    //
+#define d3210                  v21    //
+#define d0                     v22    //
+#define d1                     v23    //
+#define d1_d0                  v23:22 //
+#define d2                     v24    //
+#define d3                     v25    //
+#define d3_d2                  v25:24 //
+#define maxe                   v26    //
+#define mine                   v27    //
+#define d1d0                   v21    //
+#define d3d2                   v24    //
+#define x0                     v30    //
+#define x1                     v30    //
+#define x2                     v30    //
+#define maxt                   v2     //
+#define mint                   v3     //
+#define SSR        <<1:rnd:sat:shift  //simplfy mpy instruction
+/*=============================================================================*/
+    {  out_width_in_depth      = memd(sp+#0)        //
+       out_height_next_out_row = memd(sp+#8)        //
+       sp = add(sp,#-4*8)                           //
+       maxe = #0                                    //
+    }{
+       zshift_recip_level  = memd(sp+#(16+4*8))     //
+       stride_vert_ptr_max = memd(sp+#(24+4*8))     //
+       r28 = ##0x7fffffff                           //max pos
+    }{
+       memd(sp+#0)  = r17:16                        //
+       filt_offset = memw(sp+#(32+4*8))             //
+       vrecip = vsplat(recip_level)                 //
+       mine = vsplat(r28)                           //
+    }{
+       memd(sp+#8)  = r19:18                        //
+       maxe.w = vsub(maxe.w, mine.w)                //
+       in_depth = lsr(in_depth, #5)                 //1/32
+       s8 = #8                                      //shift by 8
+    }{
+       memd(sp+#16) = r21:20                        //
+       memd(sp+#24) = r23:22                        //
+       filt_offset = vsplatb(filt_offset)           //
+       out_width = lsr(out_width,#2)                //
+    }{
+       filt_off210_ = asl(filt_offset, #8)          //
+       filt_off_210 = lsr(filt_offset, #8)          //
+       ptr_w = ptr_wi                               //
+       filt_sum = filt_sumi                         //
+    }
+/* --------------------------------------------------------------------------- */
+.L_height:
+    {  ptr_x = ptr_xi                               //
+       ptr_z = ptr_zi                               //
+       p3 = xor(p3,p3)                              //    
+       loop1(.L_depth,in_depth)                     //
+    }
+     .balign 32
+.L_depth:
+    {  woffset = vmem(filt_sum++#1)                 //read in sum of taps
+       ptr_x0 = ptr_x                               //
+       ptr_x1 = add(ptr_x,next_in_row)              //
+       nop                                          //
+    }{ 
+       x0.tmp = vmem(ptr_x0++#1):nt                 //
+       l0z3210.b = vshuff(x0.b)                     //
+       ptr_x2 = add(ptr_x1,next_in_row)             //
+       nop                                          //
+    }{ 
+       x1.tmp = vmem(ptr_x1++#1)                    //
+       l1z3210.b = vshuff(x1.b)                     //
+       loop0(.L_width,out_width)                    //
+       nop                                          //
+    }{ 
+       x2.tmp = vmem(ptr_x2++#1)                    //
+       l2z3210.b = vshuff(x2.b)                     //
+       ptr_x = add(ptr_x,next_in_width_32)          //
+    }{ 
+       l0z3210.b = vshuff(l0z3210.b)                //
+       l0w_210.cur = vmem(ptr_w++#1)                //
+       l0w210_.w = vasl(l0w_210.w, s8)              //
+    }{
+       l1z3210.b = vshuff(l1z3210.b)                //
+       l1w_210.cur = vmem(ptr_w++#1)                //
+       l1w210_.w = vasl(l1w_210.w, s8)              //
+    }{
+       l2z3210.b = vshuff(l2z3210.b)                //
+       l2w_210.cur = vmem(ptr_w++#1)                //
+       l2w210_.w = vasl(l2w_210.w, s8)              //
+    }
+/* --------------------------------------------------------------------------- */
+     .balign 32
+.L_width:
+    {  x0.tmp = vmem(ptr_x0++#1):nt                 //[0, 0]
+       y0.b = vshuff(x0.b)                          //[0, 0]
+       s00 = woffset                                //[0, 0]
+       d2.w += vmpyo(s10.w, vrecip.h):SSR           //[1,27]multiply by 1/max 
+    }{
+       l0z3232.h = vshuffo(l0z3210.h,l0z3210.h)     //[0, 1]
+       s01 = woffset                                //[0, 1]
+       d3.w += vmpyo(s11.w, vrecip.h):SSR           //[1,28]multiply by 1/max 
+    }{
+       l0z7654.b = vshuff(y0.b)                     //[0, 2]x3210
+       s00.uw += vrmpy(l0z3210.ub, l0w_210.ub)      //[0, 2]filter even output
+       s10 = woffset                                //[0, 0]
+    }{
+       l0z5432.h = vshuffe(l0z7654.h, l0z3232.h)    //[0, 3]
+       s11 = woffset                                //[0, 3]
+       s01.uw += vrmpy(l0z3210.ub, l0w210_.ub)      //[0, 3]z3210filter oddn output
+    }{
+       sa0.uw  = vrmpy(l0z3210.ub, filt_off_210.ub) //[0, 4]z3210filter oddn output
+       sa1.uw  = vrmpy(l0z3210.ub, filt_off210_.ub) //[0, 4]z3210filter oddn output
+       d1d0.h = vpack(d1.w, d0.w):sat               //[1,29]take lower 16bits of rnded acc
+    }{
+       s10.uw += vrmpy(l0z5432.ub, l0w_210.ub)      //[0, 5]z5432
+       l0z3210 = l0z7654                            //[0, 5]
+       d3d2.h = vpack(d3.w, d2.w):sat               //[1,30]take lower 16bits of rnded acc
+    }{
+       x1.tmp = vmem(ptr_x1++#1)                    //[0, 6]
+       y1.b = vshuff(x1.b)                          //[0, 6]
+       s11.uw += vrmpy(l0z5432.ub, l0w210_.ub)      //[0, 6]z5432
+    }{
+       l1z3232.h = vshuffo(l1z3210.h,l1z3210.h)     //[0, 7]
+       sa2.uw  = vrmpy(l0z5432.ub, filt_off_210.ub) //[0, 7]z3210filter oddn output
+       sa3.uw  = vrmpy(l0z5432.ub, filt_off210_.ub) //[0, 7]z3210filter oddn output
+    }{
+       l1z7654.b = vshuff(y1.b)                     //[0, 8]x3210
+       s00.uw += vrmpy(l1z3210.ub, l1w_210.ub)      //[0, 8]filter even output
+    }{
+       l1z5432.h = vshuffe(l1z7654.h, l1z3232.h)    //[0, 9]
+       s01.uw += vrmpy(l1z3210.ub, l1w210_.ub)      //[0, 9]z3210filter oddn output
+    }{
+       sa0.uw += vrmpy(l1z3210.ub, filt_off_210.ub) //[0,10]z3210filter oddn output
+       sa1.uw += vrmpy(l1z3210.ub, filt_off210_.ub) //[0,10]z3210filter oddn output
+    }{
+       s10.uw += vrmpy(l1z5432.ub, l1w_210.ub)      //[0,11]z5432
+       l1z3210 = l1z7654                            //[0,11]
+    }{
+       x2.tmp = vmem(ptr_x2++#1)                    //[0,12]
+       y2.b = vshuff(x2.b)                          //[0,12]
+       s11.uw += vrmpy(l1z5432.ub, l1w210_.ub)      //[0,12]z5432
+    }{
+       l2z3232.h = vshuffo(l2z3210.h,l2z3210.h)     //[0,13]
+       sa2.uw += vrmpy(l1z5432.ub, filt_off_210.ub) //[0,13]z3210filter oddn output
+       sa3.uw += vrmpy(l1z5432.ub, filt_off210_.ub) //[0,13]z3210filter oddn output
+    }{
+       l2z7654.b = vshuff(y2.b)                     //[0,14]x3210
+       s00.uw += vrmpy(l2z3210.ub, l2w_210.ub)      //[0,14]filter even output
+    }{
+       l2z5432.h = vshuffe(l2z7654.h, l2z3232.h)    //[0,15]
+       s01.uw += vrmpy(l2z3210.ub, l2w210_.ub)      //[0,15]z3210filter oddn output
+    }{
+       sa0.uw += vrmpy(l2z3210.ub, filt_off_210.ub) //[0,16]z3210filter oddn output
+       sa1.uw += vrmpy(l2z3210.ub, filt_off210_.ub) //[0,16]z3210filter oddn output
+       l2z3210 = l2z7654                            //[0,16]
+    }{
+       s10.uw += vrmpy(l2z5432.ub, l2w_210.ub)      //[0,17]z5432
+       s01s00.w = vsub(s01s00.w, sa1sa0.w)          //[0,17]
+    }{
+       s11.uw += vrmpy(l2z5432.ub, l2w210_.ub)      //[0,18]z5432
+       maxe.w = vmax(maxe.w, s00.w)                 //[0,18]find max
+       mine.w = vmin(mine.w, s00.w)                 //[0,18]find min
+    }{
+       sa2.uw += vrmpy(l2z5432.ub, filt_off_210.ub) //[0,19]z3210filter oddn output
+       sa3.uw += vrmpy(l2z5432.ub, filt_off210_.ub) //[0,19]z3210filter oddn output
+       maxe.w = vmax(maxe.w, s01.w)                 //[0,19]find max
+       s00.w = vasl(s00.w,zshift)                   //[0,19]
+    }{
+       s11s10.w = vsub(s11s10.w, sa3sa2.w)          //[0,20]
+       mine.w = vmin(mine.w, s01.w)                 //[0,20]find min
+       s01.w = vasl(s01.w,zshift)                   //[0,20]
+    }{
+       d0.w = vmpye(s00.w, vrecip.uh)               //[0,21]multiply by 1/max 
+       maxe.w = vmax(maxe.w, s10.w)                 //[0,21]find max
+       mine.w = vmin(mine.w, s10.w)                 //[0,21]find min
+    }{
+       d1.w = vmpye(s01.w, vrecip.uh)               //[0,22]multiply by 1/max 
+       maxe.w = vmax(maxe.w, s11.w)                 //[0,22]find max
+       mine.w = vmin(mine.w, s11.w)                 //[0,22]find min of acc
+    }{
+       d0.w += vmpyo(s00.w, vrecip.h):SSR           //[0,23]multiply by 1/max 
+       s10.w = vasl(s10.w,zshift)                   //[0,23]
+    }{
+       d1.w += vmpyo(s01.w, vrecip.h):SSR           //[0,24]multiply by 1/max 
+       s11.w = vasl(s11.w,zshift)                   //[0,24]
+    }{
+       d2.w = vmpye(s10.w, vrecip.uh)               //[0,25]multiply by 1/max 
+       d3210.ub = vpack(d3d2.h, d1d0.h):sat         //[1,31]deal into sequence
+       if p3 vmem(ptr_z++#1):nt = d3210.new         //[1,31]store quantized bytes
+    }{
+       d3.w = vmpye(s11.w, vrecip.uh)               //[0,26]multiply by 1/max 
+       p3 = or(p3,!p3)                              //    
+    }:endloop0:endloop1
+/* --------------------------------------------------------------------------- */
+    {  d2.w += vmpyo(s10.w, vrecip.h):SSR           //[1,27]multiply by 1/max 
+       out_height = add(out_height, #-1)            //
+    }{
+       d3.w += vmpyo(s11.w, vrecip.h):SSR           //[1,28]multiply by 1/max 
+       p0 = cmp.eq(out_height, #0)                  //
+    }{
+       d1d0.h = vpack(d1.w, d0.w):sat               //[1,29]take lower 16bits of rnded acc
+       ptr_xi+=mpyi(stride_vert,next_in_row)        //incrmeent input ptr
+       ptr_zi=add(ptr_zi,next_out_row)              //incrmeent output ptr
+    }{
+       d3d2.h = vpack(d3.w, d2.w):sat               //[1,30]take lower 16bits of rnded acc
+       ptr_w = ptr_wi                               //
+       filt_sum = filt_sumi                         //
+    }{
+       d3210.ub = vpack(d3d2.h, d1d0.h):sat         //[1,31]deal into sequence
+       vmem(ptr_z+#0):nt = d3210.new                //[1,31]store quantized bytes
+       if(!p0) jump .L_height                       //next line
+    }
+/* --------------------------------------------------------------------------- */
+    {  nrot = #64                                   //
+       loop0(.L_peak, #4)                           //
+    }{  
+       maxt = vror(maxe,nrot)                       //
+       r17:16 = memd(sp+#0)                         //restore stack
+       r19:18 = memd(sp+#8)                         //restore
+    }
+.L_peak:
+    {  maxe.w = vmax(maxe.w, maxt.w)                //reduce
+       mint = vror(mine, nrot)                      //
+       nrot = lsr(nrot,#1)                          //
+    }{
+       mine.w = vmin(mine.w, mint.w)                //reduce
+       maxt = vror(maxe, nrot)                      //
+    }:endloop0 
+
+    {  maxe.w = vmax(maxe.w, maxt.w)                //
+       vmem(ptr_max+#0) = maxe.new                  //store max
+       mint = vror(mine, nrot)                      //
+    }{
+       mine.w = vmin(mine.w, mint.w)                //
+       vmem(ptr_max+#1) = mine.new                  //store min
+    }{
+/* --------------------------------------------------------------------------- */
+       r21:20 = memd(sp+#16)                        //restore
+       r23:22 = memd(sp+#24)                        //restore
+       sp = add(sp,#4*8)                            // pop stack
+       jumpr r31                                    //return
+    }
+.L_end:
+      .size dwconv3x3bbb_unsigned_v60_asm, .L_end-dwconv3x3bbb_unsigned_v60_asm
+#endif

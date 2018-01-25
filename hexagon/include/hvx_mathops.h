@@ -1,7 +1,7 @@
 #ifndef HVX_MATHOPS_H
 #define HVX_MATHOPS_H 1
 /*
- * Copyright (c) 2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -393,7 +393,7 @@ hvx_Vuh_sqrt_VuhI(HVX_Vector vin, int adj)
 	// normalize : << by an even amount
 	HVX_Vector sh = Q6_Vuh_vcl0_Vuh( vin );
 	sh = Q6_V_vand_VV( sh, q6op_Vh_vsplat_R(0xFFFE));
-	HVX_Vector normin = Q6_Vh_vlsr_VhVh( vin, sh);
+	HVX_Vector normin = Q6_Vh_vasl_VhVh( vin, sh);
 	HVX_Vector rsqrt = hvx_Vuh_rsqrt10_Vuh( normin);
 	HVX_VectorPair prod = Q6_Wuw_vmpy_VuhVuh( normin, rsqrt);
 	// need to >> by 17 + sh/2 which is in range 17..24
@@ -418,6 +418,90 @@ ref_ruh_sqrt_RuhI(int vin, int adj)
 	prod >>= sh;
 	return saturate_i16((prod+1)>>1);
 }
+
+
+
+//
+// find the sum all of the elements in a single d32 slice; giving
+// separate sums for each of 32 depth positions.
+//   ptr = a 32-byte aligned pointer (i.e. skip width padding).
+//   height = any ht >= 1
+//   width = any width >= 1
+//   height_stride = amount to add for next row
+//
+// The return value is 32 sums, each 32 bit, in a vector.
+//
+static inline
+HVX_Vector
+hvx_sum_hxw_d32_slice( uint8_t const * ptr, int height, int width, int height_stride )
+{
+	HVX_VectorPair allsum = Q6_W_vcombine_VV( Q6_V_vzero(),Q6_V_vzero());
+	if( height < 1) return Q6_V_lo_W(allsum);	// compiler now assumes height >= 1
+	HVX_VectorPred q0 = Q6_Q_vsetq_R( (int)(size_t)ptr);	// left mask (1 = don't process)
+
+	// vec align the pointer
+	uint8_t const * ptr_align = (uint8_t const *)( (size_t) ptr & ~(size_t)127);
+	uint8_t const * ptr_end = ptr + 32*width;
+	const int kb_1 = 0x01010101;
+	const int kh_1 = 0x00010001;
+
+	if( width > 4 ){
+		// determine # of full vectors (this is actually 1 less than the # of vecs, and is >= 1
+		int vecs_across = (unsigned)(ptr_end-ptr_align-1)/128u;
+		HVX_VectorPred q1 = q6op_Q_vsetq2_R( (int)(size_t)ptr_end);	// right mask ( 0 = don't process )
+
+		HVX_Vector extadd;
+		// there are at least 2 per row ( vecs_across >= 1)
+		for( int i =0; i < height; i ++){
+			HVX_Vector const *rowp = (HVX_Vector const *)( ptr_align + height_stride * i);
+			HVX_Vector vin0 = q6op_V_vand_QnV( q0, *rowp++ );
+			HVX_Vector vin = Q6_Vb_vshuff_Vb(vin0);
+			for(int i = 0; i < vecs_across-1; i++){
+				extadd = Q6_Vh_vdmpy_VubRb( vin, kb_1);
+				allsum = Q6_Wuw_vmpyacc_WuwVuhRuh( allsum, extadd, kh_1);
+				vin = Q6_Vb_vshuff_Vb( *rowp++);
+			}
+			extadd = Q6_Vh_vdmpy_VubRb( vin, kb_1);
+			allsum = Q6_Wuw_vmpyacc_WuwVuhRuh( allsum, extadd, kh_1);
+			vin0 = q6op_V_vand_QV( q1, *rowp );
+			vin = Q6_Vb_vshuff_Vb(vin0);
+			extadd = Q6_Vh_vdmpy_VubRb( vin, kb_1);
+			allsum = Q6_Wuw_vmpyacc_WuwVuhRuh( allsum, extadd, kh_1);
+		}
+	}else if( (((size_t)(ptr_end-1) ^ (size_t)ptr_align )& 128) != 0 ){	//  <= 4 but crosses a vector boundary
+		q0 = Q6_Q_vsetq_R( -32*width);	// mask (1 = don't process)
+		uint8_t const  *ptr0 = ptr_end - 128;			// read things into the *end* of the vector
+		for( int i =0; i < height; i ++ ){
+			HVX_Vector vin =  q6op_V_vldu_A( (HVX_Vector const*)( ptr0 + i*height_stride ));
+			vin = Q6_Vb_vshuff_Vb(q6op_V_vand_QnV( q0, vin ));
+			HVX_Vector extadd = Q6_Vh_vdmpy_VubRb( vin, kb_1);
+			allsum = Q6_Wuw_vmpyacc_WuwVuhRuh( allsum, extadd, kh_1);
+		}
+	}else{		// single vector column
+		q0 = Q6_Q_or_QQn( q0, q6op_Q_vsetq2_R( (int)(size_t)ptr_end));
+		for( int i =0; i < height; i ++ ){
+			HVX_Vector vin =  * (HVX_Vector const*)( ptr_align + i*height_stride );
+			vin = Q6_Vb_vshuff_Vb(q6op_V_vand_QnV( q0, vin ));
+			HVX_Vector extadd = Q6_Vh_vdmpy_VubRb( vin, kb_1);
+			allsum = Q6_Wuw_vmpyacc_WuwVuhRuh( allsum, extadd, kh_1);
+		}
+	}
+	// now reduce to one vector.
+	// Each input is A0 ..A31 B0 .. B31  C0 .. C31   D0 .. D31
+	// After shuffle:  A0 C0 A1 ... A31 C31 B0 D0 ... B31 D31
+	//  After Q6_Vh_vdmpy_VubRb:   AC0 AC1 ... AC31 BD0 BD1  .. BD31
+	// So the low part of allsum contains sums for AC0 AC2 .. AC30 BD0 BD2 .. BD30
+	// and the high part contains the odd sums...
+	//
+	HVX_VectorPair shuff = Q6_W_vshuff_VVR( Q6_V_hi_W(allsum),  Q6_V_lo_W(allsum), -4 );
+	//  now have AC0 AC1 AC2 .. AC31
+	//           BD0 BD1 BD2 .. BD31
+	// So just add them together
+	//
+	return Q6_Vw_vadd_VwVw( Q6_V_lo_W(shuff),Q6_V_hi_W(shuff)) ;
+}
+
+
 
 #endif // HVX_MATHOPS_H
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -55,17 +55,15 @@ static int l2pool_execute(struct nn_node *self, struct nn_graph *nn)
     int32_t window_width  = window_tensor->shape.width;
 
     int32_t out_batches = in_batches;
-    int32_t out_width   = nn_pad_compute_outsize(in_width, window_width, stride_width, self->padding);
-    int32_t out_height  = nn_pad_compute_outsize(in_height,window_height,stride_height,self->padding);
+    int32_t adj_x, adj_y;
+    int32_t out_width   = nn_pad_compute_outsize_and_padbefore(in_width, window_width, stride_width, self->padding, & adj_x);
+    int32_t out_height  = nn_pad_compute_outsize_and_padbefore(in_height,window_height,stride_height,self->padding, & adj_y);
     int32_t out_depth   = in_depth;
 
     int32_t batch, out_x, out_y, out_z, in_x, in_y, in_z;
 
     const float *in = in_tensor->data;
     float *out = out_tensor->data;
-
-    int32_t adj_x = ((out_width -1) * stride_width  + window_width  - in_width )/2;
-    int32_t adj_y = ((out_height-1) * stride_height + window_height - in_height)/2;
 
     /* check size of output */
     logmsg(nn,2,"fp l2pool execute. self=%p ",self);

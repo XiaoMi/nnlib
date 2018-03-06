@@ -47,6 +47,7 @@
  *                                                     
  *  Author              Date           Comments       
  *  ------------------------------------------------------------- 
+ *  DJH                 05/11/17       created                   
  *
  *  CYCLE-COUNT:                              
  *                                              
@@ -83,7 +84,7 @@ gvconv2dbbb_v60_asm:
 #define ptr_filtsum            r10    //5 includes the computation filt_sum * in_offset + biasvec
 #define ptr_sumabuf0           r1     //6 filt_offset*in_offset - in_offset*sum(in)
 #define next_sumabuf           r26    //7 stride to get to next row of suma values 
-#define ptr_max                r13    //8 maximum and minum buffer
+#define ptr_max                r7     //8 maximum and minum buffer
 #define recip_level            r14    //9 255 / (MAX - MIN) - used to scale to bytes
 #define out_align              r7     //10 alignment of the final results
 #define truncate               r12    //11
@@ -154,26 +155,29 @@ gvconv2dbbb_v60_asm:
 #define vrnd                   v20    //
 #define SSR        <<1:rnd:sat:shift  //simplfy mpy instruction
 /*=============================================================================*/
+
        {   allocframe(#72)                              // 0th entry on stack is (72+8)/4 =20 ints
        } {  
            memd(sp+#0)  = r17:16                        //
            memd(sp+#24) = r23:22                        //
+           nop; nop                                     //
        } {
            memd(sp+#8)  = r19:18                        //
            memd(sp+#16) = r21:20                        //
+           nop; nop                                     //
        } {
            memw(sp+#52) = ptr_wi                        //
            memd(sp+#40) = r27:26                        //
-           r23 = ##0x7fffffff                           //max pos
+//         r23 = ##0x7fffffff                           //max pos
        } {
-           memw(sp+#48) = r28                           //
+           ptr_max = memw(sp+#28<<2)                    //ptr pre computed max value in output
            ptr_sumabuf0 = memw(sp+#26<<2)               //read in the ptr to the bias buffer value
-           maxe = #0                                    //
-           mine = vsplat(r23)                           //
+//         maxe = #0                                    //
+//         mine = vsplat(r23)                           //
        } {
            memw(sp+#56) = ptr_zi                        //
            memw(sp+#60) = out_width                     //
-           maxe.w = vsub(maxe.w, mine.w)                //
+//         maxe.w = vsub(maxe.w, mine.w)                //
        } {
            stride_h_w = memw(sp+#20<<2)                 //extract stride*depth 
            in_depth   = memw(sp+#21<<2)                 //
@@ -202,6 +206,7 @@ gvconv2dbbb_v60_asm:
            recipvec = vsplat(recip_level)               //
 //         out_align = memw(sp+#30<<2)                  //
            next_sumabuf = memw(sp+#27<<2)               //stride of ptr pre computed input sum
+           maxe = vmem(ptr_max+#0)                      //
        } {
            M0 = sum_stride                              //allow stride by 4bytes or 8bytes
            wsum = vmem(ptr_filtsum+#0)                  //
@@ -219,6 +224,7 @@ gvconv2dbbb_v60_asm:
            dcfetch(ptr_xi+#3<<5)                        //
        } {
 //         truncate = memw(sp+#31<<2)                   //
+           mine = vmem(ptr_max+#1)                      //
            in_width_stride_depth=mpyi(in_width,stride_h)//
            d0 = vsplat(sum0)                            //[P, 1]
            sum1 = memw(ptr_sumabuf++M0)                 //[P, 1]sum 1
@@ -430,6 +436,7 @@ gvconv2dbbb_v60_asm:
            if(!p0.new) jump:t .L_height                 //
        }//end lines per block
 /* ---------------------------------------------------------------------------- */
+#if 0
        {   c4 = #4                                      //
            loop0(.L_peak, #4)                           //[P, 0]
        } {   
@@ -452,8 +459,12 @@ gvconv2dbbb_v60_asm:
            mine.w = vmin(mino.w, mine.w)                //[1, 2]
            vmem(ptr_max+#1) = mine.new                  //[E, 2]
        }
+#endif
 /*=============================================================================*/
-       {   r17:16 = memd(sp+#0)                         //restore stack
+       {   vmem(ptr_max+#0) = maxe                      //
+           r17:16 = memd(sp+#0)                         //restore stack
+       } {
+           vmem(ptr_max+#1) = mine                      //
            r19:18 = memd(sp+#8)                         //Q
        } {
            r21:20 = memd(sp+#16)                        //Q
@@ -462,7 +473,6 @@ gvconv2dbbb_v60_asm:
            r25:24 = memd(sp+#32)                        //Q
            r27:26 = memd(sp+#40)                        //Q
        } {
-           r28 = memw(sp+#48)                           //
            dealloc_return                               //Q
        }
 .L_end:

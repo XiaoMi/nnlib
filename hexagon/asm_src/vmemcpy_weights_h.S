@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -44,6 +44,7 @@ vmemcpy_weights_asm:
 #define src         r1 //src ptr
 #define length      r2 //num bytes
 /* ============================================================================ */
+#define aligned     r4
 #define srcalign    r4
 #define dstalign    r5
 #define mid         r6
@@ -52,6 +53,7 @@ vmemcpy_weights_asm:
 #define kernel      r3
 #define sel1        r9
 #define dsto        r10
+#define c127        r11
 #define x0          v0
 #define x1          v1
 #define y0          v2
@@ -60,9 +62,19 @@ vmemcpy_weights_asm:
 #define qprolog     q0
 #define qepilog     q1
 /* ============================================================================ */
-   { sel0 = ##0x01010101              //position of qprolog
+   {
+     c127 = #127
+     aligned = or(dst,src)
+     kernel = lsr(length, #7)
      qprolog =vsetq(dst)              //qprolog vec predicate __|---
+   } {
+     sel0 = ##0x01010101              //position of qprolog
+     aligned = or(aligned,length)
+     loop0(.L_fast_copy, kernel)
+   } {
      end = add(length, dst)           //last byte of block
+     p0 = bitsclr(aligned, c127)
+     if(p0.new) jump:t .L_fast_copy
    } {
      dstalign = and(dst, #127)        //alignment of dst
      sel1 = add(sel0, sel0)           //position of modified vec predicates
@@ -109,7 +121,16 @@ vmemcpy_weights_asm:
    } {
      if(qepilog) vmem(dst+#0):nt = y0    //store out epilog data
      r0 = dsto                        //return updated pointer
-	}{
+   }{
+     jumpr r31                        //return to caller
+   }
+   .balign 32
+.L_fast_copy:
+   {
+     x1.tmp = vmem(src++#1):nt        //load next bloc
+     vmem(dst++#1):nt = x1            //store out 
+   }:endloop0
+   {
      jumpr r31                        //return to caller
    }
 .L_end:

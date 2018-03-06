@@ -130,17 +130,6 @@ int const_width_extend_8(struct nn_node *node, int amt, int val)
 	node->outputs[0]->max_size = new_size;
 	return 0;
 }
-/*
- * find_node returns a node that matches node_id or NULL otherwise 
- */
-static inline struct nn_node *find_node(struct nn_graph *nn, uint32_t node_id)
-{
-	struct nn_node *node;
-	for (node = nn->head; node != NULL; node = node->next) {
-		if (node->node_id == node_id) break;
-	}
-	return node;
-}
 
 static inline int prepare_input(struct nn_graph *nn, struct nn_node *node, int i)
 {
@@ -572,6 +561,12 @@ static int try_make_supernode_flavored(struct nn_graph *nn, struct nn_node **con
 	return 0;
 }
 
+static inline int warnlog(struct nn_graph *nn, const char *msg)
+{
+	logmsg(nn,2,msg);
+	return -1;
+}
+
 static int dwconv_extrachecks(struct nn_graph *nn, struct nn_node *conv_node)
 {
 	struct nn_node *weights_node;
@@ -580,13 +575,13 @@ static int dwconv_extrachecks(struct nn_graph *nn, struct nn_node *conv_node)
 	int weights_idx = conv_node->input_refs[1].output_idx;
 	int stride_id = conv_node->input_refs[6].src_id;
 	int stride_idx = conv_node->input_refs[6].output_idx;
-	if ((weights_node = find_node(nn,weights_id)) == NULL) return errlog(nn,"weights node not found");
-	if ((stride_node = find_node(nn,stride_id)) == NULL) return errlog(nn,"stride node not found");
-	if (weights_node->node_type != OP_Const) return errlog(nn,"weights not const");
-	if (stride_node->node_type != OP_Const) return errlog(nn,"stride not const");
-	if (stride_node->outputs[stride_idx]->shape.width > 2) return errlog(nn,"horiz stride");
-	if (weights_node->output_defs[weights_idx].max_sizes[3] != 1) return errlog(nn,"depth mult");
-	if (weights_node->output_defs[weights_idx].max_sizes[1] != 3) return errlog(nn,"filt width");
+	if ((weights_node = find_node(nn,weights_id)) == NULL) return warnlog(nn,"weights node not found");
+	if ((stride_node = find_node(nn,stride_id)) == NULL) return warnlog(nn,"stride node not found");
+	if (weights_node->node_type != OP_Const) return warnlog(nn,"weights not const");
+	if (stride_node->node_type != OP_Const) return warnlog(nn,"stride not const");
+	if (stride_node->outputs[stride_idx]->shape.width > 2) return warnlog(nn,"horiz stride");
+	if (weights_node->output_defs[weights_idx].max_sizes[3] != 1) return warnlog(nn,"depth mult");
+	if (weights_node->output_defs[weights_idx].max_sizes[1] != 3) return warnlog(nn,"filt width");
 	//if ((weights_node->output_defs[weights_idx].max_sizes[2] % 32) != 0) return errlog(nn,"FIXME: for supernode, depth must be mult of 32 for now.");
 	return 0;
 }
@@ -1564,12 +1559,65 @@ static int make_quantized_dwise(struct nn_graph *nn)
 
 
 /*
- * Find convert_to_d32 nodes
- * Find producer
- * If producer is not convert from D32, continue
- * Point all consumers to producer's input
- * The op should become dead
- * Producer might also become dead
+ * Find Requantize_32to8 with Const min/max --> Dequantize --> Quantize with Const Min/Max that are the same values
+ */
+
+static int try_get_const_float_val(struct nn_graph *nn, uint32_t src_id, float *val_out)
+{
+	struct nn_node *node;
+	if ((node = find_node(nn,src_id)) == NULL) return -1;
+	if (node->node_type != OP_Const) return -1;
+	if (node->outputs[0]->shape.batches != 1) return -1;
+	if (node->outputs[0]->shape.height != 1) return -1;
+	if (node->outputs[0]->shape.width != 1) return -1;
+	if (node->outputs[0]->shape.depth != 1) return -1;
+	if (node->outputs[0]->max_size != 4) return -1;
+	memcpy(val_out,node->outputs[0]->data,4);
+	return 0;
+}
+
+static int do_remove_unnecessary_dequant_quants(struct nn_graph *nn, struct nn_node **nodeptr)
+{
+	struct nn_node *quantize_node = *nodeptr;
+	struct nn_node *dequantize_node;
+	struct nn_node *requantize_node;
+	float requantize_min_val;
+	float requantize_max_val;
+	float quantize_min_val;
+	float quantize_max_val;
+	uint32_t src_id;
+	if (quantize_node->node_type != OP_Quantize) return 0;
+	logmsg(nn,4,"Found quantize ID %x",quantize_node->node_id);
+	src_id = quantize_node->input_refs[0].src_id;
+	if ((dequantize_node=find_node(nn,src_id)) == NULL) return errlog(nn,"src %d not found",src_id);
+	if (dequantize_node->node_type != OP_Dequantize) return 0;
+	logmsg(nn,4,"Found dequantize ID %x",dequantize_node->node_id);
+	src_id = dequantize_node->input_refs[0].src_id;
+	if ((requantize_node=find_node(nn,src_id)) == NULL) return errlog(nn,"src %d not found",src_id);
+	if (requantize_node->node_type != OP_Requantize_32to8) return 0;
+	if (try_get_const_float_val(nn,requantize_node->input_refs[3].src_id,&requantize_min_val) != 0) return 0;
+	if (try_get_const_float_val(nn,requantize_node->input_refs[4].src_id,&requantize_max_val) != 0) return 0;
+	if (try_get_const_float_val(nn,quantize_node->input_refs[1].src_id,&quantize_min_val) != 0) return 0;
+	if (try_get_const_float_val(nn,quantize_node->input_refs[2].src_id,&quantize_max_val) != 0) return 0;
+	logmsg(nn,4,"requantize_min=%f requantize_max=%f quantize_min=%f quantize_max=%f",
+		requantize_min_val,requantize_max_val,quantize_min_val,quantize_max_val);
+	if (requantize_min_val != quantize_min_val) return 0;
+	if (requantize_max_val != quantize_max_val) return 0;
+	logmsg(nn,4,"changing %d refs to %d...",quantize_node->node_id,requantize_node->node_id);
+	change_refs(nn,quantize_node->node_id,0,requantize_node->node_id,0);
+	change_refs(nn,quantize_node->node_id,1,requantize_node->node_id,1);
+	change_refs(nn,quantize_node->node_id,2,requantize_node->node_id,2);
+	return 0;
+}
+
+static int remove_unnecessary_dequant_quants(struct nn_graph *nn)
+{
+	return graph_iterator(nn,do_remove_unnecessary_dequant_quants);
+}
+
+
+/*
+ * Find Dequantize followed by AutoQuantize
  */
 
 static int do_remove_unnecessary_quants(struct nn_graph *nn, struct nn_node **nodeptr)
@@ -1753,6 +1801,7 @@ static int optimize(struct nn_graph *nn)
 	if ((err = make_autoquantize(nn)) != 0) return err;
 	if ((err = make_quantized_dwise(nn)) != 0) return err;
 	if ((err = remove_unnecessary_quants(nn)) != 0) return err;
+	if ((err = remove_unnecessary_dequant_quants(nn)) != 0) return err;
 	if ((err = remove_dead_nodes(nn)) != 0) return err;
 	if ((err = make_reluX_nodes(nn)) != 0) return err;
 	if ((err = mark_biasadd_nodes(nn)) != 0) return err;

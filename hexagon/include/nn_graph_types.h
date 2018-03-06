@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -35,6 +35,9 @@
  */
 #ifndef NN_GRAPH_TYPES_H
 #define NN_GRAPH_TYPES_H 1
+//
+// to enable run-time checking of dims in tensor_prepare_xx
+//#define NN_CHECK_TENSOR_DIMS 1
 /*
  * 
  * Now that that's out of the way, let's get to the good stuff.
@@ -183,6 +186,22 @@ struct tensor *tensor_alloc(const struct shape *shape, size_t data_size);
 struct tensor *tensor_dup(const struct tensor *src);
 void tensor_free(struct tensor *tensor);
 
+//
+// overflow-proof unsigned multiply
+// result is effectively min( 0xFFFFFFFF, a*b );
+// will only be 0 if a or b is 0
+// This form is pretty quick on hexagon
+//
+static inline uint32_t mulu32_sat( uint32_t a, uint32_t b){
+	uint64_t p = (uint64_t)a * b;	// full product
+	return ((p>>32)==0)? (uint32_t)p : (uint32_t)-1;
+}
+// multiply four #'s with saturation
+static inline uint32_t mulu32_x4_sat( uint32_t a, uint32_t b, uint32_t c, uint32_t d){
+	return mulu32_sat( mulu32_sat(a,b), mulu32_sat(c,d));
+}
+
+
 static inline int tensor_copy(struct tensor *dst, const struct tensor *src)
 {
 	dst->shape = src->shape;
@@ -240,7 +259,12 @@ static inline void tensor_get_shape(const struct tensor *src,
 }
 static inline int32_t shape_element_count(const struct shape *src)
 {
+#ifdef NN_CHECK_TENSOR_DIMS
+	uint32_t allsize = mulu32_x4_sat(src->batches, src->height, src->width, src->depth);
+	return (allsize <(1u<<28))? allsize : -1;
+#else
 	return src->batches * src->height * src->width * src->depth;
+#endif
 }
 static inline int32_t tensor_element_count(const struct tensor *src)
 {
@@ -255,7 +279,18 @@ static inline int tensor_out_prepare_normal(
 	uint32_t d,
 	uint32_t type)
 {
+#ifdef NN_CHECK_TENSOR_DIMS
+	// sanity check the dimensions
+	// - dims all >= 1
+	// - product of dims fits in u32 and is not absurd
+	uint32_t allsize = mulu32_x4_sat(b,h,w,d);
+	if( allsize ==0  || allsize >= (1u<<28)){ // allsize is enormous or 0
+		return -4;
+	}
+	int32_t size = allsize * tensor_type_size(type);
+#else
 	int32_t size = b*h*w*d*tensor_type_size(type);
+#endif
 	tensor_set_shape(dst,b,h,w,d);
 	dst->data_size = size;
 	dst->format.raw = 0;
@@ -279,6 +314,9 @@ static inline int tensor_out_prepare_normal_fromshape(
 	return 0;
 }
 
+//
+// note, as of 22-feb-2018 this function is not in use
+//
 
 static inline int tensor_out_prepare_d32(
 	struct tensor *dst,
@@ -288,7 +326,21 @@ static inline int tensor_out_prepare_d32(
 	uint32_t d,
 	uint32_t type)
 {
+#ifdef NN_CHECK_TENSOR_DIMS
+	// sanity check the dimensions
+	// -  dims all >= 1
+	// - product of dims fits in u32 and is not absurd
+	// w mult of 4, d mult of 32
+	uint32_t allsize = mulu32_x4_sat(b,h,w,d);
+	if( allsize ==0  || allsize >= (1u<<28)){ // allsize is enormous or 0
+		return -4;
+	}
+	if(  (w&3)!= 0) return -6;
+	if(  (d&31)!= 0) return -7;
+	int32_t size = 128 + allsize * tensor_type_size(type);
+#else
 	int32_t size = 128+b*h*w*d*tensor_type_size(type);
+#endif
 	tensor_set_shape(dst,b,h,w,d);
 	dst->data_size = size;
 	dst->format.raw = 0;
@@ -297,6 +349,7 @@ static inline int tensor_out_prepare_d32(
 	if (dst->max_size < size) return -1;
 	return 0;
 }
+
 
 static inline int tensor_out_prepare_padded_d32(
 	struct tensor *dst,
@@ -315,18 +368,24 @@ static inline int tensor_out_prepare_padded_d32(
 	int32_t h_total = h+h_before+h_after;
 	int32_t w_total = w+w_before+w_after;
 	int32_t d_total = d+d_before+d_after;
-	int32_t size = b*h_total*w_total*d_total*tensor_type_size(type);
 #ifdef NN_CHECK_TENSOR_DIMS
 	// sanity check the dimensions and padding
-	// - dims all >= 1
-	// - padding amounts need to fit in bytes;
+	// - actual dims all >= 1
+	// - product of padded dim fits in u32 and is not absurd
+	// - padding amounts need to fit in bytes
 	// - depth padding is at most 31;
 	// - w_total must be multiple of 4
 	// - h_total must be multiple of 32.
-	if( b < 1) return -4;
+	uint32_t allsize = mulu32_x4_sat(b,h_total,w_total,d_total);
+	if( allsize ==0  || allsize >= (1u<<28)){ // allsize is enormous or 0
+		return -4;
+	}
 	if( h < 1 || (unsigned)(h_before|h_after) >255u ) return -5;
 	if( w < 1 || (unsigned)(w_before|w_after) >255u || (w_total&3)!= 0) return -6;
 	if( d < 1 || (unsigned)(d_before|d_after) >31u  || (d_total&31)!= 0) return -7;
+	int32_t size = allsize * tensor_type_size(type);
+#else
+	int32_t size = b*h_total*w_total*d_total*tensor_type_size(type);
 #endif
 
 	tensor_set_shape(dst,b,h,w,d);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -259,7 +259,11 @@ analyze_gather_op( struct nn_graph * nn, struct tensor const *index_tensor, stru
 		irank = index_rank;
 	}
 	// determine table rank and index dim
-	int trank = max_i32(1,shape_apparent_rank(&table_tensor->shape));
+	// Note: as we establish valid limits on the ranges, the tests should be fully
+	// comprehensible to static code analysis.
+	//
+	int trank = shape_apparent_rank(&table_tensor->shape);
+	if( trank < 1) trank = 1;		// is now 1..4
 	int index_dim  = 4- trank;		// default if no 'dimension_index'; 0..3
 	if( dimension_index >= 0 ){
 		if( dimension_index > 3){
@@ -294,6 +298,9 @@ analyze_gather_op( struct nn_graph * nn, struct tensor const *index_tensor, stru
 	// from right to left: first the table dims after the index dim
 	// (number = 3-index_dim;  i.e. 0..3)
 	for( int i = 3; i > index_dim; i-- ){
+		if (dpos < 0){
+			return errlog(nn,"attempted to access dimension of %d", dpos);
+		}
 		int n = table_tensor->shape.dimension[i];
 		oparms->outshape.dimension[dpos] = n;
 		size_tab_inner *= n;
@@ -302,6 +309,9 @@ analyze_gather_op( struct nn_graph * nn, struct tensor const *index_tensor, stru
 	// now the index dims
 	// number = irank; 0..4
 	for( int i = 3; i >= 4-irank; i-- ){
+		if (dpos < 0){
+			return errlog(nn,"attempted to access dimension of %d", dpos);
+		}
 		int n = index_tensor->shape.dimension[i];
 		oparms->outshape.dimension[dpos] = n;
 		size_index *= n;
@@ -312,6 +322,9 @@ analyze_gather_op( struct nn_graph * nn, struct tensor const *index_tensor, stru
 	// number = index_dim_+ trank -4; 0..3
 	//
 	for( int i = index_dim-1; i >= 4-trank; i-- ){
+		if (dpos < 0){
+			return errlog(nn,"attempted to access dimension of %d", dpos);
+		}
 		int n = table_tensor->shape.dimension[i];
 		oparms->outshape.dimension[dpos] = n;
 		size_tab_outer *= n;
@@ -524,7 +537,7 @@ analyze_table_op( struct nn_graph * nn, struct tensor const *index_tensor,
 	// table_idx_dim must be 0..3 and must be consistent with apparent rank of the table tensor
 	// (that's a "brown M&M's" thing).
 	//
-	if( table_idx_dim > 3 || table_idx_dim + shape_apparent_rank( & table_tensor->shape) != 4
+	if( table_idx_dim > 3 || table_idx_dim < 0 || table_idx_dim + shape_apparent_rank( & table_tensor->shape) != 4
 		|| n_table_partn < 2 || n_table_partn > MAX_TABLE_PARTITIONS
 		|| (n_layout != 3 && n_layout != n_table_partn+2) ){
 		return errlog(nn,"bad layout_tensor format");
@@ -580,7 +593,7 @@ analyze_table_op( struct nn_graph * nn, struct tensor const *index_tensor,
 	// determine the output shape.
 	// and find the size products
 	int append_dims = 3-table_idx_dim;	// number of dims to append to index shape
-	if( shape_apparent_rank( & index_tensor->shape) + append_dims > 4 ){
+	if( append_dims < 0 || shape_apparent_rank( & index_tensor->shape) + append_dims > 4 ){
 		return errlog(nn,"can't append %d dims to index tensor", append_dims);
 	}
 	uint32_t outer_isize = 1;

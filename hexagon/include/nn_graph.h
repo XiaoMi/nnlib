@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -122,6 +122,7 @@ struct nn_graph {
 	void *vtcm_ptr;			// ptr to VTCM
 	uint32_t vtcm_size;		// size of VTCM
 	struct nn_node **nonconst_head_ptr;	// ptr to head of non-const nodes
+	void *find_node_opaque;
 };
 
 // Within an execution function,
@@ -233,6 +234,21 @@ int do_append_const_node(
 	uint32_t depth,
 	const uint8_t *data,
 	uint32_t data_len);
+int do_append_empty_const_node(
+	struct nn_graph *nn,
+	uint32_t node_id,
+	uint32_t batches,
+	uint32_t height,
+	uint32_t width,
+	uint32_t depth,
+	uint32_t data_len);
+int do_populate_const_node(
+	struct nn_graph *nn,
+	uint32_t node_id,
+	const uint8_t *data,
+	uint32_t data_len,
+	uint32_t target_offset);
+
 int do_teardown(struct nn_graph *nn);
 void do_snpprint(struct nn_graph *nn, char *buf, uint32_t length);
 int do_prepare(struct nn_graph *nn);
@@ -313,8 +329,6 @@ static inline uint32_t nn_align_up(uint32_t align_amt, uint32_t val)
 }
 
 
-
-
 //
 // utilites for checking nodes
 //  (can be called from 'check' functions)
@@ -371,5 +385,6 @@ int node_check_inputs_outputs_n(  struct nn_node *self, struct nn_graph *nn, cha
 #include <nn_graph_log.h>
 #include <nn_graph_padding.h>
 #include <nn_graph_allocator.h>
+#include <nn_graph_find_node.h>
 
 #endif

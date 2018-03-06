@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -37,7 +37,8 @@
  * 
  * Now that that's out of the way, let's get to the good stuff.
  * 
- * This contains the code to execute the graph.
+ * This contains a table of pointers to "struct nn_node_ops" records,
+ * indexed by the op type
  */
 
 #include <nn_graph.h>
@@ -48,12 +49,6 @@
 
 #define DEF_OP(NAME,...) [OP_##NAME] = &nn_ops_for_##NAME,
 struct nn_node_ops *optab[NN_OPS_MAX] = {
-#include "../../interface/ops.def"
-};
-#undef DEF_OP
-
-#define DEF_OP(NAME,...) #NAME,
-const char *hexagon_nn_op_names[NN_OPS_MAX] = {
 #include "../../interface/ops.def"
 };
 #undef DEF_OP

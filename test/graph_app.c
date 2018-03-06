@@ -71,11 +71,8 @@
 #include "rpcmem.h" // RCPMEM_HEAP_DEFAULT?
 #define ION_HEAP_ID_SYSTEM 25
 
-void fastrpc_setup()
+void fastrpc_setup(int MCPS, int MBPS, int DCVS_DISABLE)
 {
-	int MCPS = 1000;
-	int MBPS = 12000;
-	int DCVS_DISABLE = 1;
 	int retVal;
 
 	adspmsgd_start(0,RPCMEM_HEAP_DEFAULT,4096);
@@ -113,7 +110,7 @@ unsigned long long GetTime(void)
 }
 #else
 
-static inline void fastrpc_setup() {}
+static inline void fastrpc_setup(int MCPS, int MBPS, int DCVS_DISABLE) {}
 static inline void fastrpc_teardown() {}
 //static inline unsigned long long GetTime() { return 0ULL; }
 #define rpcmem_free(a) free((a))
@@ -294,6 +291,7 @@ static int load_and_run(uint32_t id, const char *filename, struct options *optio
 	int height = options->height;
 	const char *layer_reorder = options->layer_reorder;
 	int iters = options->iters;
+	int report_iters = options->report_iters;
 	size_t filesize;
 	int elements;
 	int area;
@@ -357,13 +355,17 @@ static int load_and_run(uint32_t id, const char *filename, struct options *optio
 			printf("run failed: %d\n",ret);
 			break;
 		}
-		*appreported = basicperf->total_pcycles - lastreport; // only care about last one
-		lastreport = basicperf->total_pcycles;
+		*appreported = basicperf->total_pcycles - lastreport; // only care about last ones
+		if (i < iters - report_iters) {
+			// Stop chopping last report_iters number of iterations from appreported
+			lastreport = basicperf->total_pcycles;
+		}
 	}
 	if (!options->benchmark) {
 		rpcmem_free(output);
 		rpcmem_free(data);
 	}
+	*appreported = *appreported / report_iters;
 	return ret;
 }
 
@@ -399,7 +401,7 @@ int main(int argc, const char **argv)
 	}
 
 	/* Set up environment */
-	fastrpc_setup();
+	fastrpc_setup(options.MCPS, options.MBPS, options.DCVS_DISABLE);
 	hexagon_nn_config();
 	if ((graph_id = graph_setup(options.debug)) == 0) {
 		return 1;

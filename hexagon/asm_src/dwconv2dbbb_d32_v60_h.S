@@ -47,6 +47,7 @@
  *
  *  Author              Date           Comments
  *  -------------------------------------------------------------
+ *  DJH                 07/ 6/17       created
  *
  *  MEMORY
  *     CODESIZE = 640 bytes + 512 bytes of control tables

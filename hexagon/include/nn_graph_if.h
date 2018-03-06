@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -45,6 +45,7 @@
 #include <nn_graph_types.h>
 #include <hexagon_nn.h>
 #include <stdint.h>
+#include <stdio.h>
 
 struct input {
 	uint32_t src_id;
@@ -123,6 +124,22 @@ int hexagon_nn_append_const_node(
 	const uint8_t *data,
 	uint32_t data_len);
 
+int hexagon_nn_append_empty_const_node(
+	nn_id_t id,
+	uint32_t node_id,
+	uint32_t batches,
+	uint32_t height,
+	uint32_t width,
+	uint32_t depth,
+	uint32_t data_len);
+
+int hexagon_nn_populate_const_node(
+	nn_id_t id,
+	uint32_t node_id,
+	const uint8_t *data,
+	uint32_t data_len,
+	uint32_t target_offset);
+
 int hexagon_nn_prepare(nn_id_t id);
 int hexagon_nn_execute(nn_id_t id, 
 	uint32_t batches_in,
@@ -153,7 +170,5 @@ int hexagon_nn_get_perfinfo(nn_id_t id,
 int hexagon_nn_op_name_to_id(const char *name, unsigned int *id);
 int hexagon_nn_op_id_to_name(const unsigned int id, char *name, int name_len);
 int hexagon_nn_set_powersave_level(unsigned int level);
-
-
 
 #endif

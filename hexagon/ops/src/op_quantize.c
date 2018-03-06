@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -181,6 +181,7 @@ static inline HVX_Vector requantize_words(HVX_Vector vals, int scaling, int min_
 	return mant;
 }
 
+#if 0
 static inline HVX_Vector quantize_4vec(
 	const HVX_Vector in0,
 	const HVX_Vector in1,
@@ -205,6 +206,7 @@ static inline HVX_Vector quantize_4vec(
 	return bytes;
 }
 
+#define BLOCK_SIZE     (16*1024/128)  //# of vectors per chunk
 // find range of floats in n values starting
 // at *ptr (which must be vector aligned).
 // The range is always assumed to include 0.0, even
@@ -219,9 +221,8 @@ static inline HVX_Vector quantize_4vec(
 static void
 find_minmax_of_floats_hvx( float const * ptr, uint32_t nvals, HVX_Vector *out )
 {
-
 	/* Find min and max, always inclusive of zero */
-	int i;
+	int i, n;
 	HVX_Vector const *in = (HVX_Vector const *)ptr;
 	HVX_Vector const_zero = Q6_V_vzero();
 	HVX_Vector const_80000000 = Q6_V_vsplat_R(0x80000000u);
@@ -234,10 +235,18 @@ find_minmax_of_floats_hvx( float const * ptr, uint32_t nvals, HVX_Vector *out )
 	 * Strategy: since we have signed-magnitude floats, max will discard all neg values,
 	 * For min, toggle sign bit and take max
 	 */
-	for (i = 0; i < vectors_in_rounddown; i++) {
-		HVX_Vector new = in[i];
-		vmax = Q6_Vw_vmax_VwVw(vmax,new);
-		vmin = Q6_Vw_vmax_VwVw(vmin,Q6_V_vxor_VV(new,const_80000000));
+	int block = Q6_R_min_RR(vectors_in_rounddown, BLOCK_SIZE);
+	l2fetch(in, 128, 128, block);
+	for (n = 0; n < vectors_in_rounddown; n += BLOCK_SIZE) {
+		int next_block = Q6_R_min_RR(vectors_in_rounddown-n-block, BLOCK_SIZE);
+		wait_for_l2fetch();
+		if (next_block > 0) l2fetch(&in[n+BLOCK_SIZE], 128, 128, next_block);
+		for (i = 0; i < block; i++) {
+			HVX_Vector new = in[n + i];
+			vmax = Q6_Vw_vmax_VwVw(vmax,new);
+			vmin = Q6_Vw_vmax_VwVw(vmin,Q6_V_vxor_VV(new,const_80000000));
+		}
+		block = next_block;
 	}
 	if (leftover_precise_elements) {
 		HVX_VectorPred partial_mask = Q6_Q_vsetq_R(leftover_precise_elements*4);
@@ -261,6 +270,8 @@ find_minmax_of_floats_hvx( float const * ptr, uint32_t nvals, HVX_Vector *out )
 	*out = minmax;
 	Q6_dcfetch_A(out);
 }
+#endif
+
 //
 // parms for converting from float.
 // Procedure for input 'x', in the hvx code, is:
@@ -342,7 +353,7 @@ find_scaling_for_hvx_quant ( float const minmax[2], struct hvx_quant_parms *out)
 	out->maxval = maxv;
 }
 
-
+#if 0
 static void autoquantize_hvx(struct nn_graph *nn, void *info)
 {
 	struct nn_node *self = info;
@@ -353,15 +364,15 @@ static void autoquantize_hvx(struct nn_graph *nn, void *info)
 	const HVX_Vector const_zero = Q6_V_vsplat_R(0);
 	HVX_Vector *in = in_tensor->data;
 	HVX_Vector *out = out_tensor->data;
-	HVX_Vector in0,in1,in2,in3;
+	HVX_Vector in0,in1,in2,in3, out_leftovers;
 	int batches = in_tensor->shape.batches;
 	int height = in_tensor->shape.height;
 	int width = in_tensor->shape.width;
 	int depth = in_tensor->shape.depth;
-	int elements = batches*height*width*depth;
-	int vectors_in_roundup = (elements+31)/32;
-	int leftovers = vectors_in_roundup & 3;
-	int i;
+	unsigned int elements = batches*height*width*depth;
+	unsigned int vectors_in_rounddown = elements/32;
+	unsigned int out_leftovers_elements = elements % 128;
+	int i, n;
 
 	union {
 		HVX_Vector v;
@@ -389,20 +400,176 @@ static void autoquantize_hvx(struct nn_graph *nn, void *info)
 			qparms.minval,qparms.maxval, qparms.maxval-qparms.minval, scaling, common_exp, min_offset);
 
 	/* Quantize! */
-	for (i = 0; i < (vectors_in_roundup>>2); i++) {
-		*out++ = quantize_4vec(in[0],in[1],in[2],in[3],scaling,min_offset,common_exp);
-		in += 4;
+	int block = Q6_R_min_RR(4*(vectors_in_rounddown>>2), BLOCK_SIZE);
+	l2fetch(in, 128, 128, block);
+	for (n = 0; n < 4*(vectors_in_rounddown>>2); n += BLOCK_SIZE) {
+		int next_block = Q6_R_min_RR(vectors_in_rounddown-n-block, BLOCK_SIZE);
+		wait_for_l2fetch();
+		if (next_block > 0) l2fetch(&in[block], 128, 128, next_block);
+		for (i = 0; i < (block>>2); i++) {
+			*out++ = quantize_4vec(in[0],in[1],in[2],in[3],scaling,min_offset,common_exp);
+			in += 4;
+		}
+		block = next_block;
 	}
-	if (leftovers) {
+
+	if(out_leftovers_elements){
 		in0 = in1 = in2 = in3 = const_zero;
-		if (leftovers >= 0) in0 = in[0];
-		if (leftovers >= 1) in1 = in[1];
-		if (leftovers >= 2) in2 = in[2];
-		if (leftovers >= 3) in3 = in[3];
-		*out++ = quantize_4vec(in0,in1,in2,in3,scaling,min_offset,common_exp);
+		in0 = in[0];
+		if (out_leftovers_elements > 32) in1 = in[1];
+		if (out_leftovers_elements > 64) in2 = in[2];
+		if (out_leftovers_elements > 96) in3 = in[3];
+		out_leftovers = quantize_4vec(in0,in1,in2,in3,scaling,min_offset,common_exp);
+		memcpy(out, &out_leftovers, out_leftovers_elements);
 	}
 	nn_sem_post(self->opaque);
 }
+#else
+static void autoquantize_hvx(struct nn_graph *nn, void *info)
+{
+	struct nn_node *self = info;
+	const struct tensor *in_tensor = self->inputs[0];
+	struct tensor *out_tensor = self->outputs[0];
+	struct tensor *out_min_tensor = self->outputs[1];
+	struct tensor *out_max_tensor = self->outputs[2];
+
+	const float *in = in_tensor->data;
+	uint8_t *out = out_tensor->data;
+	int batches = in_tensor->shape.batches;
+	int height = in_tensor->shape.height;
+	int width = in_tensor->shape.width;
+	int depth = in_tensor->shape.depth;
+	int elements = batches*height*width*depth;
+
+	union {
+		HVX_Vector v;
+		float fbuf[32];
+	} *minmaxbuf = nn->scratch;
+
+	struct hvx_quant_parms qparms;
+
+	// find the range
+	find_minmax_of_floats_asm((float const *)in, elements, minmaxbuf->fbuf );
+
+	// compute the scaling parms (and corrected range)
+	find_scaling_for_hvx_quant(minmaxbuf->fbuf, &qparms);
+
+	tensor_set_float(out_min_tensor,0,qparms.minval);
+	tensor_set_float(out_max_tensor,0,qparms.maxval);
+	logmsg(nn,2,"minval=%f maxval=%f range=%f scaling = %d, common_exp = %d min_offset=%x",
+			qparms.minval,qparms.maxval, qparms.maxval-qparms.minval, qparms.scaling, qparms.common_exp, qparms.min_offset);
+
+	/* Quantize! */
+	quantize_floats_to_8b_asm(in,out, elements, qparms.min_offset, qparms.common_exp, qparms.scaling);
+    
+	nn_sem_post(self->opaque);
+}
+#endif
+
+//
+// Multi-thread version of autoquantization
+//
+#ifdef HEXAGON_V66
+#define NUM_THREADS 4
+#else
+#define NUM_THREADS 2
+#endif
+struct tdata_autoq {
+	struct nn_node  *self;
+	nn_sem_t        *donesem;
+	const float     *in;
+	uint8_t         *out;
+	float           *minmax;
+	int32_t         elements;
+	uint32_t        min_offset;
+	uint32_t        common_exp;
+	uint32_t        scaling;
+};
+
+static void autoq_execute_find_minmax_work(struct nn_graph *nn, void *info)
+{
+	struct tdata_autoq *work = info;
+	find_minmax_of_floats_asm(work->in, work->elements, work->minmax);
+	nn_sem_post(work->donesem);
+}
+
+static void autoq_execute_quantization_work(struct nn_graph *nn, void *info)
+{
+	struct tdata_autoq *work = info;
+	quantize_floats_to_8b_asm(work->in, work->out, work->elements, work->min_offset,work->common_exp,work->scaling);
+	nn_sem_post(work->donesem);
+}
+
+static void autoquantize_work(
+	struct nn_graph *nn,
+	const struct tensor *in_tensor,
+	struct tensor *out_tensor,
+	struct tensor *out_min_tensor,
+	struct tensor *out_max_tensor,
+	int elements )
+{
+	const float *in = (const float *)in_tensor->data;
+	uint8_t *out = out_tensor->data;
+
+	union {
+		HVX_Vector v;
+		float f[32];
+	} *minmaxbuf = nn->scratch;
+
+	struct tdata_autoq work[NUM_THREADS];
+	nn_sem_t donesem;
+	nn_sem_init(&donesem,0);
+
+	int t_elements = ((elements + NUM_THREADS-1)/NUM_THREADS + 127)&~127;
+	int n_threads = (elements + t_elements -1)/t_elements;
+	int i, start;
+
+	// setup parameters for multi-thread 
+	for (i=0; i < n_threads; i++) {
+		start = i * t_elements;
+		work[i].in  = in  + start;
+		work[i].out = out + start;
+		work[i].elements = Q6_R_min_RR(elements-start, t_elements);
+		work[i].minmax = minmaxbuf[i].f;
+		work[i].donesem = &donesem;
+	}
+
+	// find the range
+	for (i=0; i < n_threads; i++) {
+		nn_os_work_for_vector(nn, autoq_execute_find_minmax_work, &work[i]);
+	}
+
+	for (i=0; i < n_threads; i++) nn_sem_wait(&donesem);
+		
+	for (i=1; i < n_threads; i++) {
+		minmaxbuf[0].f[0] = Q6_R_sfmax_RR(minmaxbuf[0].f[0],minmaxbuf[i].f[0]);
+		minmaxbuf[0].f[1] = Q6_R_sfmax_RR(minmaxbuf[0].f[1],minmaxbuf[i].f[1]);
+	}
+
+	// compute the scaling parms (and corrected range)
+	struct hvx_quant_parms qparms;
+
+	find_scaling_for_hvx_quant(minmaxbuf[0].f, &qparms);
+
+	tensor_set_float(out_min_tensor,0,qparms.minval);
+	tensor_set_float(out_max_tensor,0,qparms.maxval);
+
+	logmsg(nn,2,"minval=%f maxval=%f range=%f scaling = %d, common_exp = %d min_offset=%x",
+			qparms.minval,qparms.maxval, qparms.maxval-qparms.minval, qparms.scaling, qparms.common_exp, qparms.min_offset);
+
+	/* Quantize! */
+	for (i=0; i < n_threads; i++) {
+		work[i].min_offset = qparms.min_offset;
+		work[i].common_exp = qparms.common_exp;
+		work[i].scaling = qparms.scaling;
+		nn_os_work_for_vector(nn, autoq_execute_quantization_work, &work[i]);
+	}
+
+	for (i=0; i < n_threads; i++) nn_sem_wait(&donesem);
+		
+	return;
+}
+
 static int autoquantize_execute_opt(struct nn_node *self, struct nn_graph *nn)
 {
 	const struct tensor *in_tensor = self->inputs[0];
@@ -510,9 +677,12 @@ static void quant_do_d32_core_op(
 static void autoq_d32_find_minmax( struct nn_graph *nn, void *wrkpv )
 {
 	struct autoquant_d32_work *wrkp = (struct autoquant_d32_work*) wrkpv;
-	find_minmax_of_floats_hvx( wrkp->flt_arr,
+//	find_minmax_of_floats_hvx( wrkp->flt_arr,
+//			wrkp->shape.batches*wrkp->n_elements_per_batch,
+//			&wrkp->minmax_union.as_v );
+	find_minmax_of_floats_asm( wrkp->flt_arr,
 			wrkp->shape.batches*wrkp->n_elements_per_batch,
-			&wrkp->minmax_union.as_v );
+			(float *)&wrkp->minmax_union.as_v );
 	nn_sem_post( & wrkp->done_sem);
 
 }
@@ -742,7 +912,7 @@ quant_do_d32_core_op(
 	int pw_cols = pw_left_cols;
 	int pw_offs = w_left_pad;
 
-	for(;;){
+	for(int dummy = 0; dummy < 2; dummy++ ){
 		if( pw_cols > 0 ){		// perform partial width operation
 			HVX_Vector * wrp = (HVX_Vector *)optr;
 			float const * rdp =  inptr;
@@ -772,6 +942,7 @@ quant_do_d32_core_op(
 				for( int i = 0; i < height ; i++){
 					vin0 = Q6_V_valign_VVR( *(HVX_Vector const*)(rdp+31), *(HVX_Vector const*)(rdp+v0_offs),
 							(size_t)rdp );
+					vin1 = Q6_V_vzero();
 					if( pw_cols > 1)
 						vin1 = q6op_V_vldu_A((HVX_Vector const*) (rdp + in_width_stride));
 					words0 = requantize_words(vin0,scaling,min_offset,common_exp);
@@ -786,6 +957,7 @@ quant_do_d32_core_op(
 				for( int i = 0; i < height ; i++){
 					vin0 = Q6_V_valign_VVR( *(HVX_Vector const*)(rdp+31), *(HVX_Vector const*)(rdp+v0_offs),
 							(size_t)rdp );
+					vin3 = Q6_V_vzero();
 					if( pw_cols >3){
 						vin3 = q6op_V_vldu_A((HVX_Vector const*) (rdp + 3*in_width_stride));
 					}
@@ -1055,10 +1227,6 @@ struct nn_node_ops nn_ops_for_AutoQuantize_d32 = {
 };
 
 
-
-
-
-
 // Dequantize
 //  Convert quantized to float
 //  input 0:   qu8 tensor
@@ -1107,3 +1275,149 @@ struct nn_node_ops nn_ops_for_Quantize_int32_ref = {
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
 };
+
+
+
+struct tdata_copytensor {
+	nn_sem_t        *donesem;
+	const struct tensor *in_tensor;
+	const struct tensor *in_min_tensor;
+	const struct tensor *in_max_tensor;
+	struct tensor *out_tensor;
+	struct tensor *out_min_tensor;
+	struct tensor *out_max_tensor;
+};
+
+static int autoq_execute_copy_tensor_work(struct nn_graph *nn, void *info)
+{
+	struct tdata_copytensor *work = info;
+
+	const struct tensor *in_tensor = work->in_tensor;
+	const struct tensor *in_min_tensor = work->in_min_tensor;
+	const struct tensor *in_max_tensor = work->in_max_tensor;
+	struct tensor *out_tensor = work->out_tensor;
+	struct tensor *out_min_tensor = work->out_min_tensor;
+	struct tensor *out_max_tensor = work->out_max_tensor;
+
+	vmemcpy_asm(out_tensor->data,in_tensor->data,in_tensor->max_size);
+	vmemcpy_asm(out_min_tensor->data,in_min_tensor->data,in_min_tensor->max_size);
+	vmemcpy_asm(out_max_tensor->data,in_max_tensor->data,in_max_tensor->max_size);
+    return 0;
+}
+
+static void input_copy_work(
+	struct nn_graph *nn,
+	const struct tensor *in_tensor,
+	const struct tensor *in_min_tensor,
+	const struct tensor *in_max_tensor,
+	struct tensor *out_tensor,
+	struct tensor *out_min_tensor,
+	struct tensor *out_max_tensor)
+{
+	struct tdata_copytensor work;
+	work.in_tensor = in_tensor;
+	work.in_min_tensor = in_min_tensor;
+	work.in_max_tensor = in_max_tensor;
+	work.out_tensor = out_tensor;
+	work.out_min_tensor = out_min_tensor;
+	work.out_max_tensor = out_max_tensor;
+	nn_os_vector_call(nn, autoq_execute_copy_tensor_work, &work);
+    return;
+}
+
+#define NUM_METADATA_PER_INPUT_TENSOR 4
+#define NUM_METADATA_PER_QUANTIZED_TENSOR 3
+static int input_quantize_execute_opt(struct nn_node *self, struct nn_graph *nn){
+	if (nn->n_inputs % NUM_METADATA_PER_INPUT_TENSOR) {
+		return errlog(nn,"oops, input # does not have enough metadata %d",nn->n_inputs);
+	}
+
+	int num_data_tensors_input = nn->n_inputs / NUM_METADATA_PER_INPUT_TENSOR;
+	int num_data_tensors_output = self->n_outputs / NUM_METADATA_PER_QUANTIZED_TENSOR;
+	if (num_data_tensors_input != num_data_tensors_output) {
+		return errlog(nn,"oops, number of inputs to network %d(%d) does not equal number of outputs from input op %d(%d) ",
+			num_data_tensors_input,nn->n_inputs,num_data_tensors_output,self->n_outputs);
+	}
+
+	int i,batches,height,width,depth;
+	struct tensor *out_tensor,*out_min_tensor,*out_max_tensor;
+	const struct tensor *in_tensor, *in_min_tensor, *in_max_tensor;
+	const struct tensor *needs_quantization_tensor;
+
+	for(i =0; i < num_data_tensors_input; i++){
+		out_tensor = self->outputs[i*NUM_METADATA_PER_QUANTIZED_TENSOR + 0];
+		out_min_tensor = self->outputs[i*NUM_METADATA_PER_QUANTIZED_TENSOR + 1];
+		out_max_tensor = self->outputs[i*NUM_METADATA_PER_QUANTIZED_TENSOR + 2];
+		in_tensor=&nn->inputs[i*NUM_METADATA_PER_INPUT_TENSOR];
+		batches = in_tensor->shape.batches;
+		height = in_tensor->shape.height;
+		width = in_tensor->shape.width;
+		depth = in_tensor->shape.depth;
+		if( tensor_out_prepare_normal(out_tensor,batches,height,width,depth, NN_TYPE_QUINT8)!=0 ){
+			return errlog(nn,"out too small (%p) %d < %d",
+								    out_tensor, out_tensor->max_size, batches*height*width*depth);
+		}
+	}
+
+	for (i =0; i < num_data_tensors_input; i++){
+		int input_index  = i * NUM_METADATA_PER_INPUT_TENSOR;
+		int output_index = i * NUM_METADATA_PER_QUANTIZED_TENSOR;
+		in_tensor = &nn->inputs[input_index];
+		out_tensor = self->outputs[output_index];
+		out_min_tensor = self->outputs[output_index + 1];
+		out_max_tensor = self->outputs[output_index + 2];
+		needs_quantization_tensor = &nn->inputs[input_index + 3];
+
+		int needs_quantization =  tensor_get_int32(needs_quantization_tensor,0);
+
+		if (!needs_quantization){
+			in_min_tensor = &nn->inputs[input_index + 1];
+			in_max_tensor = &nn->inputs[input_index + 2];
+			input_copy_work(nn, in_tensor, in_min_tensor, in_max_tensor, out_tensor, out_min_tensor, out_max_tensor);
+
+		} else {
+			logmsg(nn,9,"input tensor data %x scratch %x",(uint32_t)in_tensor->data,(uint32_t)nn->scratch);
+
+			int elements = in_tensor->max_size/sizeof(float);
+			autoquantize_work(nn, in_tensor, out_tensor, out_min_tensor, out_max_tensor, elements);
+		}
+	}
+	return 0;
+}
+
+static int input_quantize_check(struct nn_node *self, struct nn_graph *nn)
+{
+	int i;
+	size_t current_size, max_size=0;
+
+	if (self->n_outputs % NUM_METADATA_PER_QUANTIZED_TENSOR) {
+		return errlog(nn,"oops, quantize # does not have enough space for metadata (inputs %d outputs %d)",nn->n_inputs,self->n_outputs);
+	}
+	for (i = 0; i < self->n_outputs; i++) {
+		if (self->outputs[i] == NULL) {
+			return errlog(nn,"input: fatal: NULL output");
+		}
+		if (i%NUM_METADATA_PER_QUANTIZED_TENSOR && tensor_out_prepare_normal(self->outputs[i],1,1,1,1,NN_TYPE_FLOAT )!=0){
+			return errlog(nn,"output tensor %d is not a single float",i);
+		}
+		if ((i%NUM_METADATA_PER_QUANTIZED_TENSOR)==0){
+			current_size = self->outputs[i]->max_size;
+			max_size = (current_size > max_size) ? current_size : max_size;
+		}
+	}
+		logmsg(nn,2,"input quantize node %p OK",self);
+	return 0;
+}
+//  nn->inputs[4 * i + 0] 0:  input, float tensor or quantized tensor
+//  nn->inputs[4 * i + (1,2)] :  scalar float, input min & max if quantized tensor
+//  nn->inputs[4 * i + 3]:  int 1 if it needs quantization, 0 otherwise
+//  self->outputs[3 * 0]:   qu8 tensor (d32 format)
+//  self->outputs[3 * i + (1,2)]:  scalar float, output min & max
+//
+struct nn_node_ops nn_ops_for_QuantizeINPUT_f_to_8 = {
+	.execute = input_quantize_execute_opt,
+	.check = input_quantize_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};
+

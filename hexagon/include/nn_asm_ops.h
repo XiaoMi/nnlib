@@ -108,6 +108,7 @@ void gemsuma_asm(const uint8_t * x, int N, int K, int *xsum, int y_offset, int z
 void gemsumb_asm(const uint8_t * y, int * ysum, int K, int);
 void gemmpybbw_asm(const uint8_t * x, const uint8_t * y, int * z_asm, int N, int M, int K);
 void gemaddvvm_asm(const int * x0, const int * y0, int * z0, int N, int M, int * minmax, int reset);
+void gemaddvvm_asm1(const int * x0, const int * y0, int * z0, int N, int M);
 
 void gvconv2dbbw_asm(const uint8_t * x, const uint8_t * y, int * z, int in_width, int out_width, int zstride, int istride,
                      int filt_width, int filt_height, int out_height, int * ptr_xsum, int * ptr_ysum, int * ptr_max);
@@ -547,7 +548,8 @@ void dwconv3x3bbb_unsigned_v60_asm(
 	int32_t zshift,
 	int32_t *ptr_max,
 	int32_t stride_height,
-	int32_t filt_offset);
+	int32_t filt_offset, 
+	int32_t padding );
 
 void dwconv2dbbb_s2_v60_asm(
 	const uint8_t *input, 
@@ -606,6 +608,24 @@ void dwconv3x3bbb_unsigned_s2_v60_asm(
 	int32_t filt_offset,
 	int32_t padding );
 
+typedef void (*dwconv_t)(
+	const uint8_t *input, 
+	const uint8_t *weights,
+	const int32_t *ptr_wsum,
+	uint8_t *output,
+	int32_t next_in_width_depth, 
+	int32_t next_in_width_32, 
+	int32_t indepth, 
+	int32_t out_width, 
+	int32_t next_out_width_depth,
+	int32_t num_out_lines, 
+	int32_t recip_level, 
+	int32_t zshift,
+	int32_t *ptr_max,
+	int32_t stride_height,
+	int32_t filt_offset, 
+	int32_t padding );
+
 void scalemem_d32_hvx(
 	uint8_t * ptr_out,
 	int32_t stride_out,
@@ -614,6 +634,24 @@ void scalemem_d32_hvx(
 	int32_t height,
 	int32_t width,
 	int32_t scl_off);
+
+typedef void (*inconv2d_t) (
+	const uint8_t * input,
+	const uint8_t * weights,
+	uint8_t * output,
+	int in_width_pad,
+	int next_out_width_row,
+	int out_width,
+	int indepth,
+	int filt_width,
+	int filt_height,
+	int num_out_lines,
+	int32_t * minmax_buf,
+	int recip_level,
+	const int32_t *biasbuf,
+	const int32_t *ptr_suma,
+	int next_suma,
+	int stride_height_width);
 
 void inconv2dbbb_s1_v60_asm(
 	const uint8_t * input,
@@ -667,10 +705,10 @@ void gvconv2dbbb_circ_d32_v65_asm(
         int32_t * ptr_max,
         int recip_level,
         int next_out_width,
-        int rpad_lpad,
         uint8_t * circ_buffer,
         int zshift, 
-        int in_offset);
+        int in_offset,
+        const uint8_t * store_ctrl);
 
 void gvconv2dbbb_circ_d64_v65_asm(
         const uint8_t * input,
@@ -688,22 +726,74 @@ void gvconv2dbbb_circ_d64_v65_asm(
         int32_t * ptr_max,
         int recip_level,
         int next_out_width,
-        int rpad_lpad,
         uint8_t * circ_buffer,
         int zshift, 
-        int in_offset);
+        int in_offset,
+        const uint8_t * store_ctrl);
 
-#if 0
-//previous v. of repstream
-void repstream2_asm(
-        const uint8_t * input, 
-        uint8_t * output, 
-        int     width, 
-        int     height, 
-        int     rpad_lpad, 
-        int     stride_h_w, 
-        int in_offset);
-#else
+void gvconv2dbbb_circ6_d32_v65_asm(
+        const uint8_t * input,
+        const int8_t  * weights,
+        uint8_t * output,
+        int in_width_pad,
+        int next_out_width_row,
+        int out_width,
+        int stride_w_h,
+        int indepth,
+        int filt_width,
+        int filt_height,
+        int num_out_lines,
+        const int32_t * ptr_wsum,
+        int32_t * ptr_max,
+        int recip_level,
+        int next_out_width,
+        uint8_t * circ_buffer,
+        int zshift,
+        int in_offset,
+        const uint8_t * store_ctrl);
+
+void gvconv2dbbb_circ6_d64_v65_asm(
+        const uint8_t * input,
+        const int8_t  * weights,
+        uint8_t * output,
+        int in_width_pad,
+        int next_out_width_row,
+        int out_width,
+        int stride_w_h,
+        int indepth,
+        int filt_width,
+        int filt_height,
+        int num_out_lines,
+        const int32_t * ptr_wsum,
+        int32_t * ptr_max,
+        int recip_level,
+        int next_out_width,
+        uint8_t * circ_buffer,
+        int zshift,
+        int in_offset,
+        const uint8_t * store_ctrl);
+
+typedef void (*conv2d_t)(
+        const uint8_t *,
+        const int8_t  *,
+        uint8_t *,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        const int32_t *,
+        int32_t *,
+        int,
+        int,
+        uint8_t *,
+        int,
+        int,
+        const uint8_t *);
+
 void repstream2_asm(
         const uint8_t * input,
         uint8_t * output,
@@ -714,8 +804,34 @@ void repstream2_asm(
         int     stride_w,
         const uint8_t * circ_base,
         int buf_height,
-        int in_offset);
-#endif
+        int in_offset,
+        int num_accs);  // not used
+
+void repstreamN_asm(
+        const uint8_t * input,
+        uint8_t * output,
+        int     width,
+        int     depth,
+        int     fill_height,
+        int     rpad_lpad,
+        int     stride_w,
+        const uint8_t * circ_base,
+        int buf_height,
+        int in_offset,
+        int num_accs);
+
+typedef void (*repstream_t)(
+        const uint8_t * input,
+        uint8_t * output,
+        int     width,
+        int     depth,
+        int     fill_height,
+        int     rpad_lpad,
+        int     stride_w,
+        const uint8_t * circ_base,
+        int buf_height,
+        int in_offset,
+        int num_accs);
 
 void ivint_asm(
         const uint8_t * in_data,
@@ -770,20 +886,36 @@ int maxpool_slice_hvx_2x2_stride2(
 	int32_t out_lalign);
 
 void to_d32_asm(
-        const uint8_t * in_data,      //any ptr 
-        int32_t in_width,       //any width
-        uint8_t * data_d32,     //ptr to d32 data aligned 128
-        int32_t next_width_d32, //desired out width 32*(pad4+(in_width+3)&~3)
-        int32_t in_height,      //any height
-        int32_t in_depth);      //multiple of 32
+	const uint8_t *in_data, //any ptr 
+	int32_t in_width,       //any width
+	uint8_t * data_d32,     //ptr to d32 data aligned 128
+	int32_t next_width_d32, //desired out width 32*(pad4+(in_width+3)&~3)
+	int32_t in_height,      //any height
+	int32_t in_depth);      //multiple of 32
 
 void from_d32_asm(
-        const uint8_t * data_d32,     //ptr to d32 data aligned 128
-        int32_t next_width_d32, //desired in width 32*(pad4+(in_width+3)&~3)
-        uint8_t * out_data,     //any ptr 
-        int32_t in_width,       //any width
-        int32_t in_height,      //any height
-        int32_t in_depth);      //multiple of 32
+	const uint8_t *data_d32,//ptr to d32 data aligned 128
+	int32_t next_width_d32, //desired in width 32*(pad4+(in_width+3)&~3)
+	uint8_t * out_data,     //any ptr 
+	int32_t in_width,       //any width
+	int32_t in_height,      //any height
+	int32_t in_depth);      //multiple of 32
 
 void vmemcpy_weights_asm(void *dst, const void *src, int length);
+void vmemcpy_128(void *dst, const void *src, int length);
+
+void gvrmaxmin(int32_t *pmaxmin);
+
+void quantize_floats_to_8b_asm(
+	const float *input,
+	uint8_t *output,
+	int32_t elements,
+	uint32_t min_offset,
+	uint32_t common_exp,
+	uint32_t scaling);
+
+void find_minmax_of_floats_asm(
+	float const *ptr, 
+	uint32_t elements,
+	float *vminmax); 
 #endif

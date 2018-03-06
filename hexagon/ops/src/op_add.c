@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -81,7 +81,11 @@ static inline void do_quantized_add_888(
 		*cmin = amin;
 		return;
 	}
-	int16_t *ptr_max = nn_scratch_alloc(nn,256);
+	int16_t *ptr_max;
+	if ((ptr_max = nn_scratch_alloc(nn,256)) == NULL) {
+		errlog(nn,"scratch alloc fail");
+		return;
+	}
 	short ialpha = 128.0f*alpha;
 	float kappa  = 128.0f*alpha +(255.0f*amin + 255.0f*bmin)/stepb ;
 	short ikappa = (int) (kappa+.0f); //+ialpha is because input is 08 ^

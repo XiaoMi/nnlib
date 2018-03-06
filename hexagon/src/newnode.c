@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -223,6 +223,7 @@ int node_free_common(struct nn_node *node, struct nn_graph *nn)
 	logmsg(nn,3,"freeing node %p id=%x",node,node->node_id);
 	free_inputs(node);
 	free_outputs(node);
+	del_node_from_hash(nn,node->node_id);
 	nn_free(node);
 	return 0;
 }
@@ -258,14 +259,14 @@ int do_append_node(
 	/* Call node->ctor(node) */
 	struct nn_node *node;
 	if ((node = optab[operation]->ctor(
-		nn,
-		node_id,
-		operation,
-		padding,
-		num_inputs,
-		num_outputs,
-		inputs,
-		outputs)) == NULL) {
+		     nn,
+		     node_id,
+		     operation,
+		     padding,
+		     num_inputs,
+		     num_outputs,
+		     inputs,
+		     outputs)) == NULL) {
 		return errlog(nn,"node id=0x%x ctor fail",node_id);
 	}
 	node_append(&(nn->head),node);
@@ -281,6 +282,22 @@ extern struct nn_node *hexagon_nn_const_ctor(
 	uint32_t depth,
 	const uint8_t *data,
 	uint32_t data_len);
+
+extern struct nn_node *hexagon_nn_empty_const_ctor(
+	struct nn_graph *nn,
+	uint32_t node_id,
+	uint32_t batches,
+	uint32_t height,
+	uint32_t width,
+	uint32_t depth,
+	uint32_t data_len);
+
+extern int hexagon_nn_populate_const(
+	struct nn_graph *nn,
+	uint32_t node_id,
+	const uint8_t *data,
+	uint32_t data_len,
+	uint32_t target_offset);
 
 int do_append_const_node(
 	struct nn_graph *nn,
@@ -311,6 +328,36 @@ int do_append_const_node(
 	return 0;
 }
 
+int do_append_empty_const_node(
+	struct nn_graph *nn,
+	uint32_t node_id,
+	uint32_t batches,
+	uint32_t height,
+	uint32_t width,
+	uint32_t depth,
+	uint32_t data_len) {
+	struct nn_node *node;
+	if ((node = hexagon_nn_empty_const_ctor(
+		     nn,
+		     node_id,
+		     batches,
+		     height,
+		     width,
+		     depth,
+		     data_len)) == NULL) {
+		return errlog(nn,"node id=0x%x ctor fail",node_id);
+	}
+	node_append(&(nn->head),node);
+	return 0;
+}
+int do_populate_const_node(
+	struct nn_graph *nn,
+	uint32_t node_id,
+	const uint8_t *data,
+	uint32_t data_len,
+	uint32_t target_offset) {
+	return hexagon_nn_populate_const(nn, node_id, data, data_len, target_offset);
+}
 
 int do_teardown(struct nn_graph *nn)
 {
@@ -328,6 +375,7 @@ int do_teardown(struct nn_graph *nn)
 		node = nextnode;
 	}
 	allocator_teardown(nn);
+	find_node_teardown(nn);
 	nn_free(nn->scratch);
 	nn_free(nn->logbuf);
 	if (nn->inputs) nn_free((void *)nn->inputs);

@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -103,6 +103,7 @@ int do_execute(struct nn_graph *nn)
 	for (i = 0; i < ITERS; i++) {
 	//print_tensors(inputs, n_inputs);
 	for (node = start_node; node != NULL; node = node->next) {
+		logmsg(nn,4,"do_execute(): node=%p id=%x, next at %p",node,node->node_id, node->next);
 		//execute_check_src_canaries(nn,node);
 		//execute_set_canaries(nn,node);
 		perf_start = nn_os_get_perfcount(nn);
@@ -126,8 +127,6 @@ int do_execute(struct nn_graph *nn)
 		//print_node_checksum(nn, node);
 	}
 	}
-	pcycle_stop = nn_os_get_cycles(nn);
-	nn->execution_total_cycles = pcycle_stop - pcycle_start;
 	nn_os_vtcm_release(nn);
 	nn_os_vector_workers_release(nn);
 	nn_os_hvx_power_off(nn);

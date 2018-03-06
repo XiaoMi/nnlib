@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -386,11 +386,14 @@ static int close_d32_execute(struct nn_node *self, struct nn_graph *nn)
 	if( ! acceptable ){
 		int count = batches * height * width * depth;
 		int ipos;
-		logmsg(nn,0,"Exceeds error limits. Values below are in quantized units");
+		// only log points with excess err > error_disp_lev; only log up to MAX_TO_SHOW
+		// (but always log the worst one)
+		float error_disp_lev = 0.0f;
+		if( errstatC.max_excerr > 8.0f) error_disp_lev = errstatC.max_excerr * (float)(1./16.);
+
+		logmsg(nn,0,"Exceeds error limits. Values below are in quantized units; only shown if exc err > %f", error_disp_lev);
 		logmsg(nn,0,"\t\tActual\t\tExpected\tDiff");
 		int nlogged = 0;
-		// only log points with excess err > 0; only log up to MAX_TO_SHOW
-		// (but always log the worst one)
 
 		for (ipos = 0; ipos < count; ipos++) {
 			int b,h,w,d,k;
@@ -403,7 +406,7 @@ static int close_d32_execute(struct nn_node *self, struct nn_graph *nn)
 			float refdat = refp[ipos];
 			float refdatq = (refdat - dut_min_float)*qscale;
 			float excerr = fabs( tdata-refdatq) - fabs( roundf(refdatq)-refdatq);
-			if( excerr > 0.0f){
+			if( excerr > error_disp_lev){
 				char const * flag = ( ipos == errstatC.pos_largerr)? " <====": "";
 
 				if( nlogged < MAX_TO_SHOW || ipos == errstatC.pos_largerr){

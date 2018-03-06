@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -62,32 +62,38 @@ static int const_check(struct nn_node *self, struct nn_graph *nn)
 	}
 	return 0;
 }
-struct nn_node *hexagon_nn_const_ctor(
+
+struct nn_node *hexagon_nn_empty_const_ctor(
 	struct nn_graph *nn,
 	uint32_t node_id,
 	uint32_t batches,
 	uint32_t height,
 	uint32_t width,
 	uint32_t depth,
-	const uint8_t *data,
 	uint32_t data_len)
 {
 	struct nn_node *self;
 	struct tensor *const_tensor;
 	struct tensor tmp_tensor;
 	struct output *outdefs;
+
+	uint32_t allsize = mulu32_x4_sat(batches,height,width,depth);
+	if( allsize == 0) allsize = 1;	// @@ for now; avoid /0
+	if( allsize == 0 || allsize >= (1u<<28))
+		return NULL;
+
 	tensor_set_shape(&tmp_tensor,batches,height,width,depth);
-	tmp_tensor.data = (uint8_t *)data;
-	tmp_tensor.max_size = tmp_tensor.data_size = data_len;
-	if ((const_tensor = tensor_dup(&tmp_tensor)) == NULL) {
-		errlog(nn,"can't alloc tensor");
+	if ((const_tensor = tensor_alloc(&tmp_tensor.shape,data_len)) == NULL) {
 		return NULL;
 	}
 	if ((self = alloc_node(node_id,OP_Const,NN_PAD_NA)) == NULL) {
+		tensor_free(const_tensor);
 		errlog(nn,"cant alloc node");
 		return NULL;
 	}
 	if ((outdefs = nn_calloc(1,sizeof(struct output))) == NULL) {
+		tensor_free(const_tensor);
+		nn_free(self);
 		errlog(nn,"can't alloc out defs");
 		return NULL;
 	}
@@ -96,7 +102,7 @@ struct nn_node *hexagon_nn_const_ctor(
 	outdefs[0].max_sizes[1] = height;
 	outdefs[0].max_sizes[2] = width;
 	outdefs[0].max_sizes[3] = depth;
-	outdefs[0].elementsize = data_len/(batches*height*width*depth);
+	outdefs[0].elementsize = data_len/allsize;
 	self->n_inputs = 0;
 	self->n_outputs = 1;
 	self->outputs = &const_tensor->self;
@@ -114,6 +120,40 @@ struct nn_node *hexagon_nn_const_ctor(
 		);
 	return self;
 }
+
+
+int hexagon_nn_populate_const(
+	struct nn_graph *nn,
+	uint32_t node_id,
+	const uint8_t *data,
+	uint32_t data_len,
+	uint32_t target_offset)
+{
+	const struct nn_node *node;
+	if ((node = get_node(nn, node_id)) == NULL){
+		errlog(nn, "get node failed");
+		return -1;
+	}
+	uint8_t *start = (uint8_t *) node->outputs[0]->data + target_offset;
+	memcpy(start, data, data_len);
+	return 0;
+}
+
+struct nn_node *hexagon_nn_const_ctor(
+	struct nn_graph *nn,
+	uint32_t node_id,
+	uint32_t batches,
+	uint32_t height,
+	uint32_t width,
+	uint32_t depth,
+	const uint8_t *data,
+	uint32_t data_len)
+{
+	struct nn_node *self = hexagon_nn_empty_const_ctor(nn,node_id,batches,height,width,depth,data_len);
+	if (self) memcpy(self->outputs[0]->data,data,data_len);
+	return self;
+}
+
 
 static struct nn_node *const_ctor(
 	struct nn_graph *nn,

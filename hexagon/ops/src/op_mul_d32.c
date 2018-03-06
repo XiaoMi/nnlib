@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -426,9 +426,9 @@ static int mul_d32_execute_common(struct nn_node *self, struct nn_graph *nn, int
 
 	// a place for the min & max to be stored by the function
 #ifdef HVX_WITH_BYTEMASKED_STORE
-	int16_t minmax[2] __attribute__((aligned(4)));		// range of internal calc (to detect overflow).
+	int16_t minmax[2] __attribute__((aligned(4))) = {0};	// range of internal calc (to detect overflow).
 #else
-	int16_t minmax[2+62] __attribute__((aligned(128)));		// range of internal calc (to detect overflow).
+	int16_t minmax[2+62] __attribute__((aligned(128))) = {0};// range of internal calc (to detect overflow).
 #endif
 
 	op_parms.minmax = minmax;	// only on first pass
@@ -570,7 +570,7 @@ core_mul_d32_reference_skewd32( struct core_mul_d32_parms const * prms )
 	prms2.d_lo = dlo + dfirst;				// advance output & A
 	prms2.d_hi = prms->d_hi;
 
-	int16_t minmax2[0];
+	int16_t minmax2[2];
 	if( mmp != NULL){
 		// divert the second minmax to local array
 		prms2.minmax = &minmax2[0];

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -80,7 +80,7 @@ gvconv2dbbb_circ_d64_v65_asm:
 #define ptr_xi                 r0     //12 activation data
 #define ptr_wi                 r1     //13 weights
 #define ptr_zi                 r2     //14 results
-#define next_in_width          r3     //(pad_l+in_width+pad_r)
+#define next_inbuf_width       r3     //(pad_l+in_width+pad_r)
 #define out_width_depth        r4     //next line amount 
 #define out_width              r5     //15 amount of work to be done
 #define stride_h_w             r6     //30 stride_height, stride_width 
@@ -89,21 +89,19 @@ gvconv2dbbb_circ_d64_v65_asm:
 #define filt_height            r8     //33 filt_height lines per filter
 #define out_height             r9     //34 number of vertical lines to perform
 #define ptr_filtsum            r24    //35 includes the computation filt_sum * in_offset + biasvec
-#define ptr_max                r25    //36 maximum and minum buffer
+#define ptr_max                r31    //36 maximum and minum buffer
 #define recip_level            r26    //37 255 / (MAX - MIN) - used to scale to bytes
-#define next_out_width         r7     //38 total width of image in num d32's
-#define rpad_lpad              r14    //39 rpad on right for circ buffer lpad alignment due to filt
-#define ptr_cbufi              r0     //40 read buffer pointer
+#define out_width_32           r7     //actual out_width in depth32
+#define ptr_cbufi              r16    //40 read buffer pointer
 #define zshift                 r6     //41 extra shift on output before quantization
 #define in_zero                r25    //42
 #define cbuf_eob               r27    //18 end of cuirc buffer
-#define cbuf_size              r31    //19 size in bytes of circ buf -1
-#define weight_stride          r27    //20 distance to next set of weights
+#define cbuf_size              r28    //19 size in bytes of circ buf -1
+#define weight_stride          r15    //22 distance to next set of weights
 /* --------------------------------- SCALER REGS ------------------------------- */
-#define out_width_32           r7     //actual out_width in depth32
 #define cm4                    r2     //shuffle/deal ints
 #define col_count              r2     //horizontal counter
-#define in_width_32            r28    //total input width in bytes in buffer
+#define in_width_32            r3     //total input width in bytes in buffer
 #define x70_x30                r15:14 //4n+0 inputs
 #define x60_x20                r17:16 //4n+0 inputs
 #define x50_x10                r19:18 //4n+0 inputs
@@ -112,34 +110,22 @@ gvconv2dbbb_circ_d64_v65_asm:
 #define x61_x21                r15:14 //4n+1 inputs
 #define x51_x11                r19:18 //4n+1 inputs
 #define x41_x01                r17:16 //4n+1 inputs
+#define ptr_wi_ptr_xi          r1:0   //
 #define fetch_ptr_base         r1     //base pointer for l1 prefetch
 #define fetch_ptr              r10    //current pointer for l1 prefetch
 #define stride3                r11    //3*stride
 #define stride                 r12    //current to next input
 #define ptr_x0                 r26    //base input pointer
 #define ptr_x1                 r13    //current input ptr      
-#define ptr_w0                 r20    //even output depth 32 weights
-#define ptr_w1                 r21    //odd output depth 32 weights
+#define ptr_w0                 r20    //13 even output depth 32 weights
+#define ptr_w1                 r21    //20 odd output depth 32 weights
 #define ptr_z0                 r0     //even output depth 32 outputs
 #define ptr_z1                 r25    //21 write buffer sp position and odd output depth 32 outputs
-#define in_width_stride_depth  r22    //step size from currnet to next logical line
-#define next_inbuf_width       r24    //width of circular buffer in elements
 #define adjust                 r10    //
 #define delta                  r7     //difference between filt height and stride height
-#define fetch_size             r24    //32 if stride = 1 and filt_w > 1
-/* ---------------------------------------------------------------------------- */
-#define next_in_width32        r20    //
 #define buf_fill               r17    //22 number of total lines in circ buffer to write
-#define stride_w               r15    //horizontal stride
-#define width                  r16    //width in 128byte block
-#define width_cnt              r14    //width remaining in 128byte block
-#define lpad                   r6     //left pad aligmnent
-#define rpad                   r1     //=128bytes
-#define l2fctrl               r15:14
-#define l2fctrl1              r15
-#define l2fctrl0              r14
+#define out_width_64           r22    //actual out_width in depth32 *2
 /* ---------------------------------- VEC REGS -------------------------------- */
-#define vin_zero               v9     //
 #define x3x2x1x0               v10    //input data
 #define x7x6x5x4               v11    //next input data
 #define y3y2y1y0               v14    //aligned input data
@@ -204,133 +190,102 @@ gvconv2dbbb_circ_d64_v65_asm:
 #define SSR        <<1:rnd:sat:shift  //simplfy mpy instruction
 /* --------------------------------------------------------------------------- */
    {   allocframe(#112)                                  //0th entry on stack is 112+8)/4=30 ints
-       maxe = #0                                         //initialize max
+       stride_h_w = memw(sp+#0<<2)                       //stride horizontl and vertical
    } {
        memd(sp+#4<<2) = r21:20                           //save 20,21
        memd(sp+#6<<2) = r23:22                           //save 22,23
-       r23 = ##0x7fffffff                                //max pos
    } {
        memd(sp+#0<<2)  = r17:16                          //save 16,17
        memd(sp+#2<<2)  = r19:18                          //save 18,19
-       mine = vsplat(r23)                                //vectorize max
    } {
        memd(sp+#8<<2) = r25:24                           //save 24,25
        memd(sp+#10<<2) = r27:26                          //save 26,27
-       maxe.w = vsub(maxe.w, mine.w)                     //create min max
-   } {
-       memw(sp+#12<<2) = ptr_xi                          //activation data
-       memw(sp+#13<<2) = ptr_wi                          //save weights
-   } {
-       memw(sp+#14<<2) = ptr_zi                          //save output ptr
-       stride_h_w = memw(sp+#30<<2)                      //stride horizontl and vertical
    } {
        filt_height = memw(sp+#33<<2)                     //filter height
        memw(sp+#15<<2) = out_width                       //save output width
        stride = zxth(stride_h_w)                         //horizontal stride
    } {
-       rpad_lpad = memw(sp+#39<<2)                       //packed left and right pad
-       memw(sp+#16<<2) = r28                             //save 28
-       delta = sub(filt_height.L, stride_h_w.H)          //correct for cbuffer discrepency
-       adjust = filt_height                              //
-   } {
-       ptr_filtsum = memw(sp+#35<<2)                     //ptr to the sum of filters+offset
        in_depth = memw(sp+#31<<2)                        //input depth
-       p0 = cmp.ge(delta, #0)                            //
-       if( p0.new) adjust = #0                           //
-   } {
        filt_width = memw(sp+#32<<2)                      //filter width
-       wsum0 = vmem(ptr_filtsum+#0)                      //set 1st weight offset
+   } {
+       ptr_max = memw(sp+#36<<2)                         //get max/min ptr
+       cbuf_size = mpyi(filt_height, in_depth)           //circular buffer size
+       stride = asl(stride, #5)                          //32 * stride_w
+       dcfetch(ptr_xi+#0<<6)                             //
    } {
        out_height = memw(sp+#34<<2)                      //height of output
-       wsum1 = vmem(ptr_filtsum+#1)                      //set 2nd weight offset
-       next_inbuf_width=sub(next_in_width.L,rpad_lpad.L) //normally add 4
-       stride = asl(stride, #5)                          //32 * stride_w
-   } {
-       memw(sp+#17<<2) = r31                             //save 31
-       cbuf_size = mpyi(filt_height, in_depth)           //circular buffer size
-       next_inbuf_width=add(next_inbuf_width,#3)         //round to 4
-       buf_fill = mpy(in_depth.L, stride_h_w.H)          //num lines to fill cbuf with each time
-   } {
-       if(!p0) cbuf_size = buf_fill                      //make largest of filt_height and stride_height
-       next_inbuf_width=and(next_inbuf_width,#-4)        //round to 4
+       in_zero = memw(sp+#41<<2)                         //
        stride3 = addasl(stride, stride, #1)              //3Xstride
-   } {
-       buf_fill = lsr(buf_fill, #5)                      //num lines to process in cbuf fill
-       next_inbuf_width=add(next_inbuf_width.L,rpad_lpad.H) //adde rmargin
-       in_zero = memw(sp+#42<<2)                         //
-   } {
-       in_zero = vsplatb(in_zero)                        //
        cbuf_size = mpyi(cbuf_size, next_inbuf_width)     //circular buffer size
-       recip_level = memw(sp+#37<<2)                     //255/max
-       next_out_width = memw(sp+#38<<2)                  //total width of output
    } {
-       memw(sp+#22<<2) = buf_fill                        //number of rows in circ buf
        cbuf_size = add(cbuf_size, cbuf_size)             //x2
-       ptr_cbufi = memw(sp+#40<<2)                       //circular buffer
-       vin_zero = vsplat(in_zero)                        //
+       in_zero = vsplatb(in_zero)                        //
+       memd(sp+#12<<2) = ptr_wi_ptr_xi                   //save weights:activation
+       maxe = vmem(ptr_max+#0)                           //
    } {
        weight_stride=mpy(filt_width.L,filt_height.L)     //offset between filter rows
-       memw(sp+#21<<2) = ptr_cbufi                       //cbuf write ptr
        filt_width = asl(filt_width, #2)                  //*32/8
+       mine = vmem(ptr_max+#1)                           //
+       memw(sp+#14<<2) = ptr_zi                          //save output ptr
    } {
        weight_stride=mpy(weight_stride.L,in_depth.L)     //distance between weight rows
+       recip_level = memw(sp+#37<<2)                     //255/max
+       ptr_cbufi = memw(sp+#39<<2)                       //circular buffer
+   } {
+       out_width_32 = memw(sp+#38<<2)                    //total width of output
        vrecip = vsplat(recip_level)                      //used to compress to 8bits 255/max
-       filt_width = add(filt_width, #-1)                 //account for epilog
-   } {
-       adjust = mpyi(adjust, in_depth)                   //
-       ptr_wi += asl(weight_stride,#5)                   //weights stride
        cbuf_eob = add(ptr_cbufi, cbuf_size)              //end of circ buffer marker
+       dcfetch(ptr_xi+#1<<6)                             //
    } {
+       memw(sp+#21<<2) = ptr_cbufi                       //cbuf write ptr
+       filt_width = add(filt_width, #-1)                 //account for epilog
+       ptr_wi += asl(weight_stride,#5)                   //weights stride
        filt_height = mpyi(filt_height, in_depth)         //total number of depth32 filter rows
-       out_width_32 = asl(next_out_width, #5)            //total output width in d32 format
-       adjust = add(adjust, adjust)                      //x2
    } {
+       weight_stride = asl(weight_stride, #6)            //
+       col_count = memw(sp+#15<<2)                       //initialize width count
        cbuf_eob = add(cbuf_eob, #-4)                     //make so comparison is >= eob
-       memw(sp+#20<<2) = ptr_wi                          //spill weight stride for later
-       in_width_stride_depth=mpy(in_depth.L,stride_h_w.H)//
-       adjust = mpyi(adjust, next_inbuf_width)           //(filt_height-stride_height)*in_depth*width*2
+       dcfetch(ptr_xi+#2<<6)                             //
    } {
        filt_height = lsr(filt_height, #5)                //num d32 rows in filter
-       in_width_stride_depth=mpyi(in_width_stride_depth,next_inbuf_width) //full logical line stride
-       memw(sp+#23<<2) = adjust                          //
+       out_width_64 = add(out_width_32, out_width_32)    //
+       ptr_filtsum = memw(sp+#35<<2)                     //ptr to the sum of filters+offset
+       dcfetch(ptr_xi+#3<<6)                             //
    } {
+       memw(sp+#20<<2) = ptr_wi                          //spill weight stride for later
+       memw(sp+#24<<2) = weight_stride                   //
        in_width_32 = asl(next_inbuf_width, #6)           //next d32 line x 2
-       in_width_stride_depth=mpyi(in_width_stride_depth,#2)//locial input stride
-       fetch_size = #64                                  //for future use
-       filt_height = add(filt_height, #-1)
+       filt_height = add(filt_height, #-1)               //
    }
 /* -------------------------------------------------------------------------- */
    .balign 32
 .L_height:
-   {   ptr_z0 = memw(sp+#14<<2)                          //output ptr for even lines
-       ptr_x0 = memw(sp+#12<<2)                          //ptr_x0=ptr_cbufi read circ buffer as direct input
-       //ptr_x0 = memw(sp+#40<<2)                        //ptr_x0=ptr_cbufi read circ buffer
-       s16_s12 = vcombine(wsum1,wsum1)                   //init sum 2 and 6
-       s17_s13 = vcombine(wsum1,wsum1)                   //init sum 3 and 7
-   } {                                                   //buffer read ptr if ptr_xi >= buf_size-=size
-       ptr_x1 = add(ptr_x0, in_width_stride_depth)       //next input line  
-       ptr_z1 = add(ptr_z0, out_width_32)                //next output depth32 (as outdepth 64)
-       fetch_ptr_base = add(ptr_x0, in_width_32)         //fetch is next row ahead
+   {   
+       ptr_x0 = memw(sp+#12<<2)                          //ptr_x0=ptr_cbufi read circ buffer
+       wsum0 = vmem(ptr_filtsum++#1)                     //set 1st weight offset
+       nop; nop
    } {
-       p0 = cmp.gt(ptr_x1, cbuf_eob)                     //if >= circ buffer wrap around
-       if(p0.new) ptr_x1 = sub(ptr_x1, cbuf_size)        //subtract size of buffer to create mod wrap
-       memw(sp+#14<<2) += out_width_depth                //update output ptr
-       col_count = memw(sp+#15<<2)                       //initialize width count
+       ptr_z0 = memw(sp+#14<<2)                          //output ptr for even lines
+       wsum1 = vmem(ptr_filtsum++#1)                     //set 2nd weight offset
+       fetch_ptr_base = add(ptr_x0, in_width_32)         //fetch is next row ahead
+       nop
    } { 
-       out_height = add(out_height, #-1)                 //decrement height count
        p1 = cmp.gt(fetch_ptr_base, cbuf_eob)             //if prefetch >= circ buffer wrap around
        if(p1.new)fetch_ptr_base=sub(fetch_ptr_base,cbuf_size) //wrap fetch ptr around independently
-       //memw(sp+#40<<2) = ptr_x1                          //ptr_xi+=in_width*depth*stride_h % cbuf_size
+       s06_s02 = vcombine(wsum0,wsum0)                   //init sum2 and 6
+       s07_s03 = vcombine(wsum0,wsum0)                   //init sum3 and 7
    } {
        loop1(.L_filt_height, filt_height)                //setup vertical filte rloop
        s04_s00 = vcombine(wsum0,wsum0)                   //init sum0 and 4
        s05_s01 = vcombine(wsum0,wsum0)                   //init sum1 and 5
+       ptr_z1 = add(ptr_z0, out_width_32)                //next output depth32 (as outdepth 64)
    } {
-       s06_s02 = vcombine(wsum0,wsum0)                   //init sum2 and 6
-       s07_s03 = vcombine(wsum0,wsum0)                   //init sum3 and 7
+       s16_s12 = vcombine(wsum1,wsum1)                   //init sum 2 and 6
+       s17_s13 = vcombine(wsum1,wsum1)                   //init sum 3 and 7
        ptr_w0 = memw(sp+#13<<2)                          //access ptr weight
        p3 = sp1loop0(.L_filt_width, filt_width)          //setup inner filter loop
    } {
+       memw(sp+#14<<2) += out_width_64                   //update output ptr
        s14_s10 = vcombine(wsum1,wsum1)                   //init sum 0 and 4
        s15_s11 = vcombine(wsum1,wsum1)                   //init sum 1 and 5
        ptr_w1 = memw(sp+#20<<2)                          //access weights stride
@@ -352,7 +307,8 @@ gvconv2dbbb_circ_d64_v65_asm:
 .L_filt_width:
    {   
        dcfetch(fetch_ptr+#0<<6)                          //[0, 2]fetch 64bytes-2 lots 8 x 4 bytes
-       fetch_ptr = add(fetch_ptr, fetch_size)            //[0, 2]inc fetch by 32/64 bytes (1 line)
+       fetch_ptr = add(fetch_ptr, #64)                   //[0, 2]inc fetch by 32/64 bytes (1 line)
+       nop; nop
    } {
        w00.tmp = vmem(ptr_w0+#0)                         //[0, 3]1st 32 weights of out depth
        s06_s02.w+= vrmpy(w00.b, x60_x20.ub)              //[0, 3]macc 2,6  out 0
@@ -394,8 +350,7 @@ gvconv2dbbb_circ_d64_v65_asm:
        s15_s11.w += vrmpy(w11.b, x51_x11.ub)             //[0,10]
        x60_x20 = memd(ptr_x1+stride<<#2)                 //[1, 1]
    }:endloop0
-   {   
-       dcfetch(fetch_ptr+#0<<6)                          //[0, 0]fetch 64bytes-2 lots 8 x 4 bytes
+   {   dcfetch(fetch_ptr+#0<<6)                          //[0, 0]fetch 64bytes-2 lots 8 x 4 bytes
        p3 = sp1loop0(.L_filt_width, filt_width)          //set up inne rloop for next time
        p1 = cmp.gt(fetch_ptr_base, cbuf_eob)             //[E,10]
        if(p1.new)fetch_ptr_base=sub(fetch_ptr_base,cbuf_size)//[E,10]wrap around end fetch ptr
@@ -441,8 +396,7 @@ gvconv2dbbb_circ_d64_v65_asm:
        if(p0)ptr_x0 = sub(ptr_x0, cbuf_size)             //[E,10]wrap around end of buffer
    }:endloop1
 .L_last1:
-   {   
-       p3 = sp1loop0(.L_filt_width1, filt_width)         //set up inne rloop for next time
+   {   p3 = sp1loop0(.L_filt_width1, filt_width)         //set up inne rloop for next time
        ptr_x1 = ptr_x0                                   //set up currne tinput ptr
        ptr_x0 = add(ptr_x0, in_width_32)                 //if >= buf_size -= buf_size
    } {
@@ -455,9 +409,8 @@ gvconv2dbbb_circ_d64_v65_asm:
    } 
    .balign 32
 .L_filt_width1:
-   {   
-       dcfetch(fetch_ptr+#0<<6)                          //[0, 2]fetch 64bytes-2 lots 8 x 4 bytes
-       fetch_ptr = add(fetch_ptr, fetch_size)            //[0, 2]inc fetch by 32/64 bytes (1 line)
+   {   dcfetch(fetch_ptr+#0<<6)                          //[0, 2]fetch 64bytes-2 lots 8 x 4 bytes
+       fetch_ptr = add(fetch_ptr, #64)                   //[0, 2]inc fetch by 32/64 bytes (1 line)
    } {
        w00.tmp = vmem(ptr_w0+#0)                         //[0, 3]1st 32 weights of out depth
        s06_s02.w+= vrmpy(w00.b, x60_x20.ub)              //[0, 3]macc 2,6  out 0
@@ -539,7 +492,7 @@ gvconv2dbbb_circ_d64_v65_asm:
        s15_s11.w += vrmpy(w11.b, x51_x11.ub)             //[1,10]
    }
 /* ------------------------------------------------------------------------ */
-   {   zshift = memw(sp+#41<<2)                          //final shift 7 + 16
+   {   zshift = memw(sp+#40<<2)                          //final shift 7 + 16
        mine.w = vmin(mine.w, s00.w)                      //min accumulation
        maxe.w = vmax(maxe.w, s00.w)                      //max accumulation
    } { 
@@ -551,7 +504,7 @@ gvconv2dbbb_circ_d64_v65_asm:
        s1_sh.w = vasl(s01.w, zshift)                     //
        maxe.w = vmax(maxe.w, s02.w)                      //max accumulation
        mine.w = vmin(mine.w, s02.w)                      //min accumulation
-       adjust = memw(sp+#23<<2)                          //
+//     adjust = memw(sp+#23<<2)                          //
    } {
        s00.w = vmpye(s0_sh.w, vrecip.uh)
        maxe.w = vmax(maxe.w, s03.w)                      //max accumulation
@@ -561,7 +514,7 @@ gvconv2dbbb_circ_d64_v65_asm:
        s00.w += vmpyo(s0_sh.w, vrecip.h):SSR
        mine.w = vmin(mine.w, s04.w)                      //min accumulation
        maxe.w = vmax(maxe.w, s04.w)                      //max accumulation
-       ptr_x0 = sub(ptr_x0, adjust)                      //-=filt_height if stride_height > filt_height
+//     ptr_x0 = sub(ptr_x0, adjust)                      //-=filt_height if stride_height > filt_height
    } {
        s01.w = vmpye(s1_sh.w, vrecip.uh)
        s0_sh.w = vasl(s02.w, zshift)                     //
@@ -691,6 +644,7 @@ gvconv2dbbb_circ_d64_v65_asm:
    } {
        s15_s11 = vcombine(wsum1,wsum1)                   //init sum 1 and 5
        s16_s12 = vcombine(wsum1,wsum1)                   //init sum 2 and 6
+       weight_stride = memw(sp+#24<<2)                   //
    } {
        s17_s13 = vcombine(wsum1,wsum1)                   //init sum 3 and 7
        d17654.ub = vpack(d176.h, d154.h):sat             //shift 16bits by zshift
@@ -698,98 +652,16 @@ gvconv2dbbb_circ_d64_v65_asm:
        if( p1) jump   .L_width                           //next 2 rows 8 points per row
    }//endloop width
 /* --------------------------------------------------------------------------- */
-#if 0
-   {   rpad_lpad = memw(sp+#39<<2)                       //retieve left pad
-       stride_w = lsr(stride, #5)                        //pick out horiz stride
-       buf_fill = memw(sp+#22<<2)                        //number of lines to write into buf
-       width = add(next_in_width, #3)                    //[S, 2]number of 128b blks
+   {   out_height = add(out_height, #-1)                 //decrement height count
+       col_count = memw(sp+#15<<2)                       //initialize width count
+       memw(sp+#13<<2) += weight_stride                  //access ptr weight
    } {
-       width = sub(width.L, rpad_lpad.L)                 //next_in_width-lpad+3
-       cm4 = #-4                                         //[S, 1]shuffle ints
-       rpad = lsr(rpad_lpad, #18)                        //
-       ptr_x0 = memw(sp+#12<<2)                          //read from input activations
-   } {
-       width = lsr(width, #2)                            //
-       ptr_z1 = memw(sp+#21<<2)                          //write pointer to circ buffer write
-       next_in_width32 = asl(next_in_width, #5)          //              
-       p0 = cmp.eq(stride_w, #1)                         //[S, 2]is stride = 1? (or 2)
-   } {
-       rpad = add(rpad, width)
-       lpad = asl(rpad_lpad, #5)                         //[S, 0]alignment
-       loop1(.L_rows, buf_fill)                          //[S, 2]outer loop
+       memw(sp+#20<<2) += weight_stride                  //access weights stride
+       p0 = cmp.eq(out_height, #0)                       //are vertical lines done?
+       if(!p0.new) jump:t .L_height                            //then go again
    }
-/* --------------------------------------------------------------------------- */
-   .balign 32
-.L_rows:
-   {   p3 =sp1loop0(.L_cols, rpad)                       //[P, 0]inner loop width
-       width_cnt = add(width, #-1)                       //[P, 0]
-       x3x2x1x0 = vmem(ptr_x0+#0)                        //[P, 0]load 1st 128
-       x7x6x5x4 = vin_zero                               //[P, 0]
-   } {
-       ptr_x1 = add(ptr_x0, #128)                        //[P, 1]
-       p1 = cmp.gt(width_cnt, #0)                        //[P, 1]
-       width_cnt = add(width_cnt, #-1)                   //[P, 1]
-   } {
-       if(p1) x7x6x5x4.tmp = vmem(ptr_x1++#1):nt         //[P, 2]stride = 1 data
-       y3y2y1y0 = valign(x7x6x5x4,x3x2x1x0, lpad)        //[P, 2]aligned data next 128
-       x3x2x1x0 = x7x6x5x4                               //[P, 2]update pipe
-       x7x6x5x4 = vin_zero                               //[P, 2]
-   } {
-       if(p0) ybyay9y8 = y3y2y1y0                        //[P, 3]update 1 stage pipe y0 = y2
-       p1 = cmp.gt(width_cnt, #0)                        //[P, 3]
-       width_cnt = add(width_cnt, #-1)                   //[P, 3]
-       if(p0) jump .L_cols                               //[P, 3]skip 1 load
-   } {
-       if(p1) x7x6x5x4.tmp = vmem(ptr_x1++#1):nt         //[P, 4]stride = 2 data
-       y7y6y5y4 = valign(x7x6x5x4,x3x2x1x0, lpad)        //[P, 4]aligned data next 128
-       x3x2x1x0 = x7x6x5x4                               //[P, 4]update pipe
-       x7x6x5x4 = vin_zero                               //[P, 4]
-   } {
-       p1 = cmp.gt(width_cnt, #0)                        //[P, 5]
-       width_cnt = add(width_cnt, #-1)                   //[P, 5]
-   }
-/* --------------------------------------------------------------------------- */
-.L_cols:
-   {   if( p0) y3y2y1y0 = ybyay9y8                       //[0, 0]update 1 stage pipe y0 = y2
-       if(p1) x7x6x5x4.tmp = vmem(ptr_x1++#1):nt         //[0, 0]
-       ybyay9y8 = valign(x7x6x5x4,x3x2x1x0, lpad)        //[0, 0]aligned data next 128
-       x3x2x1x0 = x7x6x5x4                               //[0, 0]update pipe
-   } {
-       if(p3) vmem(ptr_z1++#1) = z73z62                  //[0, 1]empty pipe
-       p1 = cmp.gt(width_cnt, #0)                        //[0, 1]
-       width_cnt = add(width_cnt, #-1)                   //[0, 1]
-       x7x6x5x4 = vin_zero                               //[0, 1]
-   } {
-       z73z62_z51z40= vshuff(ybyay9y8,y3y2y1y0,cm4)      //[0, 2]shuffle up for new vrmpy
-       vmem(ptr_z1++#1) = z51z40.new                     //[0, 2]empty pipe
-       if(!p0) y3y2y1y0 = y7y6y5y4                       //[0, 2]update 2 stage shift reg
-       if(!p0) y7y6y5y4 = ybyay9y8                       //[0, 2]y0 = y1 || y2 = y2
-   }:endloop0
-/* --------------------------------------------------------------------------- */
-   {   vmem(ptr_z1++#1) = z73z62                          //[E, 0]empty pipe
-       ptr_x0 = addasl(ptr_x0, next_in_width, #5)         //[E, 0]update input next row
-   } {
-       p2 = cmp.gt(ptr_z1, cbuf_eob)                      //if circ buf write and end of buf
-       if(p2.new) ptr_z1 = sub(ptr_z1, cbuf_size)         //then subtract buf size take to 1st row
-   }:endloop1
-   {
-       p0 = cmp.eq(out_height, #0)                        //are vertical lines done?
-       l2fctrl1 = next_in_width32                         //
-       l2fctrl0 = combine(next_in_width32.L, buf_fill.L)  //                    
-       if(p0.new) jump:nt .L_domax                        //avoid last l2 fetch
-   } {
-       l2fetch(ptr_x0, l2fctrl) 
-   } {
-       memw(sp+#12<<2) = ptr_x0                           //save last read from input activations
-       memw(sp+#21<<2) = ptr_z1                           //last write for circ buffer
-       if(!p0) jump:t .L_height                           //then go again
-   }
-#else
-   {   p0 = cmp.eq(out_height, #0)                        //are vertical lines done?
-       if(!p0.new) jump:t .L_height                       //then go again
-   }
-#endif
 /* ------------------------------------------------------------------------ */
+#if 0
 .L_domax:
    {   ptr_max = memw(sp+#36<<2)                         //get max/min ptr
        cm4 = #-4                                         //define int based deal
@@ -815,15 +687,19 @@ gvconv2dbbb_circ_d64_v65_asm:
 /* ------------------------------------------------------------------------ */
    {   r17:16 = memd(sp+#0)                              //restore stack
        r19:18 = memd(sp+#2<<2)                           //18,19
+#else
+   {   vmem(ptr_max+#0) = maxe                           //store max
+       r17:16 = memd(sp+#0)                              //restore stack
+   } {
+       r19:18 = memd(sp+#2<<2)                           //18,19
+       vmem(ptr_max+#1) = mine                           //store min
+#endif
    } {
        r21:20 = memd(sp+#4<<2)                           //20,21
        r23:22 = memd(sp+#6<<2)                           //22,23
    } {
        r25:24 = memd(sp+#8<<2)                           //24,25
        r27:26 = memd(sp+#10<<2)                          //26,27
-   } {
-       r31 = memw(sp+#17<<2)                             //save 31
-       r28 = memw(sp+#16<<2)                             //28
    } {
        dealloc_return                                    //
    }

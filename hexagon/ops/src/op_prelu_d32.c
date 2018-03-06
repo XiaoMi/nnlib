@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -146,7 +146,7 @@ static int prelu_opt_execute(struct nn_node *self, struct nn_graph *nn)
 	float out_range = (out_max-out_min);
 	float shrink_factor = in_range/out_range;
 	uint32_t fixed_shrink_factor = Q6_R_satub_R(fast_roundf(128*shrink_factor));
-	logmsg(nn,0,"in_range=%f out_range=%f shrink factor: %f fixed: %x shift: %d",in_range,out_range,shrink_factor,fixed_shrink_factor,shift);
+	logmsg(nn,2,"in_range=%f out_range=%f shrink factor: %f fixed: %x shift: %d",in_range,out_range,shrink_factor,fixed_shrink_factor,shift);
 
 	if (tensor_get_float(in_min_tensor,0) < -tensor_get_float(in_max_tensor,0)) {
 		logmsg(nn,1,"Caution: min < -max");

@@ -365,6 +365,10 @@ static int avgpool_execute(struct nn_node *self, struct nn_graph *nn)
 	// set up the plan. Note, this doesn't check batches = depth = 1 on stride and window.
 	// 'check' does that.
 
+	// for output wid = 1, the left-padding will be 4, unless we can use the 'reduce_to_1x1' special case
+	// handler in which case it will be 2.
+	int smallest_left_pad = 4;
+
 	int k = setup_integral_buffer_plan( self, nn, ibp, in_tensor, window_tensor, stride_tensor);
 	if( k != 0){			// new plan was made
 		if( k <0)   // there was a problem.
@@ -374,6 +378,7 @@ static int avgpool_execute(struct nn_node *self, struct nn_graph *nn)
 		if( use_hvx ){
 			if( ibp->outshape.height == 1 && ibp->outshape.width == 1){
 				special_handler = avgpool_special_reduce_to_1x1;
+				smallest_left_pad = 2;
 			}else if( use_hvx &&  ibp->window_ht ==3 && ibp->window_wid == 3 && ibp->stride_ht == 1 && ibp->stride_wid == 1
 				&& ibp->inshape.width >1 && ibp->inshape.height > 1 ){
 				ibp->hvx_specialized_handler = avgpool_slice_hvx_3x3_stride1;
@@ -384,8 +389,8 @@ static int avgpool_execute(struct nn_node *self, struct nn_graph *nn)
 	}
 
 	// if ok, then ibp->outshape is the output shape
-	int top_bottom_pad = (ibp->outshape.height == 1) ? 0 : 4;
-	int out_wpad_0 = (ibp->outshape.width == 1)? 0:4;
+	int top_bottom_pad = (ibp->outshape.height == 1) ? 1 : 4;
+	int out_wpad_0 = (ibp->outshape.width == 1)? smallest_left_pad:4;
 	int out_wpad_1 = (-(out_wpad_0 + ibp->outshape.width)) & 3;
 	int out_dpad_0 = 0;
 	int out_dpad_1 = (-ibp->outshape.depth)&31;
@@ -1208,7 +1213,7 @@ static int avgpool_dtor(struct nn_node *self, struct nn_graph *nn)
 {
 	struct integral_buffer_plan * ibp = (struct integral_buffer_plan *) self->opaque;
 	if( ibp!= NULL){
-		nn_free( ibp->edgepad_scale_alloc);
+		if (ibp->edgepad_scale_alloc) nn_free( ibp->edgepad_scale_alloc);
 		nn_free( ibp);
 		self->opaque= NULL;
 	}

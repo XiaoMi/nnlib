@@ -257,8 +257,8 @@ static int l2pool_execute(struct nn_node *self, struct nn_graph *nn)
 	}
 
 	// if ok, then ibp->outshape is the output shape
-	int top_bottom_pad = (ibp->outshape.height == 1) ? 0 : 4;
-	int out_wpad_0 = (ibp->outshape.width == 1)? 0:4;
+	int top_bottom_pad = (ibp->outshape.height == 1) ? 1 : 4;
+	int out_wpad_0 =  4;   /*always 4*/ //(ibp->outshape.width == 1)? 0:4;
 	int out_wpad_1 = (-(out_wpad_0 + ibp->outshape.width)) & 3;
 	int out_dpad_0 = 0;
 	int out_dpad_1 = (-ibp->outshape.depth)&31;

@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -63,8 +63,13 @@ static void input_execute_worker(struct nn_graph *nn, void *vself)
 			in->shape.depth,
 			in->max_size);
 		if (out->max_size < in->max_size) {
-			logmsg(nn,0,"out too small");
-			continue;
+			errlog(nn,"out too small (%lu < %lu)", out->max_size, in->max_size);
+			out->shape.batches = 0;
+			out->shape.height = 0;
+			out->shape.width = 0;
+			out->shape.depth = 0;
+			out->data_size = 0;  // Communicate the failure upward
+			return;
 		}
 		out->shape = in->shape;
 		out->data_size = in->max_size;
@@ -76,13 +81,18 @@ static void input_execute_worker(struct nn_graph *nn, void *vself)
 
 static int input_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	if (nn->n_inputs != self->n_outputs) return errlog(nn,"oops, input #");
+	if (nn->n_inputs != self->n_outputs) return errlog(nn,"Expected %d, got %d inputs",self->n_outputs,nn->n_inputs);
 	nn_sem_t donesem;
 	nn_sem_init(&donesem,0);
 	self->opaque = &donesem;
 	nn_os_work_for_vector(nn,input_execute_worker,self);
 	nn_sem_wait(&donesem);
 	self->opaque = NULL;
+	for (int i = 0; i < self->n_outputs; i++) {
+		if (self->outputs[0]->data_size == 0) {
+			return errlog(nn,"op_input: Worker is telling us there was no valid input for output %d",i);
+		}
+	}
 	return 0;
 }
 

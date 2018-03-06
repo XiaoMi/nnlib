@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -47,6 +47,7 @@
  *
  *  Author              Date           Comments
  *  -------------------------------------------------------------
+ *  DJH                 07/ 6/17       created
  *
  *  CYCLE-COUNT:
  *

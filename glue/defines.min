@@ -6,7 +6,14 @@ include $(GLUE_DIR)lastv.min
 null :=
 SPACE := $(null) $(null)
 override V:=$(subst $(SPACE),_,$(strip $(wordlist 1, 2, $(subst _, ,$(V))) $(sort $(wordlist 3,$(words $(subst _, ,$(V))),$(subst _, ,$(V))))))
+ifneq (,$(findstring hexagon,$(V)))
+  include $(GLUE_DIR)V_hexagon.min
+else ifneq (,$(findstring android,$(V)))
+  include $(GLUE_DIR)V_android.min
+else
 include $(GLUE_DIR)V_$V.min
+endif
+
 ifndef MAKE_D_DIR
 define n
 
@@ -22,5 +29,5 @@ $(foreach v,$(MDLIB_PKG_DEPS),$(eval $v := $$(call cleanPath,$$($v))))
 GLUE_DIR  := $(call cleanPath,$(GLUE_DIR))
 SHIP_DIR  := $(call cleanPath,$(SHIP_DIR))
 EVERY_V   := $(patsubst $(GLUE_DIR)/V_%.min,%,$(wildcard $(GLUE_DIR)/V_*.min))
-RULES_MIN := $(RULES_MIN) $(GLUE_DIR)/$V.mak
+RULES_MIN := $(RULES_MIN) $(GLUE_DIR)/$(V_TARGET).mak
 

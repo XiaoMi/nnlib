@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -43,55 +43,62 @@
  */
 #include <stdarg.h>
 
-//#ifndef USE_OS_QURT
-#if 1
+#define MAX_STRING_LEN 4096
+
+#ifdef USE_OS_QURT
+#include <HAP_farf.h>
+#else
+#define ALWAYS 1
+#define FARF(...)
+#endif
+
+
 void logv(const char *filename, unsigned int line, struct nn_graph *nn, int level, const char *fmt, va_list ap);
 
 static inline void logmsg_function(const char *filename, unsigned int line, struct nn_graph *nn, int level, const char *fmt, ...)
 {
+	if ((nn!=NULL) && (level > nn->debug_level)) return;
+	char buffer[MAX_STRING_LEN];
 	va_list ap;
-	if (likely(level > nn->debug_level)) return;
 	va_start(ap,fmt);
-	logv(filename,line,nn,level,fmt,ap);
+	vsnprintf(buffer,MAX_STRING_LEN,fmt,ap);
+	FARF(ALWAYS,buffer);
+	if (nn!=NULL) logv(filename,line,nn,level,buffer,NULL);
 	va_end(ap);
 }
 
 static inline int errlog_function(const char *filename, unsigned int line, struct nn_graph *nn, const char *fmt, ...)
 {
+	char buffer[MAX_STRING_LEN];
 	va_list ap;
 	va_start(ap,fmt);
-	logv(filename,line,nn,0,fmt,ap);
+	vsnprintf(buffer,MAX_STRING_LEN,fmt,ap);
+	FARF(ALWAYS,buffer);
+	if (nn!=NULL) logv(filename,line,nn,0,buffer,NULL);
 	va_end(ap);
 	return -1;
 }
-//  if NN_LOG_MAXLEV defined, all log(nn,lev,..) are disaabled at compile time, where lev < maxlev
+
+// if NN_LOG_MAXLEV defined, all log(nn,lev,..) are disaabled at compile time, where lev < maxlev
 // NOTE: if there are side-effects in the parameters to logmsg, they will be not
-// be evaluated if the logging is disabled due to lev > NN_LOGMAX, but they wull be
+// be evaluated if the logging is disabled due to lev > NN_LOGMAX, but they will be
 // evaluated if the call is disabled due to lev > nn->debug_level. So, avoid that.
 //
 #ifdef NN_LOG_MAXLEV
 #if NN_LOG_MAXLEV < 0
 // must pretend to expand the call, or you get unused variable warnings
-#define logmsg(...)  ({if(0)logmsg_function("",0,__VA_ARGS__);})
+#define logmsg(NN,LEVEL,...)  ({if(0)logmsg_function("",0,NN,LEVEL,__VA_ARGS__);})
 #else
-#define logmsg(NN,LEVEL,...) ({ if( !__builtin_constant_p(LEVEL)|| (LEVEL) <= NN_LOG_MAXLEV)\
-	logmsg_function(__FILE__,__LINE__,NN,LEVEL,__VA_ARGS__);})
+#define logmsg(NN,LEVEL,...) ({ if(( !__builtin_constant_p(LEVEL)) || (LEVEL <= NN_LOG_MAXLEV)) \
+				logmsg_function(__FILE__,__LINE__,NN,LEVEL,__VA_ARGS__); })
 #endif
-
 #else // no NN_LOG_MAXLEV
-#define logmsg(...) logmsg_function(__FILE__,__LINE__,__VA_ARGS__)
-
+#define logmsg(NN,LEVEL,...) logmsg_function(__FILE__,__LINE__,NN,LEVEL,__VA_ARGS__);
 #endif
+
 
 #define errlog(...) errlog_function(__FILE__,__LINE__,__VA_ARGS__)
 
-#else
 
-#include <HAP_farf.h>
-#define logmsg(NN,LEVEL,...) do { if (unlikely((LEVEL) <= (NN)->debug_level)) do { FARF(ALWAYS,__VA_ARGS__); } while (0); } while (0)
-/* EJP: statement expression allows me to preserve file/line numbers while using FARF macro */
-#define errlog(NN,...) ({do { FARF(ALWAYS,__VA_ARGS__); } while (0); -1;})
 
-#endif
-
-#endif
+#endif // NN_GRAPH_LOG_H

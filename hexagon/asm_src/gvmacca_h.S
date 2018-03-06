@@ -47,6 +47,11 @@
 /*                                                                      */
 /*  Author              Date           Comments                         */
 /*  -------------------------------------------------------------       */
+/*  DJH                 03/07/16       created                          */
+/*  DJH                 05/10/16       added post add for x and y offset*/
+/*  DJH                 07/10/16       rewrote pre-transpose            */
+/*  DJH                 09/16/16       fix over prefetch by 16 now 8    */
+/*  DJH                 11/04/16       convert to stream data input     */
 /*======================================================================*/
 /*  CYCLE-COUNT:                                                        */
 /*     ->  filt_width*depth*N/16+3*N/4+12                               */

@@ -17,7 +17,10 @@ ifeq ($(V65), 1)
 CC_FLAGS += -DV65=1 -DHEXAGON_V65=1 -mv65
 HEXAGON_NN_ASM_SRCS += hexagon/asm_src/gvconv2dbbb_circ_d64_v65_h.S \
 	hexagon/asm_src/gvconv2dbbb_circ_d32_v65_h.S \
-	hexagon/asm_src/repstream2_h.S
+	hexagon/asm_src/repstream2_h.S \
+	hexagon/asm_src/gvconv2dbbb_circ6_d32_v65_h.S \
+	hexagon/asm_src/gvconv2dbbb_circ6_d64_v65_h.S \
+	hexagon/asm_src/repstreamN_h.S
 endif
 
 

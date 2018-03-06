@@ -60,6 +60,27 @@ int nn_os_vector_call(struct nn_graph *nn, int (*f)(struct nn_graph *, void *),v
 int nn_os_vtcm_acquire(struct nn_graph *nn);
 int nn_os_vtcm_release(struct nn_graph *nn);
 
+
+//
+// inlines to post or wait a semaphore 'n' times
+// (TODO: if the underlying OS primitives allow this directly,
+// it should be done that way)
+//
+static inline void  __attribute__((unused))
+nn_sem_post_n_times( nn_sem_t * sem, int nt)
+{
+	for( int i = 0; i < nt; i++ ) nn_sem_post(sem);
+}
+static inline void  __attribute__((unused))
+nn_sem_wait_n_times( nn_sem_t * sem, int nt)
+{
+	for( int i = 0; i < nt; i++ ) nn_sem_wait(sem);
+}
+
+
+
+
+#if 1
 struct nn_os_bufstack_t {
 	nn_mutex_t mutex;
 	void **top;
@@ -73,12 +94,12 @@ static inline void nn_os_bufstack_init(struct nn_os_bufstack_t *bufstack)
 
 static inline void *nn_os_bufstack_pop(struct nn_os_bufstack_t *bufstack)
 {
-	void *top;
+	void **top;
 	nn_mutex_lock(&bufstack->mutex);
 	top = bufstack->top;
-	if (top != NULL) bufstack->top = (void **)*bufstack->top;
+	if (top != NULL) bufstack->top = (void **)*top;
 	nn_mutex_unlock(&bufstack->mutex);
-	return top;
+	return (void*)top;
 }
 
 static inline void nn_os_bufstack_push(struct nn_os_bufstack_t *bufstack, void *vblock)
@@ -89,12 +110,55 @@ static inline void nn_os_bufstack_push(struct nn_os_bufstack_t *bufstack, void *
 	bufstack->top = block;
 	nn_mutex_unlock(&bufstack->mutex);
 }
+#else
+// without mutex, using compare-and-swap on the linked list
+//
+struct nn_os_bufstack_t {
+	void **top;
+};
+
+static inline void nn_os_bufstack_init(struct nn_os_bufstack_t *bufstack)
+{
+	bufstack->top = NULL;
+}
+
+static inline void *nn_os_bufstack_pop(struct nn_os_bufstack_t *bufstack)
+{
+	void ** prev_head = bufstack->top;
+	void **save_head;
+	if( prev_head != NULL){
+		do{
+			save_head = prev_head;
+			void *new_head = *(void **)prev_head;	// proposed replacement is link after prev_head
+			prev_head = (void**)  __sync_val_compare_and_swap( (void * volatile*)&bufstack->top, prev_head, new_head);
+		}while( prev_head != save_head && prev_head != NULL);
+		// exit if (a) success or (b) someone else put a NULL in
+	}
+	return prev_head;
+}
+
+static inline void nn_os_bufstack_push(struct nn_os_bufstack_t *bufstack, void *vblock)
+{
+	void **block = (void**)vblock;
+	void ** prev_head = bufstack->top;
+	void **save_head;
+	do{
+		save_head = prev_head;
+		*block = (void*)prev_head;	// store prev. 'head' in the block...
+		// replace 'prev_head' with 'block'.
+		prev_head = (void**)  __sync_val_compare_and_swap( (void * volatile*)&bufstack->top, prev_head, block);
+	}while( prev_head != save_head );
+}
+#endif
 
 
-
-
-
-
+// use in single-thread code to avoid the mutex overhead
+static inline void nn_os_bufstack_push_nonthreadsafe(struct nn_os_bufstack_t *bufstack, void *vblock)
+{
+	void **block = (void**)vblock;
+	*block = bufstack->top;
+	bufstack->top = block;
+}
 
 
 

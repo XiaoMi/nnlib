@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -41,6 +41,9 @@
 #include "nn_asm_ops.h"
 #define LRN_MAXTHREADS 2
 
+#if defined(__hexagon__)
+#define min(a, b) (((a)<(b)) ? (a) : (b))
+#endif
 
 //#define TEST_PERFORMANCE
 /*
@@ -49,7 +52,7 @@
  * - new_dims tensor (with height and width )
  */
 struct bilin_runstate;
-typedef void (*run_slice_fp)( struct bilin_runstate * rstp, uint8_t * out_ptr, uint8_t const * in_ptr);
+typedef void (*run_slice_fp)( uint8_t const * in_ptr, int in_row_stride, int in_width, int in_height, uint8_t * out_ptr, int out_row_stride, int out_width, int out_height );
 
 struct bilin_runstate {
 	struct tensor_addressing tin;
@@ -71,9 +74,10 @@ struct bilin_runstate {
 	volatile int next_job;	 // index of next subsection
 };
 
-static void do_bilin_interp_x2_single_slice(struct bilin_runstate * rstp, uint8_t * out_ptr, uint8_t const * in_ptr );
-static void bilin_interp_work( struct nn_graph *nn, void *rstpv );
-static void do_bilin_interp_x2_single_slice_HVX(struct bilin_runstate * rstp, uint8_t * out_ptr, uint8_t const * in_ptr );
+static void bilin_interp_work(struct nn_graph *nn, void *rstpv);
+static void do_bilin_interp_x_single_slice(uint8_t const * in_ptr, int in_row_stride, int in_width, int in_height, uint8_t * out_ptr, int out_row_stride, int out_width, int out_height);
+static void do_bilin_interp_x2_single_slice(uint8_t const * in_ptr, int in_row_stride, int in_width, int in_height, uint8_t * out_ptr, int out_row_stride, int out_width, int out_height);
+void do_bilin_interp_x2_single_slice_HVX(uint8_t const * in_ptr, int in_row_stride, int in_width, int in_height, uint8_t * out_ptr, int out_row_stride, int out_width, int out_height);
 
 
 static int resize_bilinear_d32_execute(struct nn_node *self, struct nn_graph *nn)
@@ -104,10 +108,6 @@ static int resize_bilinear_d32_execute(struct nn_node *self, struct nn_graph *nn
 	int new_height = tensor_get_int32( newdims_tensor, 0);
 	int new_width = tensor_get_int32( newdims_tensor, 1);
 
-	if( new_height != height*2
-		||  new_width != width*2 ){
-		return errlog( nn, "resizebilinear_d32: currently only x2");
-	}
 	int width_pad_before = in_tensor->format.width_pad[0];
 	int out_width_pad_before = 4;
 	int out_width_pad_after = (-(out_width_pad_before + new_width))&3;
@@ -144,7 +144,13 @@ static int resize_bilinear_d32_execute(struct nn_node *self, struct nn_graph *nn
 	// we can fix by expanding the input on the left by 2, and the output by 4.
 	//
 
-	if( (width_pad_before&1) != 0 ){
+	if (new_height != height * 2
+		|| new_width != width * 2) {
+		runstate.run_slice_func = do_bilin_interp_x_single_slice;	// use float code
+		runstate.with_hvx = 0;
+		logmsg(nn, 2, "resizebilinear d32 scalar.");
+	}
+	else if( (width_pad_before&1) != 0 ){
 		runstate.run_slice_func = do_bilin_interp_x2_single_slice;	// use scalar code
 		runstate.with_hvx = 0;
 	}else if((width_pad_before&2) != 0 ){
@@ -167,8 +173,8 @@ static int resize_bilinear_d32_execute(struct nn_node *self, struct nn_graph *nn
 
 #ifdef TEST_PERFORMANCE
 	end_time =  nn_os_get_cycles(nn);
-	printf("resizebilinear_d32  cycles = %d (elements = %d)\n",
-		(end_time-start_time),	(int)tensor_element_count(out_tensor));
+	printf("resizebilinear_d32  cycles = %d (elements = %d) w=(%d->%d) h=(%d->%d)\n",
+		(end_time-start_time),	(int)tensor_element_count(out_tensor), width, new_width, height, new_height);
 #endif
 
 	logmsg(nn,2,"lrn_d32 %p done",self);
@@ -190,6 +196,12 @@ bilin_interp_work( struct nn_graph *nn, void *rstpv )
 	uint32_t pf_stride = rstp->tin.height_stride;
 	uint32_t pf_width = rstp->in_width * 32;
 	uint32_t pf_height = rstp->in_ht;
+	uint32_t in_width = rstp->in_width;
+	uint32_t out_width = rstp->out_width;
+	uint32_t out_height = rstp->out_ht;
+	int in_row_stride = rstp->tin.height_stride;
+	int out_row_stride = rstp->tout.height_stride;
+
 
 	while( job_idx = __sync_fetch_and_add(&rstp->next_job, 1), job_idx < rstp->jobs) {
 		int batch_idx = 0;
@@ -204,7 +216,7 @@ bilin_interp_work( struct nn_graph *nn, void *rstpv )
 
 		uint8_t * out_ptr =     rstp->tout.data + batch_idx * rstp->tout.batch_stride + d32_idx * rstp->tout.d32_stride;
 
-		(*run_slice_func)( rstp, out_ptr, in_ptr);
+		(*run_slice_func)(in_ptr, in_row_stride, in_width, pf_height, out_ptr, out_row_stride, out_width, out_height);
 
 	}
 	nn_sem_post( &rstp->done_sem);
@@ -215,14 +227,39 @@ bilin_interp_work( struct nn_graph *nn, void *rstpv )
 // Note, pointers here are x32 aligned but not generally 128 aligned
 //
 static void
-do_bilin_interp_x2_single_slice(struct bilin_runstate * rstp, uint8_t * out_ptr, uint8_t const * in_ptr )
+do_bilin_interp_x_single_slice( uint8_t const * in_ptr, int in_row_stride, int in_width, int in_height, uint8_t * out_ptr, int out_row_stride, int out_width, int out_height )
 {
-	int in_row_stride = rstp->tin.height_stride;
-	int out_row_stride = rstp->tout.height_stride;
+	int xstep = (in_width << 16) / out_width;
+	int ystep = (in_height << 16) / out_height;
 
-	int in_height = rstp->in_ht;
-	int in_width = rstp->in_width;
+	for (int irow = 0, ycoord = 0; irow < out_height; irow++, ycoord += ystep) {
+		int y0 = (ycoord >> 16);
+		int y1 = min(y0 + 1, in_height - 1);
+		y0 *= in_row_stride;
+		y1 *= in_row_stride;
+		int yfrac0 = (ycoord >> 8) & 0xff;
+		for (int icol = 0, xcoord = 0; icol < out_width; icol++, xcoord += xstep) {
+			int x0 = xcoord >> 16;
+			int x1 = min(x0 + 1, in_width - 1);
+			int xfrac0 = (xcoord >> 8) & 0xff;
 
+			for (int d = 0; d < 32; d++) {
+				unsigned char v00 = in_ptr[y0 + x0 * 32 + d];
+				unsigned char v01 = in_ptr[y0 + x1 * 32 + d];
+				unsigned char v10 = in_ptr[y1 + x0 * 32 + d];
+				unsigned char v11 = in_ptr[y1 + x1 * 32 + d];
+				unsigned short v0 = (v00 + v00 * (255-xfrac0) + v01 * xfrac0);
+				unsigned short v1 = (v10 + v10 * (255 - xfrac0) + v11 * xfrac0);
+				out_ptr[irow*out_row_stride + icol * 32 + d] = min(255, (v0 + v0 * (255 - yfrac0) + v1 * yfrac0 + (1<<15)) >> 16);
+			}
+		}
+	}
+}
+
+
+static void
+do_bilin_interp_x2_single_slice( uint8_t const * in_ptr, int in_row_stride, int in_width, int in_height, uint8_t * out_ptr, int out_row_stride, int out_width, int out_height )
+{
 	int64_t * prev_outp = NULL;
 
 	for( int  irow = 0; irow < in_height; irow++ ){
@@ -269,197 +306,9 @@ do_bilin_interp_x2_single_slice(struct bilin_runstate * rstp, uint8_t * out_ptr,
 	}
 	// prev_outp points to the last (even) output row.
 	int64_t *outp_last = (int64_t *)(out_ptr + out_row_stride * (in_height*2-1));
-	memcpy( outp_last, prev_outp, in_width*2 * 32 );	// last row same as previous)
+	// make klockwork happy
+	if (prev_outp) memcpy(outp_last, prev_outp, in_width*2 * 32 );	// last row same as previous)
 }
-
-//
-// hvx version
-//
-// H-scaling
-// input (AAAA =32 bytes)
-//
-// AAAA BBBB CCCC DDDD    EEEE FFFF GGGG HHHH
-//
-// output:
-// AAAA A::B BBBB B::C    CCCC C::D DDDD D::E ...
-//
-// this inline takes the ABCD and EFGH vectors, and makes two outputs
-//
-static inline HVX_VectorPair
-horiz_resize_x2( HVX_Vector vABCD, HVX_Vector vEFGH)
-{
-	HVX_Vector vBCDE = Q6_V_valign_VVR( vEFGH, vABCD, 32 );
-	HVX_Vector vMid = Q6_Vub_vavg_VubVub( vABCD, vBCDE);	// A:B B:C C:D D:E
-	return Q6_W_vshuff_VVR( vMid, vABCD, -32 );
-}
-//
-// Note: this requires both input and output to be vector aligned
-//
-static void
-do_bilin_interp_x2_single_slice_HVX(struct bilin_runstate * rstp, uint8_t * out_ptr, uint8_t const * in_ptr )
-{
-	int in_row_stride = rstp->tin.height_stride;
-	int out_row_stride = rstp->tout.height_stride;
-
-	int in_height = rstp->in_ht;
-	int in_width = rstp->in_width;
-	// if inwidth >=5 we do 1 loop
-	// if  >= 9 we do do 2, etc
-	int wloops = (in_width-1)>>2;		// could be 0...
-	int wspare = in_width & 3;
-	int store_extra = (in_width-1) & 2;
-	HVX_VectorPred qright = q6op_Q_vsetq2_R( 32* wspare);
-
-	//
-	// Do first row as a single pass.
-	//
-	{
-		HVX_Vector const *vpin = (HVX_Vector const *) in_ptr;
-		HVX_Vector *vpout = (HVX_Vector *) out_ptr;
-		HVX_Vector vL = *vpin++;
-		for( int i =0; i < wloops; i++ ){
-			HVX_Vector vR = *vpin++;
-			HVX_VectorPair vout = horiz_resize_x2( vL, vR);
-			vpout[0] = Q6_V_lo_W(vout);
-			vpout[1] = Q6_V_hi_W(vout);
-			vpout += 2;
-			vL = vR;
-		}
-		// End-of-row business:
-		// when wloops = 0
-		//            vL =   A B C D
-		//            vrol = D A B C
-		//  we want to scale:
-		//    inwid = 1      A A x x  x x x x  qright = 0..31
-		//    inwid = 2      A B B x  x x x x  qright = 0..63
-		//    inwid = 3      A B C C  x x x x  qright = 0..95
-		//    inwid = 4      A B C D  D x x x  qright = (all)
-		//
-		HVX_Vector vrol = Q6_V_vror_VR( vL,-32); // DABC
-		HVX_VectorPair vout = horiz_resize_x2(  Q6_V_vmux_QVV(qright, vL,vrol), vrol);
-		vpout[0] = Q6_V_lo_W(vout);
-		if( store_extra )	// width = 3,4,  7,8,  11,12, ...
-			vpout[1] = Q6_V_hi_W(vout);
-	}
-	// now do two input rows, four output rows at a time
-	int nrowpair = (in_height-1)>>1;
-	for(int irowp = 0; irowp < nrowpair; irowp++ ){
-		HVX_Vector const *vpin0 = (HVX_Vector const *) (in_ptr + (2*irowp)*in_row_stride);
-		HVX_Vector const *vpin1 = (HVX_Vector const *) ( (char const*) vpin0 + in_row_stride);
-		HVX_Vector const *vpin2 = (HVX_Vector const *) ( (char const*) vpin0 + 2*in_row_stride);
-		HVX_Vector * vpout = (HVX_Vector *)( out_ptr + (4*irowp+1)*out_row_stride);	// first of four
-		HVX_Vector vL0 = *vpin0++;
-		HVX_Vector vL1 = *vpin1++;
-		HVX_Vector vL2 = *vpin2++;
-
-		for( int i =0; i < wloops; i++ ){
-			HVX_Vector vR0 = *vpin0++;
-			HVX_Vector vR1 = *vpin1++;
-			HVX_Vector vR2 = *vpin2++;
-			HVX_VectorPair vout0 = horiz_resize_x2( vL0, vR0);
-			HVX_VectorPair vout1 = horiz_resize_x2( vL1, vR1);
-			HVX_VectorPair vout2 = horiz_resize_x2( vL2, vR2);
-			// v interp between  0 and 1 for 1st row
-			vpout[0] = Q6_Vub_vavg_VubVub_rnd( Q6_V_lo_W(vout0), Q6_V_lo_W(vout1));
-			vpout[1] = Q6_Vub_vavg_VubVub_rnd( Q6_V_hi_W(vout0), Q6_V_hi_W(vout1));
-			// 2nd row
-			HVX_Vector *vpo = (HVX_Vector  *) ( (char*) vpout + out_row_stride);
-			vpo[0] = Q6_V_lo_W(vout1);
-			vpo[1] = Q6_V_hi_W(vout1);
-			// v interp between  1 and 2 for 3rd row
-			vpo = (HVX_Vector  *) ( (char*) vpout + 2*out_row_stride);
-			vpo[0] = Q6_Vub_vavg_VubVub_rnd( Q6_V_lo_W(vout1), Q6_V_lo_W(vout2));
-			vpo[1] = Q6_Vub_vavg_VubVub_rnd( Q6_V_hi_W(vout1), Q6_V_hi_W(vout2));
-			// 4th row
-			vpo = (HVX_Vector  *) ( (char*) vpout + 3*out_row_stride);
-			vpo[0] = Q6_V_lo_W(vout2);
-			vpo[1] = Q6_V_hi_W(vout2);
-			vpout += 2;
-			vL0 = vR0;  vL1 = vR1; vL2 = vR2;
-		}
-		{
-			// and the stuff at the end
-			HVX_Vector vrol0 = Q6_V_vror_VR( vL0,-32);
-			HVX_Vector vrol1 = Q6_V_vror_VR( vL1,-32);
-			HVX_Vector vrol2 = Q6_V_vror_VR( vL2,-32);
-			HVX_VectorPair vout0 = horiz_resize_x2(  Q6_V_vmux_QVV(qright, vL0,vrol0), vrol0);
-			HVX_VectorPair vout1 = horiz_resize_x2(  Q6_V_vmux_QVV(qright, vL1,vrol1), vrol1);
-			HVX_VectorPair vout2 = horiz_resize_x2(  Q6_V_vmux_QVV(qright, vL2,vrol2), vrol2);
-			vpout[0] = Q6_Vub_vavg_VubVub_rnd( Q6_V_lo_W(vout0), Q6_V_lo_W(vout1));
-			*( HVX_Vector *)( (char *)vpout + out_row_stride) = Q6_V_lo_W(vout1);
-			*( HVX_Vector *)( (char *)vpout + 2*out_row_stride) = Q6_Vub_vavg_VubVub_rnd( Q6_V_lo_W(vout1), Q6_V_lo_W(vout2));
-			*( HVX_Vector *)( (char *)vpout + 3*out_row_stride) = Q6_V_lo_W(vout2);
-			if( store_extra ){	// width = 3,4,  7,8,  11,12, ...
-				vpout++;
-				vpout[0] = Q6_Vub_vavg_VubVub_rnd( Q6_V_hi_W(vout0), Q6_V_hi_W(vout1));
-				*( HVX_Vector *)( (char *)vpout + out_row_stride) = Q6_V_hi_W(vout1);
-				*( HVX_Vector *)( (char *)vpout + 2*out_row_stride) = Q6_Vub_vavg_VubVub_rnd( Q6_V_hi_W(vout1), Q6_V_hi_W(vout2));
-				*( HVX_Vector *)( (char *)vpout + 3*out_row_stride) = Q6_V_hi_W(vout2);
-
-			}
-		}
-	}
-	// we've either
-	//    - done the whole thing except the last row (which is copy of of the previous);
-	//           (this is the case when the input height is odd)
-	//    - or the whole thing except the last 3
-	//           (this is the case when the input height is even)
-	//
-	HVX_Vector *vpo_a = (HVX_Vector *)( out_ptr + (in_height*2-2)*out_row_stride);	// 2nd last output
-	HVX_Vector *vpo_b = (HVX_Vector *)( (char*)vpo_a  + out_row_stride);	// last output
-
-	if( (in_height &1)!= 0 ){	// copy a to b
-		int nvec = (in_width-1)>>1;
-		HVX_Vector v = *vpo_a ++;
-		for( int i = 0; i < nvec; i++){
-			*vpo_b++ = v;
-			v = *vpo_a++;
-		}
-		*vpo_b = v;
-	}else{
-		// process 2 input rows, make one v-interpolated output row and two h-interpolated
-		HVX_Vector const *vpin0 = (HVX_Vector const *) (in_ptr + (in_height-2)*in_row_stride);	// 2nd last input
-		HVX_Vector const *vpin1 = (HVX_Vector const *) ( (char const*) vpin0 + in_row_stride);	// last
-		HVX_Vector vL0 = *vpin0++;
-		HVX_Vector vL1 = *vpin1++;
-		for( int i =0; i < wloops; i++ ){
-			HVX_Vector vR0 = *vpin0++;
-			HVX_Vector vR1 = *vpin1++;
-			HVX_VectorPair vout0 = horiz_resize_x2( vL0, vR0);
-			HVX_VectorPair vout1 = horiz_resize_x2( vL1, vR1);
-			// v interp between  0 and 1 for 1st row of the 3
-			HVX_Vector *vpo_x = (HVX_Vector  *) ( (char*) vpo_a - out_row_stride);
-			vpo_x[0] = Q6_Vub_vavg_VubVub_rnd( Q6_V_lo_W(vout0), Q6_V_lo_W(vout1));
-			vpo_x[1] = Q6_Vub_vavg_VubVub_rnd( Q6_V_hi_W(vout0), Q6_V_hi_W(vout1));
-			// 2nd and 3rd row
-			vpo_a[0] = Q6_V_lo_W(vout1);
-			vpo_a[1] = Q6_V_hi_W(vout1);
-			vpo_b[0] = Q6_V_lo_W(vout1);
-			vpo_b[1] = Q6_V_hi_W(vout1);
-			vpo_a += 2;
-			vpo_b += 2;
-			vL0 = vR0;  vL1 = vR1;
-		}
-		{
-			// and the stuff at the end
-			HVX_Vector vrol0 = Q6_V_vror_VR( vL0,-32);
-			HVX_Vector vrol1 = Q6_V_vror_VR( vL1,-32);
-			HVX_VectorPair vout0 = horiz_resize_x2(  Q6_V_vmux_QVV(qright, vL0,vrol0), vrol0);
-			HVX_VectorPair vout1 = horiz_resize_x2(  Q6_V_vmux_QVV(qright, vL1,vrol1), vrol1);
-			HVX_Vector *vpo_x = (HVX_Vector  *) ( (char*) vpo_a - out_row_stride);
-			vpo_x[0] = Q6_Vub_vavg_VubVub_rnd( Q6_V_lo_W(vout0), Q6_V_lo_W(vout1));
-			vpo_a[0] = Q6_V_lo_W(vout1);
-			vpo_b[0] = Q6_V_lo_W(vout1);
-			if( store_extra ){	// width = 3,4,  7,8,  11,12, ...
-				vpo_x[1] = Q6_Vub_vavg_VubVub_rnd( Q6_V_hi_W(vout0), Q6_V_hi_W(vout1));
-				vpo_a[1] = Q6_V_hi_W(vout1);
-				vpo_b[1] = Q6_V_hi_W(vout1);
-			}
-		}
-	}
-}
-
-
 
 static int resize_bilinear_check(struct nn_node *self, struct nn_graph *nn)
 {

@@ -47,6 +47,7 @@
  *
  *  Author              Date           Comments
  *  -------------------------------------------------------------
+ *  DJH                 07/ 6/17       created
  *
  *  MEMORY
  *     CODESIZE = 640 bytes + 512 bytes of control tables
@@ -528,31 +529,30 @@ dwconv3x3bbb_unsigned_v60_asm:
     {  out_width_in_depth      = memd(sp+#0)        //
        out_height_next_out_row = memd(sp+#8)        //
        sp = add(sp,#-4*8)                           //
-       maxe = #0                                    //
     }{
        zshift_recip_level  = memd(sp+#(16+4*8))     //
        stride_vert_ptr_max = memd(sp+#(24+4*8))     //
-       r28 = ##0x7fffffff                           //max pos
+       nop; nop                                     //
     }{
        memd(sp+#0)  = r17:16                        //
        filt_offset = memw(sp+#(32+4*8))             //
        vrecip = vsplat(recip_level)                 //
-       mine = vsplat(r28)                           //
+       s8 = #8                                      //shift by 8
     }{
        memd(sp+#8)  = r19:18                        //
-       maxe.w = vsub(maxe.w, mine.w)                //
        in_depth = lsr(in_depth, #5)                 //1/32
-       s8 = #8                                      //shift by 8
+       filt_offset = vsplatb(filt_offset)           //
+       maxe = vmem(ptr_max+#0)                      //
     }{
        memd(sp+#16) = r21:20                        //
        memd(sp+#24) = r23:22                        //
-       filt_offset = vsplatb(filt_offset)           //
        out_width = lsr(out_width,#2)                //
+       ptr_w = ptr_wi                               //
     }{
        filt_off210_ = asl(filt_offset, #8)          //
        filt_off_210 = lsr(filt_offset, #8)          //
-       ptr_w = ptr_wi                               //
        filt_sum = filt_sumi                         //
+       mine = vmem(ptr_max+#1)                      //
     }
 /* --------------------------------------------------------------------------- */
 .L_height:
@@ -717,28 +717,11 @@ dwconv3x3bbb_unsigned_v60_asm:
        if(!p0) jump .L_height                       //next line
     }
 /* --------------------------------------------------------------------------- */
-    {  nrot = #64                                   //
-       loop0(.L_peak, #4)                           //
-    }{  
-       maxt = vror(maxe,nrot)                       //
+    {  vmem(ptr_max+#0) = maxe                      //store max
        r17:16 = memd(sp+#0)                         //restore stack
+    }{
+       vmem(ptr_max+#1) = mine                      //store min
        r19:18 = memd(sp+#8)                         //restore
-    }
-.L_peak:
-    {  maxe.w = vmax(maxe.w, maxt.w)                //reduce
-       mint = vror(mine, nrot)                      //
-       nrot = lsr(nrot,#1)                          //
-    }{
-       mine.w = vmin(mine.w, mint.w)                //reduce
-       maxt = vror(maxe, nrot)                      //
-    }:endloop0 
-
-    {  maxe.w = vmax(maxe.w, maxt.w)                //
-       vmem(ptr_max+#0) = maxe.new                  //store max
-       mint = vror(mine, nrot)                      //
-    }{
-       mine.w = vmin(mine.w, mint.w)                //
-       vmem(ptr_max+#1) = mine.new                  //store min
     }{
 /* --------------------------------------------------------------------------- */
        r21:20 = memd(sp+#16)                        //restore

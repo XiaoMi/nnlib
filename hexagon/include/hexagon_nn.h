@@ -44,6 +44,9 @@ typedef struct perfinfo hexagon_nn_perfinfo;
 typedef int32_t hexagon_nn_nn_id;
 typedef int32_t hexagon_nn_padding_type;
 
+#ifndef HEXAGON_NN_NO_RUNTIME
 #include <nn_graph.h>
+#endif
+
  
 #endif

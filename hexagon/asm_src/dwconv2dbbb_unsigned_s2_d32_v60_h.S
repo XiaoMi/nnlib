@@ -47,6 +47,7 @@
  *
  *  Author              Date           Comments
  *  -------------------------------------------------------------
+ *  DJH                 10/10/17       created
  *
  *  CYCLE-COUNT:
  *
@@ -570,15 +571,13 @@ dwconv3x3bbb_unsigned_s2_v60_asm:
     }{
        zshift_recip_level  = memd(sp+#(16+4*8))     //
        stride_vert_ptr_max = memd(sp+#(24+4*8))     //
-       r28 = ##0x7fffffff                           //max pos
+       nop; nop                                     //
     }{
        memd(sp+#0)  = r17:16                        //
        padding_filt_offset = memd(sp+#(32+4*8))     //
        vrecip = vsplat(recip_level)                 //
-       mine = vsplat(r28)                           //
     }{
        memd(sp+#8)  = r19:18                        //
-       maxe = vnot(mine)                            //
        in_depth = lsr(in_depth, #5)                 //1/32
        p0 = cmp.eq(padding,#0)                      //
     }{
@@ -590,9 +589,11 @@ dwconv3x3bbb_unsigned_s2_v60_asm:
        filt_off210_ = asl(filt_offset, #8)          //
        filt_off_210 = lsr(filt_offset, #8)          //
        filt_sum_ptr_w = combine(filt_sumi,ptr_wi)   //
+       maxe = vmem(ptr_max+#0)                      //
     }
     {  s8 = mux(p0,#0,#8)                           //if padding = 1 then shift by 8
        filt_offset = mux(p0,filt_off_210,filt_off210_)
+       mine = vmem(ptr_max+#1)                      //
     }
 /* --------------------------------------------------------------------------- */
 .L_height:
@@ -777,28 +778,11 @@ dwconv3x3bbb_unsigned_s2_v60_asm:
        if(!p0) jump .L_height                       //next line
     }
 /* --------------------------------------------------------------------------- */
-    {  nrot = #64                                   //
-       loop0(.L_peak, #4)                           //
-    }{  
-       maxt = vror(maxe,nrot)                       //
+    {  vmem(ptr_max+#0) = maxe                      //store max
        r17:16 = memd(sp+#0)                         //restore stack
+    }{
+       vmem(ptr_max+#1) = mine                      //store min
        r19:18 = memd(sp+#8)                         //restore
-    }
-.L_peak:
-    {  maxe.w = vmax(maxe.w, maxt.w)                //reduce
-       mint = vror(mine, nrot)                      //
-       nrot = lsr(nrot,#1)                          //
-    }{
-       mine.w = vmin(mine.w, mint.w)                //reduce
-       maxt = vror(maxe, nrot)                      //
-    }:endloop0 
-
-    {  maxe.w = vmax(maxe.w, maxt.w)                //
-       vmem(ptr_max+#0) = maxe.new                  //store max
-       mint = vror(mine, nrot)                      //
-    }{
-       mine.w = vmin(mine.w, mint.w)                //
-       vmem(ptr_max+#1) = mine.new                  //store min
     }{
 /* --------------------------------------------------------------------------- */
        r21:20 = memd(sp+#16)                        //restore

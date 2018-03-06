@@ -1,4 +1,5 @@
 HEXAGON_NN_C_SRCS := \
+hexagon/src/find_node.c \
 hexagon/src/scratch.c \
 hexagon/src/allocate.c \
 hexagon/src/execute.c \
@@ -8,15 +9,19 @@ hexagon/src/newnode.c \
 hexagon/src/im2col_full.c \
 hexagon/src/pprint.c \
 hexagon/src/prepare.c \
+hexagon/src/string_map.c \
 hexagon/src/tensor.c \
 hexagon/src/perfinfo.c \
 hexagon/src/graphops.c \
 hexagon/src/nn_os.c \
 hexagon/src/nn_os_qurt.c \
 hexagon/src/nn_os_h2.c \
+hexagon/src/nn_os_posix.c \
+hexagon/src/nn_os_linux.c \
 hexagon/src/nn_pipe_portable.c \
 hexagon/src/pad2d.c \
 hexagon/src/im2col_o.c \
+hexagon/src/incopy_expand4.c \
 hexagon/src/integral_control.c \
 hexagon/src/integral_buffer.c \
 hexagon/src/shape_util.c \
@@ -24,9 +29,9 @@ hexagon/src/hvx_constants.c \
 hexagon/src/quantize.c \
 hexagon/src/tensor_copy_scaled.c \
 hexagon/ops/src/op_resizebilinear.c \
-hexagon/ops/src/op_resizebilinear_i.c \
 hexagon/ops/src/op_resizebilinear_d32.c \
 hexagon/ops/src/op_batchspace.c \
+hexagon/ops/src/op_depthspace.c \
 hexagon/ops/src/op_prelu_d32.c \
 hexagon/ops/src/op_sink.c \
 hexagon/ops/src/op_avgpool_d32.c \
@@ -118,6 +123,8 @@ hexagon/ops/src/op_l2pool_d32.c \
 hexagon/ops/src/op_quantfortest_d32.c \
 hexagon/ops/src/op_padfill_d32.c \
 hexagon/ops/src/optab.c \
+hexagon/ops/src/optab_names.c \
+hexagon/ops/src/op_deconv_bias.c \
 
 HEXAGON_NN_ASM_SRCS := \
 hexagon/asm_src/quant_add_spec_h.S \
@@ -135,9 +142,10 @@ hexagon/asm_src/gemsuma_h.S \
 hexagon/asm_src/gemsumb_h.S \
 hexagon/asm_src/nothing.S \
 hexagon/asm_src/quantize_h.S \
+hexagon/asm_src/autoquantize_h.S \
 hexagon/asm_src/biasadd_relu_requant.S \
 hexagon/asm_src/vmemcpy_h.S \
-hexagon/asm_src/vmemcpy_weights_h.S \
+hexagon/asm_src/vmemcpy128_h.S \
 hexagon/asm_src/memconvert_hvx.S \
 hexagon/asm_src/avgpool_aligned_hvx.S \
 hexagon/asm_src/avgpool_nonaligned_hvx.S \
@@ -178,4 +186,7 @@ hexagon/asm_src/lrn_d32_hvx.S \
 hexagon/asm_src/dwconv2dbbb_unsigned_d32_v60_h.S \
 hexagon/asm_src/dwconv2dbbb_unsigned_s2_d32_v60_h.S \
 hexagon/asm_src/to_d32_h.S \
-hexagon/asm_src/from_d32_h.S
+hexagon/asm_src/from_d32_h.S \
+hexagon/asm_src/vrmaxmin_h.S \
+hexagon/asm_src/resizebilinear_d32_h.S \
+

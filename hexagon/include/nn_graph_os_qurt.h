@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -67,7 +67,7 @@ static inline int nn_thread_attr_setstack(nn_thread_attr_t *attrs, void *stackad
 }
 
 
-static inline void nn_mutex_init(nn_mutex_t *mutex) { qurt_mutex_init(mutex); }
+static inline void nn_mutex_init(nn_mutex_t *mutex) { memset(mutex,0,sizeof(*mutex)); qurt_mutex_init(mutex); }
 static inline void nn_mutex_lock(nn_mutex_t *mutex) { qurt_mutex_lock(mutex); }
 static inline void nn_mutex_unlock(nn_mutex_t *mutex) { qurt_mutex_unlock(mutex); }
 #define NN_MUTEX_INIT QURT_MUTEX_INIT

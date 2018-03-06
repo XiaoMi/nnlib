@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -85,9 +85,10 @@ static inline int matmul_execute(struct nn_node *self, struct nn_graph *nn,
 	uint32_t b_height = b_tensor->shape.height;
 	uint32_t b_depth = b_tensor->shape.depth;
 
-	uint32_t out_batches = a_batches;
-	uint32_t out_height = a_height;
-	uint32_t out_width = a_width;
+	uint32_t out_batches = 1;
+	uint32_t out_height = 1;
+	uint32_t dotprod_len = b_width;
+	uint32_t out_width = (a_batches*a_height*a_width*a_depth)/dotprod_len;
 	uint32_t out_depth = b_depth;
 
 	float a_max_float = tensor_get_float(max_a_tensor,0);
@@ -119,10 +120,13 @@ static inline int matmul_execute(struct nn_node *self, struct nn_graph *nn,
 	logmsg(nn,2,"matmul in dims: %lux%lux%lux%lu * %lux%lux%lux%lu",
 		a_batches,a_height,a_width,a_depth,
 		b_batches,b_height,b_width,b_depth);
+	logmsg(nn,2,"reshaping A to %lux%lu",out_width,dotprod_len);
 	logmsg(nn,2,"matmul out dims: %lux%lux%lux%lu",
 			out_batches,out_height,out_width,out_depth);
-	if (a_height != 1  || b_height != 1) return errlog(nn,"oops, height != 1");
-	if (a_batches != 1 || b_batches != 1) return errlog(nn,"fixme: support batches");
+	//if (a_height != 1  || b_height != 1) return errlog(nn,"oops, height != 1");
+	if (b_height != 1) return errlog(nn,"fixme: support B height?");
+	if (b_batches != 1) return errlog(nn,"fixme: support B batches");
+
 
 	if( tensor_out_prepare_normal( out_tensor,out_batches,out_height,out_width,out_depth , NN_TYPE_INT32)!= 0){
 		return errlog(nn,"output too small");
@@ -179,21 +183,18 @@ static inline void matmul_ref(
 	int32_t y;
 	int32_t i;
 
-	uint32_t a_width = a_tensor->shape.width;
-	uint32_t a_depth = a_tensor->shape.depth;
-
+	uint32_t b_width = b_tensor->shape.width;
 	uint32_t b_depth = b_tensor->shape.depth;
-	uint32_t out_width = a_width;
+	uint32_t out_width = (a_tensor->shape.batches*a_tensor->shape.height*a_tensor->shape.width*a_tensor->shape.depth)/b_width;
 	uint32_t out_depth = b_depth;
 
     logmsg(nn,2,"a_widthxa_depth=%lux%lu a_offset=%ld b_offset=%ld",
-    		a_width, a_depth, a_offset, b_offset);
-
+    		out_width, b_width, a_offset, b_offset);
 	for (y = 0; y < out_width; y++) {
 		for (x = 0; x < out_depth; x++) {
 			sum = 0;
-			for (i = 0; i < a_depth; i++) {
-				adata = a[i+y*a_depth] - a_offset;
+			for (i = 0; i < b_width; i++) {
+				adata = a[i+y*b_width] - a_offset;
 				bdata = b[x+i*b_depth] - b_offset;
 				sum += adata * bdata;
 			}
@@ -216,40 +217,50 @@ static inline void matmul_asm(
 	uint8_t *a = a_tensor->data;
 	int32_t *out = out_tensor->data;
 
-	uint32_t a_width = a_tensor->shape.width;
-	uint32_t a_depth = a_tensor->shape.depth;
+	uint32_t a_depth = b_tensor->shape.width;
 	uint32_t b_depth = b_tensor->shape.depth;
-	uint32_t out_width = a_width;
+	uint32_t a_batches = (a_tensor->shape.batches*a_tensor->shape.width*a_tensor->shape.height*a_tensor->shape.depth)/a_depth;
+	uint32_t out_width = a_batches;
 	uint32_t out_depth = b_depth;
 	int32_t i;
 
     //SIM_ACQUIRE_HVX;
     //SIM_SET_HVX_DOUBLE_MODE;
 
-    //int b_depth_pad = (b_depth + 32-1)&~(32-1);
-    int a_depth_pad = (a_depth + 16-1)&~(16-1);
+	//int b_depth_pad = (b_depth + 32-1)&~(32-1);
+	int a_depth_pad = (a_depth + 16-1)&~(16-1);
 
 	// ASM code does not handle out_width != 1, for now use reference C code
-	if(out_width == 1)
+	if ((out_width == 1) && (a_batches == 1))
 	{
 		logmsg(nn,2,"Pad A: a_widthxa_depth=%lux%lu,a_widthxa_depth_pad=%lux%d, a_offset=%ld b_offset=%ld",
-				a_width, a_depth, a_width,a_depth_pad, a_offset, b_offset);
+				a_batches, a_depth, a_batches,a_depth_pad, a_offset, b_offset);
 
-		for(i = 0; i < out_depth; i+=32)
-		  gemvmpybbw_asm(
-			a,
-			-a_offset,
-			((uint8_t *)self->opaque)+i*a_depth_pad,
-			-b_offset,
-			((int *)out)+i,
-			min(32, out_depth-i),
-			a_depth_pad);
+		l2fetch(a, a_depth_pad, a_depth_pad, 1);
+
+		l2fetch((uint8_t *)self->opaque, a_depth_pad, a_depth_pad, 32);
+
+		for(i = 0; i < out_depth; i+=32) {
+			wait_for_l2fetch();
+
+			if ((i+32)< out_depth)
+				l2fetch((uint8_t *)self->opaque+(i+32)*a_depth_pad, a_depth_pad, a_depth_pad, 32);
+
+			gemvmpybbw_asm(
+				a,
+				-a_offset,
+				((uint8_t *)self->opaque)+i*a_depth_pad,
+				-b_offset,
+				((int *)out)+i,
+				min(32, out_depth-i),
+				a_depth_pad);
+		}
 		//SIM_RELEASE_HVX;
 	}
 	else
 	{
 		matmul_ref(self, nn, a_offset, b_offset);
-		logmsg(nn,2,"matmul execute asm does not handle out_width != 1, for now use reference C code!");
+		logmsg(nn,2,"matmul execute asm does not handle batches / out_width != 1, for now use reference C code!");
 
 	}
 	logmsg(nn,2,"matmul execute asm done!");

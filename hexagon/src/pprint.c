@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -35,23 +35,15 @@
  */
 /*
  */
-#include <nn_graph.h>
 #include <stdio.h>
+#include <nn_graph.h>
+#ifndef NO_VERBOSE
+#include "nn_string_map.h"
+#endif
 
 #define PRINTF_APPEND(BUF,N,LEN,FMT,...) \
  do { LEN = snprintf(BUF,N,FMT,__VA_ARGS__); N -= LEN; BUF += LEN; if (N == 0) return; } while (0)
 
-#ifndef NO_VERBOSE
-#define NUM_PADNAMES 5
-static const char *padding_names[] = {
-	"WHATEVER",
-	"SAME",
-	"VALID",
-	"MIRROR_REFLECT",
-	"MIRROR_SYMMETRIC",
-        "ILLEGAL"
-};
-#endif
 
 void do_snpprint(struct nn_graph *nn, char *buf, uint32_t n)
 {
@@ -64,17 +56,13 @@ void do_snpprint(struct nn_graph *nn, char *buf, uint32_t n)
 	n -= 1;
 	PRINTF_APPEND(buf,n,len,"nn @ %p: id=0x%lx debug_level=%d\n",nn,nn->id,nn->debug_level);
 	for (node = nn->head; node != NULL; node = node->next) {
-		const char *padname;
-		if (node->padding < NUM_PADNAMES) {
-			padname = padding_names[node->padding];
-		} else {
-			padname = padding_names[NUM_PADNAMES];
-		}
+		const char *padname = padding_type_to_string_alt( node->padding,"**UNKNOWN**");
+		const char *opname = op_type_to_string_alt( node->node_type, "**UNKNOWN**");
 		PRINTF_APPEND(buf,n,len,"node @ %p: id=0x%x type=0x%x(%s) n_inputs=%d n_outputs=%d padding=%x(%s)\n",
 			node,
 			(unsigned int)node->node_id, 
 			(unsigned int)node->node_type, 
-			hexagon_nn_op_names[node->node_type], 
+			opname,
 			(unsigned int)node->n_inputs, 
 			(unsigned int)node->n_outputs,
 			node->padding,

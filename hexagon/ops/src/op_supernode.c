@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -205,6 +205,7 @@ static int supernode_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	uint8_t *in = in_tensor->data;
 	uint8_t *filt = filt_tensor->data;
 	uint8_t *bias = bias_tensor->data;
+	int32_t *bias32 = bias_tensor->data;
 	uint8_t *out = out_tensor->data;
 
 	uint8_t *instripe;
@@ -245,9 +246,11 @@ static int supernode_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	 * output min/max == INT_MIN / INT_MAX * output grade size
 	 */
 
+	int is_bias32 = (self->node_type == OP_Supernode_8x8p32to8); //|| (self->node_type == OP_Supernode_8x8p32to8_ref);	// did we ditch to ref version?
+	float bias_divisor = is_bias32 ? 0x1.0p32 : 255.0f;
 	float in_level_size = (in_max_float - in_min_float) / 255;
 	float filt_level_size = (filt_max_float - filt_min_float) / 255;
-	float bias_level_size = (bias_max_float - bias_min_float) / 255;
+	float bias_level_size = (bias_max_float - bias_min_float) / bias_divisor;
 	float out_level_size = in_level_size * filt_level_size;
 
 	float bias_mpy_amt = (bias_level_size / out_level_size);
@@ -298,9 +301,16 @@ static int supernode_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	 * This *could* be changed to fixed point and vectorized, but it shouldn't
 	 * impact performance that much, just traversing depth once. 
 	 */
-	for (i = 0; i < out_depth; i++) {
-		int32_t biasval = bias[i];
-		biasbuf[i] = roundf((biasval - bias_offset) * bias_mpy_amt);
+	if (!is_bias32) {
+		for (i = 0; i < out_depth; i++) {
+			int32_t biasval = bias[i];
+			biasbuf[i] = fast_roundf((biasval - bias_offset) * bias_mpy_amt);
+		}
+	} else {
+		for (i = 0; i < out_depth; i++) {
+			int32_t biasval = bias32[i];
+			biasbuf[i] = fast_roundf(biasval * bias_mpy_amt);
+		}
 	}
 
 	/* BEGIN CONV2D. results in tmp_out buffer, also maxsum is updated */
@@ -367,7 +377,7 @@ static int supernode_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	    if (out_i < 0) out_i = 0;
             if (out_i > 255) out_i = 255;
 	    *out++ = out_i;
-            //printf("conv_out=%ld, biasbuf=%ld, out=%ld\n", tmp_out[j*out_depth+i], biasbuf[i],out_i);
+            //logmsg(nn,2,"conv_out=%ld, biasbuf=%ld, out=%ld\n", tmp_out[j*out_depth+i], biasbuf[i],out_i);
 	  }
 	}
 

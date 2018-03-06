@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -49,6 +49,7 @@
 /*                                                                      */
 /*  Author              Date           Comments                         */
 /*  -------------------------------------------------------------       */
+/*  DJH                 07/09/16       created                          */
 /*======================================================================*/
 /*  CYCLE-COUNT:                                                        */
 /*                                                                      */
@@ -221,3 +222,67 @@ gemaddvvm_asm:
 /*======================================================================*/
 .L_end:
       .size gemaddvvm_asm, .L_end-gemaddvvm_asm
+
+
+/*======================================================================*/
+        .global gemaddvvm_asm1
+        .balign 32
+        .type  gemaddvvm_asm1, @function
+gemaddvvm_asm1:
+/*======================================================================*/
+       {   
+           y0 = vmem(ptr_y0+#0)          //[P, 0]
+           n  = lsr(n, #1)               //[P, 0]
+           m = asl(m, #2)                //[P, 0]
+       } {
+           dcfetch(ptr_x0+#1<<5)         //[P, 1]
+           mstride = m                   //[P, 1]
+           n = add(n, #-1)               //[P, 1]
+       } {
+           ptr_z1 = ptr_z0               //[P, 2]
+           sum1sum0 = memd(ptr_x0++#1<<3)//[0, 0]
+       } {
+           x0 = vsplat(sum0)             //[0, 1]
+           z0.tmp = vmem(ptr_z0++mstride)//[0, 1]
+           z0.w = vadd(y0.w, z0.w)       //[0, 1]
+       } {
+           x2 = vsplat(sum1)             //[0, 2]
+           z1.w = vadd(x0.w, z0.w)       //[0, 2]
+           vmem(ptr_z1++mstride)= z1.new //[0, 2]
+       } {
+           c4 = #4                       //
+           loop0(.L1_loopN, n)           //[P, 5]
+       } {
+           z2.tmp = vmem(ptr_z0++mstride)//[0, 3]
+           z2.w = vadd(x2.w, z2.w)       //[0, 3]
+           dcfetch(ptr_x0+#3<<5)         //[0, 3]
+       } 
+       .balign 32
+.L1_loopN:
+       {    
+           z3.w = vadd(y0.w, z2.w)       //[1, 4]
+           vmem(ptr_z1++mstride)= z3.new //[1, 4]
+           sum1sum0 = memd(ptr_x0++#1<<3)//[2, 0]
+       } {    
+           x0 = vsplat(sum0)             //[2, 1]
+           z0.tmp = vmem(ptr_z0++mstride)//[2, 1]
+           z0.w = vadd(y0.w, z0.w)       //[2, 1]
+       } {    
+           x2 = vsplat(sum1)             //[2, 2]
+           z1.w = vadd(x0.w, z0.w)       //[2, 2]
+           vmem(ptr_z1++mstride)= z1.new //[2, 2]
+       } {    
+           z2.tmp = vmem(ptr_z0++mstride)//[2, 3]
+           z2.w = vadd(x2.w, z2.w)       //[2, 3]
+           dcfetch(ptr_x0+#3<<5)         //[2, 3]
+       }:endloop0 
+
+       {   z3.w = vadd(y0.w, z2.w)       //[2, 4]
+           vmem(ptr_z1++mstride)= z3.new //[2, 4]
+       } {
+           jumpr r31                     //[E, 1]
+       }
+/*======================================================================*/
+.L1_end:
+      .size gemaddvvm_asm1, .L1_end-gemaddvvm_asm1
+

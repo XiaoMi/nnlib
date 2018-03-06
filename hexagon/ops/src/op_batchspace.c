@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -40,7 +40,7 @@
 #include <math.h>
 
 
-static int batchspace_s2b_execute(struct nn_node *self, struct nn_graph *nn)
+static int batchspace_s2b_execute(struct nn_node *self, struct nn_graph *nn, int elementsize, int dtype)
 {
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *strides_tensor = self->inputs[1];
@@ -55,15 +55,15 @@ static int batchspace_s2b_execute(struct nn_node *self, struct nn_graph *nn)
 	int32_t h,w,b;
 	int32_t h_stride = 1;
 	int32_t w_stride = 1;
-	int32_t copy_size = in_depth * sizeof(float);
+	int32_t copy_size = in_depth * elementsize;
 
 	int32_t in_pad_top = tensor_get_int32(pad_tensor,0);
 	int32_t in_pad_bottom = tensor_get_int32(pad_tensor,1);
 	int32_t in_pad_left = 0;
 	int32_t in_pad_right = 0;
 
-	const float *in_base = in_tensor->data;
-	float *out = out_tensor->data;
+	const char *in_base = in_tensor->data;
+	char *out = out_tensor->data;
 
 	if (subsample_dims >= 3) return errlog(nn,"don't support that many space dimensions");
 	if (subsample_dims == 1) {
@@ -97,7 +97,7 @@ static int batchspace_s2b_execute(struct nn_node *self, struct nn_graph *nn)
 		return errlog(nn,"width not evenly divisible");
 	}
 
-	if( tensor_out_prepare_normal( out_tensor,out_batches,out_height,out_width,out_depth, NN_TYPE_FLOAT )!=0){
+	if (tensor_out_prepare_normal(out_tensor,out_batches,out_height,out_width,out_depth,dtype)!=0){
 		return errlog(nn,"failed to prepare output");
 	}
 	for (h_start = 0; h_start < h_stride; h_start++) {
@@ -109,10 +109,10 @@ static int batchspace_s2b_execute(struct nn_node *self, struct nn_graph *nn)
 			for (b = 0; b < in_batches; b++) {
 				for (h = h_begin; h < h_end; h += h_stride) {
 					for (w = w_begin; w < w_end; w += w_stride) {
-						const float *in = in_base 
-							+ b*in_depth*in_width*in_height
+						const char *in = in_base 
+							+ elementsize * (b*in_depth*in_width*in_height
 							+ h*in_width*in_depth
-							+ w*in_depth;
+							+ w*in_depth);
 						if (h < 0) memset(out,0,copy_size);
 						else if (h >= in_height) memset(out,0,copy_size);
 						else if (w < 0) memset(out,0,copy_size);
@@ -127,7 +127,7 @@ static int batchspace_s2b_execute(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-static int batchspace_b2s_execute(struct nn_node *self, struct nn_graph *nn)
+static int batchspace_b2s_execute(struct nn_node *self, struct nn_graph *nn, int elementsize, int dtype)
 {
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *strides_tensor = self->inputs[1];
@@ -142,7 +142,7 @@ static int batchspace_b2s_execute(struct nn_node *self, struct nn_graph *nn)
 	int32_t h,w,b;
 	int32_t h_stride = 1;
 	int32_t w_stride = 1;
-	int32_t copy_size = in_depth * sizeof(float);
+	int32_t copy_size = in_depth * elementsize;
 
 	int32_t in_pad_top = tensor_get_int32(pad_tensor,0);
 	int32_t in_pad_bottom = tensor_get_int32(pad_tensor,1);
@@ -154,8 +154,8 @@ static int batchspace_b2s_execute(struct nn_node *self, struct nn_graph *nn)
 	int32_t out_height;
 	int32_t out_width;
 
-	const float *in_base = in_tensor->data;
-	float *out_base = out_tensor->data;
+	const char *in_base = in_tensor->data;
+	char *out_base = out_tensor->data;
 
 	if (subsample_dims >= 3) return errlog(nn,"don't support that many space dimensions");
 	if (subsample_dims == 1) {
@@ -183,7 +183,7 @@ static int batchspace_b2s_execute(struct nn_node *self, struct nn_graph *nn)
 	if ((in_batches % (h_stride * w_stride)) != 0) {
 		return errlog(nn,"batches not evenly divisible");
 	}
-	if( tensor_out_prepare_normal( out_tensor,out_batches,out_height,out_width,out_depth, NN_TYPE_FLOAT )!=0){
+	if (tensor_out_prepare_normal(out_tensor,out_batches,out_height,out_width,out_depth,dtype)!=0){
 		return errlog(nn,"failed to prepare output");
 	}
 
@@ -193,14 +193,14 @@ static int batchspace_b2s_execute(struct nn_node *self, struct nn_graph *nn)
 				int h_in = (h+in_pad_top)/h_stride;
 				int w_in = (w+in_pad_left)/w_stride;
 				int b_in = ((h%h_stride)*w_stride + (w%w_stride))*out_batches+b;
-				float *out = out_base 
-					+ b*out_depth*out_width*out_height
+				char *out = out_base 
+					+ elementsize*(b*out_depth*out_width*out_height
 					+ h*out_width*out_depth
-					+ w*out_depth;
-				const float *in = in_base
-					+ b_in*in_depth*in_width*in_height
+					+ w*out_depth);
+				const char *in = in_base
+					+ elementsize*(b_in*in_depth*in_width*in_height
 					+ h_in*in_depth*in_width
-					+ w_in*in_depth;
+					+ w_in*in_depth);
 				memcpy(out,in,copy_size);
 			}
 		}
@@ -208,6 +208,32 @@ static int batchspace_b2s_execute(struct nn_node *self, struct nn_graph *nn)
 
 	return 0;
 }
+
+
+static int batchspace_b2s_execute_f(struct nn_node *self, struct nn_graph *nn)
+{
+	return batchspace_b2s_execute(self,nn,sizeof(float),NN_TYPE_FLOAT);
+}
+
+static int batchspace_s2b_execute_f(struct nn_node *self, struct nn_graph *nn)
+{
+	return batchspace_s2b_execute(self,nn,sizeof(float),NN_TYPE_FLOAT);
+}
+
+static int batchspace_b2s_execute_8(struct nn_node *self, struct nn_graph *nn)
+{
+	tensor_copy(self->outputs[1],self->inputs[3]);
+	tensor_copy(self->outputs[2],self->inputs[4]);
+	return batchspace_b2s_execute(self,nn,sizeof(uint8_t),NN_TYPE_QUINT8);
+}
+
+static int batchspace_s2b_execute_8(struct nn_node *self, struct nn_graph *nn)
+{
+	tensor_copy(self->outputs[1],self->inputs[3]);
+	tensor_copy(self->outputs[2],self->inputs[4]);
+	return batchspace_s2b_execute(self,nn,sizeof(uint8_t),NN_TYPE_QUINT8);
+}
+
 
 static int batchspace_check(struct nn_node *self, struct nn_graph *nn)
 {
@@ -218,16 +244,39 @@ static int batchspace_check(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
+static int batchspace_check_q(struct nn_node *self, struct nn_graph *nn)
+{
+	logmsg(nn,2,"Checking batchspace node %p",self);
+	if (self->n_inputs != 5) return errlog(nn,"wrong # inputs");
+	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
+	logmsg(nn,2,"batchspace %p check OK",self);
+	return 0;
+}
+
 struct nn_node_ops nn_ops_for_BatchToSpaceND_f = {
-	.execute = batchspace_b2s_execute,
+	.execute = batchspace_b2s_execute_f,
 	.check = batchspace_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
 };
 
 struct nn_node_ops nn_ops_for_SpaceToBatchND_f = {
-	.execute = batchspace_s2b_execute,
+	.execute = batchspace_s2b_execute_f,
 	.check = batchspace_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};
+
+struct nn_node_ops nn_ops_for_BatchToSpaceND_8 = {
+	.execute = batchspace_b2s_execute_8,
+	.check = batchspace_check_q,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};
+
+struct nn_node_ops nn_ops_for_SpaceToBatchND_8 = {
+	.execute = batchspace_s2b_execute_8,
+	.check = batchspace_check_q,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
 };

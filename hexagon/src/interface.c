@@ -213,6 +213,61 @@ int hexagon_nn_append_const_node(
 }
 
 
+
+
+int hexagon_nn_append_empty_const_node(
+	nn_id_t id,
+	uint32_t node_id,
+	uint32_t batches,
+	uint32_t height,
+	uint32_t width,
+	uint32_t depth,
+	uint32_t data_len)
+{
+	struct nn_graph *graph;
+	if ((graph = nn_id_to_graph(id)) == NULL) {
+		return errlog(NULL,"nn id %x not found",id);
+	}
+	if (graph->state != NN_GRAPH_CONSTRUCTION) {
+		return errlog(graph,"append: graph not under construction");
+	}
+	return do_append_empty_const_node(
+		graph,
+		node_id,
+		batches,
+		height,
+		width,
+		depth,
+		data_len);
+}
+
+
+
+int hexagon_nn_populate_const_node(
+	nn_id_t id,
+	uint32_t node_id,
+	const uint8_t *data,
+	uint32_t data_len,
+	uint32_t target_offset)
+{
+	struct nn_graph *graph;
+	if ((graph = nn_id_to_graph(id)) == NULL) {
+		return errlog(NULL,"nn id %x not found",id);
+	}
+	if (graph->state != NN_GRAPH_CONSTRUCTION) {
+		return errlog(graph,"append: graph not under construction");
+	}
+	return do_populate_const_node(
+		graph,
+		node_id,
+		data,
+		data_len,
+		target_offset);
+}
+
+
+
+
 /*
  * FIXME: hexagon_nn_tensordef will no longer be compatible with struct tensor
  * as we make it more complex.
@@ -230,9 +285,12 @@ int hexagon_nn_execute_new(
 	uint32_t n_outputs)
 {
 	struct nn_graph *graph;
+	uint64_t pcycle_start;
+	uint64_t pcycle_stop;
 	if ((graph = nn_id_to_graph(id)) == NULL) {
 		return errlog(NULL,"nn id %x not found",id);
 	}
+	pcycle_start = nn_os_get_cycles(graph);
 	if (graph->n_inputs != n_inputs) {
 		struct tensor *inputs_tmp;
 		if ((inputs_tmp = nn_realloc((void *)graph->inputs,sizeof(*inputs_tmp)*n_inputs)) == NULL) {
@@ -272,6 +330,7 @@ int hexagon_nn_execute_new(
 		struct tensor *t = output_tensors+i;
 		t->data = out->data;
 		t->max_size = out->dataLen;
+		t->data_size = 0;
 	}
 	if ((graph = nn_id_to_graph(id)) == NULL) {
 		return errlog(NULL,"nn id %x not found",id);
@@ -290,6 +349,9 @@ int hexagon_nn_execute_new(
 		out->depth = t->shape.depth;
 		out->data_valid_len = t->data_size;
 	}
+	pcycle_stop = nn_os_get_cycles(graph);
+	graph->execution_total_cycles = pcycle_stop - pcycle_start;
+	if (ret) return errlog(graph,"fail in execute_new()");
 	return ret;
 }
 
@@ -310,7 +372,7 @@ int hexagon_nn_execute(
 	uint32_t *data_out_size)
 {
 	hexagon_nn_tensordef in;
-	hexagon_nn_tensordef out;
+	hexagon_nn_tensordef out = {0}; // klocwork
 	int ret;
 
 	in.batches = batches_in;
@@ -321,6 +383,7 @@ int hexagon_nn_execute(
 	in.data = (uint8_t *)data_in;
 	out.data = data_out;
 	out.dataLen = data_out_max;
+	out.data_valid_len = 0;  // Handle no-output case
 	ret = hexagon_nn_execute_new(id,&in,1,&out,1);
 	*batches_out = out.batches;
 	*height_out = out.height;

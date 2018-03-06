@@ -80,13 +80,17 @@ struct nn_thread_info {
 	nn_sem_t ack;
 };
 
+// Important: must read from *info
+// and then post info->sem before reading the pipe;
+// *info is not readable after that.
+//
 static void *nn_os_worker(void *vinfo)
 {
-	struct tinfo *info = vinfo;
+	volatile struct tinfo *info = vinfo;
 	struct nn_graph *nn = info->nn;
 	nn_pipe_t *pipe = info->pipe;
 	union workitem work;
-	nn_sem_post(&info->sem);
+	nn_sem_post((nn_sem_t*)&info->sem);
 	while (1) {
 		work.raw = nn_pipe_recv(pipe);
 		//logmsg(nn,0,"nn_pipe_recv work.raw=%x", work.raw);

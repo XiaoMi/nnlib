@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -47,6 +47,7 @@
  *                                                     
  *  Author              Date           Comments       
  *  ------------------------------------------------------------- 
+ *  DJH                 05/11/17       created                   
  *
  *  CYCLE-COUNT:                              
  *                                              
@@ -168,6 +169,7 @@ inconv2dbbb_v60_asm:
            filt_width = lsr(filt_width, #1)             //
            out_height = memw(sp+#23<<2)                 //number of output lines
        } {
+           p2 = cmp.eq(filt_width, #0)                  //is filt width = 1? (now 0)?
            recip_level = memw(sp+#25<<2)                // 
            filt_sum = memw(sp+#26<<2)
            in_width_depth  = mpyi(in_width, in_depth)   //in_depth * in_width line
@@ -239,6 +241,7 @@ inconv2dbbb_v60_asm:
        {   loop0(.L_filt_widthN_1, filt_width)          //[P, 0]ki is k1/32 - 0
            ptr_x0 = add(ptr_x0, in_width_depth)         //[E, 7]next line ptr_y keeps going
            fetch_ptr = fetch_ptr0
+           if (p2) jump:nt .L_epi_onlyN_1;              // skip loop when filter_width=1
        }
 /* ---------------------------------------------------------------------------- */
 .L_filt_widthN_1:
@@ -264,6 +267,8 @@ inconv2dbbb_v60_asm:
            x37x34_x33x30 = memd(ptr_x1+in_depth3<<#0)   //[1, 0]
        }:endloop0  
 /* ---------------------------------------------------------------------------- */
+.L_epi_onlyN_1:
+	// note: p2=1, p3=0 doesn't happen.
        {   if(!p3) jump  .L_evenN_1                     //for even filters
            dcfetch(fetch_ptr+#0<<5)                     //[1, 2]
            fetch_ptr0 = add(fetch_ptr0, in_width_depth) //[0, 3]
@@ -289,6 +294,7 @@ inconv2dbbb_v60_asm:
        {   loop0(.L_filt_width1, filt_width)            //[P, 0]ki is k1/32 - 0
            ptr_x0 = add(ptr_x0, in_width_depth)         //[E, 7]next line ptr_y keeps going
            fetch_ptr0 = sub(fetch_ptr0, next_outputs)   //[E, 7]
+           if (p2) jump:nt .L_epi_only_1;               // skip loop when filter_width=1
        }
 /* ---------------------------------------------------------------------------- */
 .L_filt_width1:
@@ -314,7 +320,10 @@ inconv2dbbb_v60_asm:
        }:endloop0
 /* ---------------------------------------------------------------------------- */
        {   if(!p3) jump .L_even1                        //for even filters
-       } {  
+       }
+	// note: p2=1, p3=0 doesn't happen.
+.L_epi_only_1:
+       {
            y0.cur     = vmem(ptr_w+#0)                  //[1, 1]
            s2.uw       += vrmpy(y0.ub, x23x20.ub)       //[1, 1]
            s3.uw       += vrmpy(y0.ub, x33x30.ub)       //[1, 1]

@@ -47,6 +47,7 @@
  *
  *  Author              Date           Comments
  *  -------------------------------------------------------------
+ *  DJH                 09/12/17       created
  *
  *  CYCLE-COUNT: Integrates 32 depth 4 elements every 7 packets 18.3 bytes / packet
  *

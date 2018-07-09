@@ -66,7 +66,9 @@ struct output {
 
 struct perfinfo {
 	uint32_t node_id;
+	uint32_t node_type;
 	uint32_t executions;
+	uint32_t unused;
 	union {
 		uint64_t counter;
 		struct {
@@ -103,6 +105,21 @@ typedef struct {
 	unsigned int data_valid_len; /* for output only */
 	unsigned int unused;
 } hexagon_nn_tensordef;
+
+struct hexagon_nn_op_node {
+  unsigned int node_id;
+  unsigned int operation;
+  padding_type padding;
+  struct input *inputs;
+  int inputsLen;
+  struct output *outputs;
+  int outputsLen;
+};
+
+struct hexagon_nn_const_node {
+  unsigned int node_id;
+  hexagon_nn_tensordef tensor;
+};
 
 int hexagon_nn_append_node(
 	nn_id_t id,

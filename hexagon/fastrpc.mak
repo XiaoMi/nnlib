@@ -9,6 +9,7 @@ include $(QURT_IMAGE_DIR)/qurt_libs.min
 
 include hexagon/files.mak
 
+#-D_DEBUG
 CC_FLAGS += -DNN_LOG_MAXLEV=9 -DUSE_OS_QURT $(MHVX_DOUBLE_FLAG) -Ihexagon/include
 ASM_FLAGS += $(MHVX_DOUBLE_FLAG)
 CXX_FLAGS += $(MHVX_DOUBLE_FLAG)

@@ -93,7 +93,7 @@ int do_execute(struct nn_graph *nn)
 	int j;
 	static nn_mutex_t exec_mutex = NN_MUTEX_INIT;
 	struct nn_node *start_node = nn->head;
-	if (nn->nonconst_head_ptr && *nn->nonconst_head_ptr) start_node = *nn->nonconst_head_ptr;
+	if (nn->nonconst_head) start_node = nn->nonconst_head;
 	nn_mutex_lock(&exec_mutex);
 	nn_os_hvx_power_on(nn);
 	nn_os_vector_workers_acquire(nn);

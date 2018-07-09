@@ -184,6 +184,31 @@ int hexagon_nn_append_node(
 		outputs);
 }
 
+int hexagon_nn_append_node_list(
+	nn_id_t id,
+	const struct hexagon_nn_op_node *ops,
+	int len)
+{
+	struct nn_graph *graph;
+	if ((graph = nn_id_to_graph(id)) == NULL) {
+		return errlog(NULL, "nn id %x not found", id);
+	}
+	if (graph->state != NN_GRAPH_CONSTRUCTION) {
+		return errlog(graph, "append: graph not under construction");
+	}
+	for (int i = 0; i < len; ++i) {
+		if (0 != do_append_node(graph,
+								ops[i].node_id,
+								ops[i].operation,
+								ops[i].padding,
+								ops[i].inputsLen,
+								ops[i].outputsLen,
+								ops[i].inputs,
+								ops[i].outputs)) return -1;
+	}
+	return 0;
+}
+
 int hexagon_nn_append_const_node(
 	nn_id_t id,
 	uint32_t node_id,
@@ -212,6 +237,30 @@ int hexagon_nn_append_const_node(
 		data_len);
 }
 
+int hexagon_nn_append_const_node_list(
+	nn_id_t id,
+	struct hexagon_nn_const_node *consts,
+	int len)
+{
+	struct nn_graph *graph;
+	if ((graph = nn_id_to_graph(id)) == NULL) {
+		return errlog(NULL, "nn id %x not found", id);
+	}
+	if (graph->state != NN_GRAPH_CONSTRUCTION) {
+		return errlog(graph, "append: graph not under construction");
+	}
+	for (int i = 0; i < len; ++i) {
+		if (0 != do_append_const_node(graph,
+									  consts[i].node_id,
+									  consts[i].tensor.batches,
+									  consts[i].tensor.height,
+									  consts[i].tensor.width,
+									  consts[i].tensor.depth,
+									  consts[i].tensor.data,
+									  consts[i].tensor.dataLen)) return -1;
+	}
+	return 0;
+}
 
 
 

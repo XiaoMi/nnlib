@@ -18,7 +18,7 @@ include glue/defines.min
 ifneq (,$(findstring hexagon,$(V_TARGET)))
   include hexagon/fastrpc.mak
 else
-  include test/$(V_TARGET).mak
+  include controller/$(V_TARGET).mak
 endif
 
 #always last

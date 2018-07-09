@@ -94,6 +94,7 @@ int do_perfinfo_reset(struct nn_graph *nn, uint32_t event)
 	struct nn_node *node;
 	for (node = nn->head; node != NULL; node = node->next) {
 		node->perfcounter = 0;
+		node->executions = 0;
 	}
 	nn->perf_event = event;
 	if (event != 0) config_event_hw(nn,event);
@@ -106,10 +107,13 @@ int do_perfinfo_get(struct nn_graph *nn, struct perfinfo *info, uint32_t info_le
 	uint32_t i = 0;
 	for (node = nn->head; node != NULL; node = node->next) {
 		if (i >= info_len) return -1;
-		info[i].node_id = node->node_id;
-		info[i].executions = node->executions;
-		info[i].counter = node->perfcounter;
-		i++;
+		if (node->node_type != OP_Const) {
+			info[i].node_id = node->node_id;
+			info[i].node_type = node->node_type;
+			info[i].executions = node->executions;
+			info[i].counter = node->perfcounter;
+			i++;
+		}
 	}
 	return i;
 }

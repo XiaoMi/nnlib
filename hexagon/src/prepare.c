@@ -44,8 +44,6 @@
 #include <nn_graph.h>
 #include <stdlib.h>
 #include <quantize.h>
-#include <math.h>
-#include <stdio.h>
 // int hexagon_nn_prepare(nn_id id);
 
 int create_const_float_op(struct nn_graph *nn, const float const_float)
@@ -1754,46 +1752,6 @@ static int remove_dead_nodes(struct nn_graph *nn)
 	return 0;
 }
 
-#if 0
-static void move_nonconst_head_ptr(struct nn_graph *nn)
-{
-	struct nn_node *tmp;
-	do {
-		tmp = *nn->nonconst_head_ptr;
-		if (tmp == NULL) break;
-		if (tmp->node_type != OP_Const) break;
-		tmp = tmp->next;
-	} while (1);
-}
-#endif
-
-static int do_gather_const_node(struct nn_graph *nn, struct nn_node **nodeptr)
-{
-	struct nn_node *tmp = *nodeptr;
-	logmsg(nn,4,"nn=%p nodeptr=%p *nodeptr=%p",nn,nodeptr,*nodeptr);
-	if (tmp == NULL) return 0;
-	if (tmp->node_type != OP_Const) return 0;
-	logmsg(nn,4,"Const node %x @ %p type %d",tmp->node_id,tmp,tmp->node_type);
-	if (tmp == *nn->nonconst_head_ptr) {
-		nn->nonconst_head_ptr = &tmp->next;
-		return 0;
-	}
-	*nodeptr = tmp->next;
-	tmp->next = *nn->nonconst_head_ptr;
-	*nn->nonconst_head_ptr = tmp;
-	nn->nonconst_head_ptr = &tmp->next;
-	return do_gather_const_node(nn,nodeptr);
-}
-
-static int gather_const_nodes(struct nn_graph *nn)
-{
-	nn->nonconst_head_ptr = &nn->head;
-	graph_iterator(nn,do_gather_const_node);
-	if (nn->head == NULL) return errlog(nn,"oops: head pointing to NULL");
-	return 0;
-}
-
-
 static int optimize(struct nn_graph *nn)
 {
 	int err;
@@ -1805,7 +1763,6 @@ static int optimize(struct nn_graph *nn)
 	if ((err = remove_dead_nodes(nn)) != 0) return err;
 	if ((err = make_reluX_nodes(nn)) != 0) return err;
 	if ((err = mark_biasadd_nodes(nn)) != 0) return err;
-	if ((err = gather_const_nodes(nn)) != 0) return err;
 	if ((err = make_supernodes(nn)) != 0) return err;
 	if ((err = make_dwise_supernodes(nn)) != 0) return err;
 	if ((err = make_supernodes_bias32(nn)) != 0) return err;
@@ -1815,7 +1772,6 @@ static int optimize(struct nn_graph *nn)
 	if ((err = convert_to_depth32(nn)) != 0) return err;
 	if ((err = remove_unnecessary_d32_converts(nn)) != 0) return err;
 	if ((err = remove_dead_nodes(nn)) != 0) return err;
-	if ((err = gather_const_nodes(nn)) != 0) return err;
 	return 0;
 }
 
@@ -1829,6 +1785,10 @@ int do_prepare(struct nn_graph *nn)
 	if (nn->state != NN_GRAPH_CONSTRUCTION) {
 		return errlog(nn,"prepare: Graph not under construction");
 	}
+
+	// append nonconst list to const list
+	nn->tail->next = nn->nonconst_head;
+	nn->tail = nn->nonconst_tail;
 	//if ((err = run_op_setup(nn)) != 0) return err; /* FIXME: needed? Or just call ctor? */
 	//vecret = h2_vecaccess_acquire(&vecstate);
 	if ((err = optimize(nn)) != 0) return err;

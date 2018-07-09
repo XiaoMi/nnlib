@@ -233,15 +233,16 @@ int node_free_common(struct nn_node *node, struct nn_graph *nn)
 // 'ptr' points to nn->head, or to
 // any node->next field of a node already in the list.
 //
-static inline void node_append(struct nn_node **ptr, struct nn_node *newnode)
-{
+static inline void node_append(struct nn_node **head,
+							   struct nn_node **tail,
+							   struct nn_node *newnode) {
 	newnode->next = NULL;
-    struct nn_node *p = *ptr;
-    while( p != NULL ){ // look for last
-        ptr = &p->next;
-        p = *ptr;
-    }
-    *ptr = newnode;
+	if (*head == NULL) {
+		*head = newnode;
+	} else {
+		(*tail)->next = newnode;
+	}
+	*tail = newnode;
 }
 
 int do_append_node(
@@ -269,7 +270,7 @@ int do_append_node(
 		     outputs)) == NULL) {
 		return errlog(nn,"node id=0x%x ctor fail",node_id);
 	}
-	node_append(&(nn->head),node);
+	node_append(&(nn->nonconst_head), &(nn->nonconst_tail), node);
 	return 0;
 }
 
@@ -324,7 +325,7 @@ int do_append_const_node(
 		data_len)) == NULL) {
 		return errlog(nn,"node id=0x%x ctor fail",node_id);
 	}
-	node_append(&(nn->head),node);
+	node_append(&(nn->head), &(nn->tail), node);
 	return 0;
 }
 
@@ -347,7 +348,7 @@ int do_append_empty_const_node(
 		     data_len)) == NULL) {
 		return errlog(nn,"node id=0x%x ctor fail",node_id);
 	}
-	node_append(&(nn->head),node);
+	node_append(&(nn->head), &(nn->tail), node);
 	return 0;
 }
 int do_populate_const_node(

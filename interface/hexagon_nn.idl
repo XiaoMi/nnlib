@@ -63,7 +63,9 @@ struct output {
 
 struct perfinfo {
 	unsigned long node_id;
+	unsigned long node_type;
 	unsigned long executions;
+	unsigned long unused;
 	unsigned long counter_lo;	/* IDL generates broken 64 bit types :-( */
 	unsigned long counter_hi;	/* IDL generates broken 64 bit types :-( */
 };
@@ -86,6 +88,19 @@ struct tensordef {
 	sequence<octet> data;		/* Data + DataLen */
 	unsigned long data_valid_len;	/* Return location for valid data out */
 	unsigned long unused;		/* Unused */
+};
+
+struct op_node {
+	unsigned long node_id;
+	unsigned long operation;
+	padding_type padding;
+	sequence<input> inputs;
+	sequence<output> outputs;
+};
+
+struct const_node {
+	unsigned long node_id;
+	tensordef tensor;
 };
 
 /* 
@@ -126,6 +141,8 @@ long append_node(
 	in sequence<input> inputs,
 	in sequence<output> outputs);
 
+long append_node_list(in nn_id id, in sequence<op_node> ops);
+
 /* 
  * Append a const node into the graph.  The data is copied locally during this
  * call, the caller does not need it to persist.
@@ -138,6 +155,8 @@ long append_const_node(
 	in unsigned long width,
 	in unsigned long depth,
 	in sequence<octet> data);
+
+long append_const_node_list(in nn_id id, in sequence<const_node> consts);
 
 /*
  * Prepare a graph for execution.  Must be done before attempting to execute the graph.

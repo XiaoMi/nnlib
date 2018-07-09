@@ -93,6 +93,9 @@ enum {
 
 struct nn_graph {
 	struct nn_node *head;		// First node in graph list
+	struct nn_node *tail;
+	struct nn_node *nonconst_head;
+	struct nn_node *nonconst_tail;
 	void *scratch;			// temporary storage
 	size_t scratch_size;		// size of scratch
 	int32_t scratch_nextalloc;	// next allocation offset

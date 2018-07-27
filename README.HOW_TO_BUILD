@@ -14,18 +14,5 @@ Try the "calculator" or other example in the SDK to make sure you can execute on
 
 4) adb root ; adb remount
 
-5) adb push android_Release/ship/graph_app /data
-
-6) adb push hexagon_Release_dynamic_toolv81_v60/ship/libhexagon_nn_skel.so /system/vendor/lib/rfsa/adsp/
-
-7) adb wait-for-device ; adb root ; adb remount     # (not sure if really necessary)
-
-8) adb shell /data/graph_app --help for info
-
-Example command line:
-   adb shell /data/graph_app --height 299 --width 299 --depth 3 --elementsize 4 --perfdump 1 /data/keyboard_299.dat 
-
-
-
-
+5) adb push hexagon_Release_dynamic_toolv81_v60/ship/libhexagon_nn_skel.so /system/vendor/lib/rfsa/adsp/
 

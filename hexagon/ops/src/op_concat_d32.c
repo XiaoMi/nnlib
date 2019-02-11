@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -57,8 +57,11 @@
 // Each input is assigned to a thread; each time a thread finishes copying
 // an input, it starts on the next pending input (if any).
 //
-#define CONCAT_MAX_THREADS 3
-
+#ifdef HEXAGON_V66
+#define CONCAT_MAX_THREADS 4
+#else
+#define CONCAT_MAX_THREADS 2
+#endif
 //
 // concat operation for d32 format
 // Output composed by concatenating all the inputs along a given dimension
@@ -196,241 +199,20 @@ scaled_copy_d32_hvx(
 #endif
 
 
-//=================================================
-// "Tensor Slice" data structure
-//=====================================================
-
-//
-// descriptor for a d32 tensor 'slice' view.
-// This describes 'before'padding of the depth dimension (0..31)
-// for height, width, no padding is described; batch_stride and row_stride are used instead,
-// and the 'data' pointer is offset according to the 'left' padding in these dims.
-// 'after' padding of the depth dimension is not given explicitly (but it's depth_total-depth_pad_before - shape.depth)
-//
-// to locate a byte at b,h,w,d:
-//     dx = d+ depth_pad_before;
-//     data + batch_stride * b + row_stride * h + d32_stride * (dx/32) + w*3 + (dx%32)
-//
-// Note, if a tensor is sliced in a depth dimension, in such a way that d32 chunks are eliminated, we trim
-// depth_total to keep padding in range 0..31 at both ends
-// Example:
-//   original tensor has depth = 68, padded 0 and 28  to a total of 96
-//   -slice extracts  34..45 in depth dimension.
-//  Resulting slice will have depth = 12, depth_total = 32, depth_pad_before = 2
-// So the original tensor has 3 chunks of 32, and the new one has one (the middle of the original);
-//  - the first chunk of 32 is skipped by adding d32_stride to the data pointer.
-//
-struct tensor_slice_d32 {
-	struct shape shape;				// batches, height, width, depth
-	uint16_t depth_total;			// depth total including padding (mult. of 32)
-	uint16_t depth_pad_before;		// [0..31] add this to data to reach (0,0,0,0)
-	uint8_t * data;					// this is 32 aligned
-	int32_t batch_stride;			// stride between batches (multiple of vector)
-	int32_t row_stride;				// stride between rows (multiple of vector)
-	int32_t d32_stride;				// stride between chunks (multiple of vector)
-};
-
-/*
- * make a slice from a tensor, it encompasses the whole tensor
- */
-int tensor_slice_from_tensor_d32( struct tensor_slice_d32  *slc, const struct tensor *tens)
-{
-	if( tens->format.layout != NN_LAYOUT_D32 ) return -1;
-	slc->shape = tens->shape;
-	int32_t depth_total =  tensor_d_total_d32(tens);
-	int32_t depth_pad_before = tens->format.depth_pad[0];
-	int32_t batch_stride = tensor_batch_stride_d32( tens);
-	int32_t row_stride = tensor_row_stride_d32( tens);
-	int32_t d32_stride = tensor_d32_stride_d32( tens);
-	slc->data = (uint8_t*)tens->data
-			+ row_stride * tens->format.height_pad[0]
-		    +  32 * tens->format.width_pad[0];
-	slc->depth_total = depth_total;
-	slc->depth_pad_before = depth_pad_before;
-	slc->batch_stride = batch_stride;
-	slc->row_stride = row_stride;
-	slc->d32_stride = d32_stride;
-	return 0;
-}
-
-//
-// reduce a slice along a given dimension
-// 0,1,2,3 = batches, height, width, depth
-//
-// NOTE: this function can make a new slice by slicing an existing
-// slice, OR it can work in-place on a single slice (this is faster).
-// 'in-place' slicing is selected by slc_out == slc_in, or by slc_in == NULL.
-
-// returns:
-//   0   ok
-//  -1   bad 'dim_no'
-//  -2  lo_index/newsize out of range.
-//
-int tensor_slice_on_dimension(
-		struct tensor_slice_d32 * slc_out,			// output slice
-		struct tensor_slice_d32 const * slc_in,		// input slice (can be same slice).
-		int32_t dim_no,		// dimension to slice
-		int32_t lo_index,	// start of slice (0..size-1)
-		int32_t newsize )	// new size. 1 <= newsize <= size-lo_index
-{
-	if( slc_in != NULL && slc_in != slc_out ){
-		*slc_out = *slc_in;		// copy the source slice
-	}
-	// now we just work on slc_in...
-	int min_curr_size;
-
-	if( lo_index < 0 || newsize < 1 ||
-			__builtin_sadd_overflow(lo_index,newsize,&min_curr_size)) return -2;
-
-	// min_curr_size guaranteed to be >=1, <= MAXINT)
-
-	uint32_t * nsize_p;
-	int32_t dim_stride;
-
-	switch( dim_no){
-		case 0:		// batch
-			nsize_p = &slc_out->shape.batches;
-			dim_stride = slc_out->batch_stride;
-			break;
-		case 1:		// height
-			nsize_p = &slc_out->shape.height;
-			dim_stride = slc_out->row_stride;
-			break;
-		case 2:	// width
-			nsize_p = &slc_out->shape.width;
-			dim_stride = 32;
-			break;
-		case 3:	// depth
-			{
-				if( slc_out->shape.depth < (unsigned)min_curr_size) return -2;
-				unsigned new_dpad = slc_out->depth_pad_before + lo_index;
-				unsigned reduce_d32_before = new_dpad/32;	// # of groups to cut
-				new_dpad %= 32;
-				unsigned new_dtotal = (new_dpad + newsize + 31) & ~31;	// new total size
-				slc_out->data += reduce_d32_before * slc_out->d32_stride;
-				slc_out->depth_pad_before = new_dpad;
-				slc_out->depth_total = new_dtotal;
-				slc_out->shape.depth = newsize;
-			}
-			return 0;
-
-		default:
-			return -1;
-	}
-	// generic slicing along batch, height, width dims.
-	if( *nsize_p < (unsigned)min_curr_size) return -2;
-	slc_out->data += lo_index * dim_stride;
-	*nsize_p = newsize;
-	return 0;
-}
-
-//
-// This is used to progressively make slices of src_tensor, based on a series of
-// supplied ref_shape, along a given dimension.
-//  - src_tensor and ref_shape must agree in all dims but 'slice_dim'.
-//  - the resulting slice will have the same shape as ref_shape, but will be a slice of src_tensor.
-//  - along the sliced dimension, the slice will start at the supplied value of *slicepos_p
-//  - on return, slicepos_p will be updated to the *next* position (i.e. the size of ref_shape along
-//    the slice_dim will be added to *slicepos_p).
-//
-// *** IMPORTANT ***: if called with *slicepos_p > 0, it assumes that it has previously been
-//  called with *slicepos_p = 0, and the same slc, src_tensor, and slice_dim (i.e. much of the slice
-// is  filled in by that first call, and subsequent calls rely on that).
-// (it's also ok to use different 'slc' if it's been copied from the result of a previous call).
-// If you want to start slicing at a point other than 0, call first with *slice_pos= 0, and then change *slice_pos to something
-// else and call again. This first call can be done with ref_shape = NULL, which will not affect *slice_pos.
-//
-// return values:
-//    1 normal (and no more slices possible along the dim).
-//    0 normal
-//   -1 slice_dim out of range 0..3
-//   -2 shapes don't match along non-slice dims.
-//   -3 exceeded range of slice along slice_dim
-//   -4 src_tensor is not d32
-//
-//
-int tensor_slice_progressive_d32(
-		struct tensor_slice_d32 * slc,			// output slice
-		struct tensor const * src_tensor,		// tensor
-		struct shape const * ref_shape,			// shape to match
-		int slice_dim,							// dimension to slice along
-		int *slicepos_p							// keeps track of slice.
-)
-{
-	int slicepos = *slicepos_p;
-	if( slicepos <= 0){
-		if( slicepos != 0) return -3;
-		int k = tensor_slice_from_tensor_d32( slc, src_tensor);
-		if( k!= 0) return -4;
-		if( ref_shape == NULL) return 0;		// a 'dummy' call to set up slice
-	}
-	// compare all the dims
-	int dim_mismatch = (src_tensor->shape.depth != ref_shape->depth)?8:0;
-	if(   src_tensor->shape.width != ref_shape->width) dim_mismatch |= 4;
-	if(   src_tensor->shape.height != ref_shape->height) dim_mismatch |= 2;
-	if(   src_tensor->shape.batches != ref_shape->batches) dim_mismatch |= 1;
-	int dim_sel = 1 << slice_dim;
-
-	// dim_mismatch must be either 0 or dim_sel.
-	if( (dim_mismatch|dim_sel) != dim_sel) return ( slice_dim >=0 && slice_dim <=3)?-2:-1;
-
-	int dimsize, new_dimsize, next_slicepos;
-	// get '0' position of the tensor (excluding depth_pad_before; mult of 32).
-	uint8_t * slc_data = tensor_location_bhw_d32( src_tensor,0,0,0);
-
-	switch( slice_dim){
-		case 0:			// batches
-			dimsize = src_tensor->shape.batches;
-			new_dimsize = ref_shape->batches;
-			slc->shape.batches = new_dimsize;
-			slc_data += slc->batch_stride * slicepos;
-			break;
-		case 1:			// height
-			dimsize = src_tensor->shape.height;
-			new_dimsize = ref_shape->height;
-			slc->shape.height = new_dimsize;
-			slc_data += slc->row_stride * slicepos;
-			break;
-		case 2:			// width
-			dimsize = src_tensor->shape.width;
-			new_dimsize = ref_shape->width;
-			slc->shape.width = new_dimsize;
-			slc_data += 32 * slicepos;
-			break;
-		case 3:			// depth slicing is messier...
-			{
-				dimsize = src_tensor->shape.depth;
-				new_dimsize = ref_shape->depth;
-				unsigned new_dpad_before = src_tensor->format.depth_pad[0] + slicepos;
-				unsigned advance_d32 = new_dpad_before/32;
-				new_dpad_before %= 32;
-				slc->depth_total = (new_dpad_before + new_dimsize + 31) & ~31;
-				slc->depth_pad_before = new_dpad_before;
-				slc->shape.depth = new_dimsize;
-				// adjust for d32 sections skipped, if any
-				slc_data +=  advance_d32 * slc->d32_stride;
-			}
-			break;
-		default:
-			return -1;
-	}
-
-	next_slicepos = slicepos + new_dimsize;
-	if( new_dimsize <= 0 ||  next_slicepos > dimsize) return -3;
-	slc->data = slc_data;
-	*slicepos_p= next_slicepos;
-	return (next_slicepos == dimsize)?1:0;
-}
 
 
 //=====================================================
 
-
-// The node has an array of these - 1 per input - attached as 'opaque'.
+// The node has an array of these - 1 per input - attached in "concat_info"
 struct concat_input_descriptor {
 	struct tensor_slice_d32 out_slice;		// a slice of the output.
 	float in_min, in_max;					// input range.
 	int index;			// used to reorder the inputs, to do the largest first
+};
+
+struct concat_info {
+	struct concat_input_descriptor *descriptors;
+	struct nn_early_work *next_earlywork;	// Work requested by future node
 };
 
 
@@ -463,6 +245,19 @@ struct concat_run_desc {
 
 };
 
+static void concat_earlywork(struct nn_graph *nn, void *vinfo)
+{
+	struct concat_info *info = vinfo;
+	struct nn_early_work *work = info->next_earlywork;
+	if (work == NULL) return;
+	if (work->vtcm_addr != nn->vtcm_ptr) return;
+	if (work->src_addr == NULL) return;
+	if (work->dst_addr == NULL) return;
+	if (work->bytes == 0) return;
+	nn_graph_memcpy(nn,work->dst_addr,work->src_addr,work->bytes);
+	work->valid = 1;
+}
+
 //
 // this is called in thread, does individual input copies.
 // It does
@@ -481,7 +276,8 @@ static void concat_copy_inputs( struct nn_graph *nn, void *thrinfo)
 	struct concat_run_thread * thrdesc = (struct concat_run_thread *)thrinfo;
 	struct concat_run_desc * rundescp = thrdesc->rundescp;
 	struct nn_node *self = rundescp->self;
-	struct concat_input_descriptor const *indescs = (struct concat_input_descriptor const*)self->opaque;
+	struct concat_info *info = self->opaque;
+	struct concat_input_descriptor const *indescs = info->descriptors;
 	int input_seq;
 
 	// get next input to process.
@@ -516,7 +312,7 @@ static void concat_copy_inputs( struct nn_graph *nn, void *thrinfo)
 		int in_d_offs = input_tensor->format.depth_pad[0];		// # of bytes to offset
 
 
-		int out_row_stride = indesc->out_slice.row_stride;
+		int out_row_stride = indesc->out_slice.height_stride;
 		int out_d32_stride = indesc->out_slice.d32_stride;
 		unsigned out_d_offs = indesc->out_slice.depth_pad_before;
 
@@ -630,8 +426,8 @@ static int concat_execute(struct nn_node *self, struct nn_graph *nn, int with_hv
 	struct tensor *out_tensor = self->outputs[0];
 	struct tensor *out_min_tensor = self->outputs[1];
 	struct tensor *out_max_tensor = self->outputs[2];
-
-	struct concat_input_descriptor *indescs = (struct concat_input_descriptor*)self->opaque;
+	struct concat_info *info = self->opaque;
+	struct concat_input_descriptor *indescs = info->descriptors;
 
 	struct shape out_shape;
 	int32_t k;
@@ -657,7 +453,7 @@ static int concat_execute(struct nn_node *self, struct nn_graph *nn, int with_hv
 	// find the combined range of all inputs...
 	// and record them in the indescs.
 	for (i = 0; i < n_input_tensors; i++) {
-		if (input_tensors[i]->format.layout != NN_LAYOUT_D32) {
+		if (!tensor_is_d32(input_tensors[i])) {
 			return errlog(nn,"need d32 inputs");
 		}
 		float in_min = tensor_get_float(min_tensors[i],0);
@@ -695,8 +491,8 @@ static int concat_execute(struct nn_node *self, struct nn_graph *nn, int with_hv
 	if( out_shape.width == 1 ) wpad_out_left = 0;
 
 	// (2) inferred padding
-	int wpad_out_right = (-(wpad_out_left+out_shape.width))&3;
-	int dpad_out_after = (-(dpad_out_before+out_shape.depth))&31;
+	int wpad_out_right = (-(int32_t)(wpad_out_left+out_shape.width))&3;
+	int dpad_out_after = (-(int32_t)(dpad_out_before+out_shape.depth))&31;
 
 	if (tensor_out_prepare_padded_d32(
 		out_tensor,
@@ -809,6 +605,7 @@ static int concat_execute(struct nn_node *self, struct nn_graph *nn, int with_hv
 		nn_sem_init(&rundesc.thrinfo[i].done_sem, 0);
 		nn_os_work_for_vector(nn,concat_copy_inputs,&rundesc.thrinfo[i]);
 	}
+	nn_os_work_for_vector(nn,concat_earlywork,info);
 	for( i = 0; i < num_actual_threads; i++ ){
 		nn_sem_wait(&rundesc.thrinfo[i].done_sem);
 	}
@@ -854,9 +651,15 @@ static int concat_check(struct nn_node *self, struct nn_graph *nn)
 
 	if( k!=0) return k;
 
-	void * indescs = nn_malloc( n_in * sizeof(struct concat_input_descriptor));
+	struct concat_input_descriptor *indescs = nn_calloc(n_in, sizeof(*indescs));
 	if (indescs == NULL) return errlog( nn, "can't allocate input descs");
-	self->opaque = indescs;
+	struct concat_info *info = nn_calloc(1,sizeof(*info));
+	if (info == NULL) {
+		nn_free(indescs);
+		return errlog(nn,"can't allocate info");
+	}
+	info->descriptors = indescs;
+	self->opaque = info;
 
 	logmsg(nn,2,"concat_d32 node %p check OK",self);
 	return 0;
@@ -864,12 +667,20 @@ static int concat_check(struct nn_node *self, struct nn_graph *nn)
 
 static int concat_dtor(struct nn_node *self, struct nn_graph *nn)
 {
-	void *opq = self->opaque;
-	if (opq != NULL) {
-		nn_free(opq);
-	}
+	struct concat_info *info = self->opaque;
+	if (info == NULL) return node_free_common(self,nn);
+	if (info->descriptors) nn_free(info->descriptors);
+	nn_free(info);
 	self->opaque = NULL;
 	return node_free_common(self,nn);
+}
+
+static int concat_earlywork_register(struct nn_node *self, struct nn_graph *nn, struct nn_early_work *work)
+{
+	struct concat_info *info = self->opaque;
+	if (info == NULL) return errlog(nn,"Oops: no supernode info available");
+	info->next_earlywork = work;
+	return 0;
 }
 
 struct nn_node_ops nn_ops_for_QuantizedConcat_8_d32 = {
@@ -877,6 +688,8 @@ struct nn_node_ops nn_ops_for_QuantizedConcat_8_d32 = {
 	.check = concat_check,
 	.ctor = node_alloc_common,
 	.dtor = concat_dtor,
+	.earlywork_register = concat_earlywork_register,
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };
 
 
@@ -885,6 +698,7 @@ struct nn_node_ops nn_ops_for_QuantizedConcat_8_d32_ref = {
 	.check = concat_check,
 	.ctor = node_alloc_common,
 	.dtor = concat_dtor,
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };
 
 #ifdef CONCAT_HAS_HVX_INTRIN

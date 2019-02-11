@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -36,14 +36,28 @@
 #define NN_ATOMIC_H 1
 
 #include <stdint.h>
+#include "nn_graph_builtin.h"
 
-#ifdef __hexagon__
+#if defined(__hexagon__)
 static inline uint64_t nn_atomic_add64(uint64_t volatile *p, uint64_t v)
 {
 	uint64_t t;
 	asm volatile (	"1: %0 = memd_locked(%3)\n"
 		"   %0 = add(%0,%2)\n"
 		"   memd_locked(%3,p0) = %0\n"
+		"   if (!p0) jump:nt 1b\n"
+		:"=&r"(t),"+m"(*p)
+		:"r"(v),"r"(p)
+		:"p0");
+	return t;
+}
+
+static inline uint64_t nn_atomic_add32(uint32_t volatile *p, uint32_t v)
+{
+	uint32_t t;
+	asm volatile (	"1: %0 = memw_locked(%3)\n"
+		"   %0 = add(%0,%2)\n"
+		"   memw_locked(%3,p0) = %0\n"
 		"   if (!p0) jump:nt 1b\n"
 		:"=&r"(t),"+m"(*p)
 		:"r"(v),"r"(p)
@@ -74,6 +88,10 @@ static inline int32_t nn_atomic_cas32(int32_t volatile *p, int32_t oldv, int32_t
 		:"r"(oldv),"r"(newv),"r"(p)
 		:"p0");
 	return t;
+}
+static inline uint32_t nn_atomic_casu32(uint32_t volatile *p, uint32_t oldv, uint32_t newv)
+{
+	return (uint32_t)nn_atomic_cas32((int32_t volatile *)p,(int32_t)oldv,(int32_t)newv);
 }
 
 static inline void nn_atomic_min(int32_t volatile *p, int32_t newmin)
@@ -131,6 +149,80 @@ static inline void nn_atomic_max(int32_t volatile *p, int32_t newmax)
 	}
 }
 #endif
+
+/////////////////////////////////////////////////////////
+// This is a mechanism to efficiently convert 'jobno' to jobno % inner_count and jobno/inner_count
+// in the case where jobno increases from 0 but not continuously. Eliminates use of integer-divide
+// and associated function call.
+//
+typedef struct  {
+	int inner_count;	// # of jobs/batch
+	int ibatch;			//	current batch
+	int ibat_x_inner;	// cache of -ibatch*inner_count
+} batchslice_decode;
+
+static inline void __attribute__((always_inline)) batchslice_decode_init( batchslice_decode * bsmp, int inner_count )
+{
+	bsmp->inner_count =  inner_count;
+	bsmp->ibatch = bsmp->ibat_x_inner = 0;
+}
+
+// This returns i_in = jobno%inner_count, and sets ibatch = jobno/inner_count, without
+// doing integer divide. It requires that 'jobno' will never decrease from call to call,
+// and assumes (for performance) that ibatch is usually the same from call to call. Both
+// the init and update functions should be inlined in the same function where the struct
+// is declared, so the struct just becomes 3 local vars with full visibility to the optimizer.
+//
+static inline int __attribute__((always_inline)) batchslice_decode_update( batchslice_decode * bsmp, int jobno )
+{
+	int i_in = jobno + bsmp->ibat_x_inner;		// correct, if < inner_count.
+	if( i_in >= bsmp->inner_count){
+		do{
+			bsmp->ibatch++;
+			i_in -= bsmp->inner_count;
+		}while( __builtin_expect( i_in >= bsmp->inner_count,0) );
+		bsmp->ibat_x_inner = i_in-jobno;
+	}
+	return i_in;
+}
+//
+// recommended use:
+//  ===> before launching threads:
+//          runstate.jobno = 0;		// volatile int
+//          runstate.jobcount = inner_count * batches;
+//          runstate.inner_count = inner_count;
+//
+//  ===> Worker thread:
+//
+//   worker_thread( ... ){
+//      ...
+//       batchslice_decode bsdecode;
+//       batchslice_decode_init( &bsdecode, runstatep->inner_count );
+//
+//       int njobs = runstatep->njobs;	// doesn't hurt to hoist this; not mandatory
+//       int ijob;			// this is the job # 0.. njobs-1
+//		 // divide the jobs between this and all other threads using locked add;
+//       // each loop obtains a new job #, which is decoded to ibatch and i_inner.
+//
+//       while(  (ijob = __sync_fetch_and_add( &rrunstatep->jobno,1)), ijob < njobs ){
+//
+//       	int i_inner = batchslice_decode_update( &bsdecode, ijob);
+//			int ibatch = bsdecode.ibatch;
+//
+//          /*
+//           * ***   process for i_inner of ibatch ***
+//           */
+//       }
+//    }
+//
+// typical code for batchslice_decode_update
+//  ( r2 = jobno, r26 = inner_count, r22 = ibatch, r27 = ibat_x_inner, r3 = result):
+//
+//  		{ r3 = add(r27,r2);               if (cmp.gt(r26,r3.new)) jump:t .L2  }
+// .L1: 	{ r27 = sub(r27,r26);             r22 = add(r22,#1) }
+//          { r3 = add(r2,r27);               if (!cmp.gt(r26,r3.new)) jump:nt .L1 }
+// .L2:
+//
 
 
 

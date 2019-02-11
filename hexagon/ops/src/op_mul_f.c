@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -40,17 +40,24 @@
 #include <math.h>
 #include <nn_broadcast.h>
 
-static inline float mul_helper(float a, float b, void *u)
-{
-	return a*b;
-}
+#define OPERATOR_MUL(X,Y) ((X)*(Y))
+BROADCAST_STRIDE_11_FUNC( mul_f_stride_11, float, OPERATOR_MUL)
+BROADCAST_STRIDE_10_FUNC( mul_f_stride_10, float, OPERATOR_MUL )
+
+
+static const struct elementwise_funcs Mul_f_funcs = {
+	.op_stride_11 = mul_f_stride_11,
+	.op_stride_10 = mul_f_stride_10,
+	.op_rev_stride_01 = mul_f_stride_10,
+	.in_elbytes = 4,
+	.out_elbytes = 4,
+	.out_typecode =  NN_TYPE_FLOAT
+};
 
 static int mul_f_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	logmsg(nn,2,"mul_f node %p",self);
-	return broadcast_elementwise_execute_f(self,nn,mul_helper, NULL);
+	return nn_elementwise_with_broadcast( self, nn, &Mul_f_funcs, NULL );
 }
-
 static int mul_f_check(struct nn_node *self, struct nn_graph *nn)
 {
 	int k;

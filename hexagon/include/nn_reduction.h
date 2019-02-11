@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -125,7 +125,7 @@ nn_find_reduction_shape(	struct nn_node *self,struct nn_graph *nn,
 
 
 #define CREATE_REDUCTION_INLINE(TYPENAME,TYPE,OUTTYPECODE) \
-static inline TYPE nn_do_1d_reduction_##TYPENAME( \
+static inline TYPE __attribute__((always_inline)) nn_do_1d_reduction_##TYPENAME( \
 	const TYPE *in, \
 	int n,\
 	int stride,\
@@ -137,7 +137,7 @@ static inline TYPE nn_do_1d_reduction_##TYPENAME( \
 	for(i=0;i<n;i++) tmp = (*f)(tmp,in[i*stride]);\
 	return tmp;\
 }\
-static inline int nn_reduction_##TYPENAME( \
+static inline int __attribute__((always_inline)) nn_reduction_##TYPENAME( \
 	struct nn_node *self, \
 	struct nn_graph *nn, \
 	TYPE (*f)(TYPE, TYPE), \

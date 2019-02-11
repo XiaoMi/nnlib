@@ -1,6 +1,5 @@
-
 /*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -33,19 +32,26 @@
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
-#include <stdint.h>
-/*
- * 
- * Now that that's out of the way, let's get to the good stuff.
- * 
- * This contains definitions for things used in our little app.
- *//* Put some common funcs here */
 
-void info_for_debug(unsigned int id, const char *name, const char *opname);
-const char *info_id2name(unsigned int id);
-const char *info_id2opname(unsigned int id);
-uint32_t graph_setup();
-void graph_execute(uint32_t nn_id);
-void graph_perfdump(uint32_t nn_id);
-void graph_teardown(uint32_t nn_id);
-int graph_get_all_perf(uint32_t id);
+#ifndef HEXAGON_NN_NN_AXIS_H
+#define HEXAGON_NN_NN_AXIS_H
+
+#include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include "nn_graph.h"
+
+#define DIM_NUM 4   //number of dimensions
+
+//Convert the negative axis to be positive
+//return -1 if the axis is out of range
+static inline int32_t handle_negative_axis(const int32_t axis) {
+
+    if (axis < DIM_NUM*(-1) || axis >= DIM_NUM)    return -1;
+    if (axis < 0) {
+        return axis + DIM_NUM;
+    }
+    return axis;
+}
+
+#endif //HEXAGON_NN_NN_AXIS_H

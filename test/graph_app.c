@@ -56,6 +56,11 @@
 #define DUMP_PMU() /* NOTHING */
 #endif
 
+#ifdef __hexagon__
+#ifdef USE_OS_QURT
+int qtest_get_cmdline(char *, int);
+#endif
+#endif
 
 #ifdef ANDROID
 #if 0
@@ -85,7 +90,7 @@ void fastrpc_setup(int MCPS, int MBPS, int DCVS_DISABLE)
 	};
 	if (DCVS_DISABLE) {
 		retVal = hexagon_nn_disable_dcvs();
-		if (retVal) printf("Failed to disable DSP DCVS: %x!\n",retVal);
+		if (retVal) printf("Failed to disable DSP DCVS (did you ever use SDK to generate a testsig?): %x!\n",retVal);
 	}
 	retVal = dspCV_initQ6_with_attributes(attrib,
 			 sizeof(attrib) / sizeof(attrib[0]));
@@ -129,74 +134,6 @@ struct basicperf {
 //uint8_t test_int_data[224*224*3];
 //extern float test_float_data[224*224*3];
 
-#ifdef SNPE_TEST
-char file_path[] = "/usr2/oguniyam/git_repo/cnn/setup/snpe-0.7.0_internal/models/googlenet/data/";
-uint8_t test_int_data[224*224*3];
-float test_float_data[224*224*3];
-
-void remove_space(char *src, char *dst)
-{
-	// Removing space in string
-	do while(isspace(*src)) src++; while((*dst++ = *src++));
-}
-
-
-void read_data_from_file(char *file_name)
-{
-	char full_path1[200], full_path[200];
-	FILE * fp;
-	int i, j, ret_size;
-	float temp1, temp2;
-
-	// Form full file path (relative) to read raw data
-	strcpy(full_path1,file_path);
-	strcat(full_path1,file_name);
-	remove_space(full_path1, full_path);
-	printf("File used: %s\n", full_path);
-
-	fp = fopen(full_path, "rb");
-	if (fp==NULL)
-		printf("File does not exist!!!\n");
-
-	// Read image (224x224x3) for inceptionv1 network - values are in RGBRGBRGB float format
-	clearerr(fp);
-	rewind(fp);
-	ret_size = fread(test_float_data, 1, sizeof(test_float_data), fp);
-	if(ret_size != sizeof(test_float_data))
-		printf("Full data not read from file , ret_size=%d, size(array)=%d!!!\n", ret_size, sizeof(test_float_data));
-	printf("fp=0x%p, Read size = %d, feof:%d, ferror:%d \n", fp, ret_size, feof(fp), ferror(fp));
-
-	for(i=0,j=0;i<sizeof(test_int_data);i+=3,j++)
-	{
-		//test_float_data[i] = ((test_float_data[i]+104)/256)-1;
-		//test_float_data[i+1] = ((test_float_data[i+1]+117)/256)-1;
-		//test_float_data[i+2] = ((test_float_data[i+2]+123)/256)-1;
-
-		// Input from the file is in BGR format
-		// our network needs the input in RGB format
-		// Convert BGR to RGB format
-		// 104, 123 and 117 are the offsets needed to bring the input within +/-1
-		temp1 = ((test_float_data[i]+104)/128)-1;
-		temp2 = ((test_float_data[i+2]+123)/128)-1;
-		test_float_data[i+2] = temp1;
-		test_float_data[i+1] = ((test_float_data[i+1]+117)/128)-1;
-		test_float_data[i] = temp2;
-
-		test_int_data[i] = (uint8_t)(round((1+test_float_data[i])*128));
-		test_int_data[i+1] = (uint8_t)(round((1+test_float_data[i+1])*128));
-		test_int_data[i+2] = (uint8_t)(round((1+test_float_data[i+2])*128));
-
-		//test_int_data[i] = (uint8_t) (round(test_float_data[i]));
-		//test_int_data[i+1] = (uint8_t) (round(test_float_data[i+1]));
-		//test_int_data[i+2] = (uint8_t) (round(test_float_data[i+2]));
-
-		if(j<20)
-			printf("Value[%d]=%f, %d\n",j, test_float_data[j], test_int_data[j]);
-	}
-
-	fclose(fp);
-}
-#endif
 
 #ifndef APP_LOOPS
 #define APP_LOOPS 1
@@ -240,7 +177,7 @@ static int run(uint32_t id, void *input, int elementsize, int width, int height,
 	/* If option says so, pretty print float data in some way */
 	if (options->pprint_floats) pprint_floats(output,output_size/sizeof(float));
 	/* If option says so, pretty print imagenet data */
-	if (options->pprint_imagenet) imagenet_top5(output,output_size/sizeof(float));
+	if (options->pprint_labels) top5(output,output_size/sizeof(float));
 	return ret;
 }
 
@@ -282,6 +219,23 @@ static int do_layer_reorder(char *data, int elementsize, int depth, int area, co
 	return 0;
 }
 
+// Convert a tensor of uchar into a tensor of floats
+float *uint8_to_float(uint8_t *data, size_t length, float zero, float max) {
+
+	// Allocate enough ION to hold all the new floats
+	float *float_data;
+	if ((float_data = rpcmem_alloc(ION_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, sizeof(float)*length)) == NULL) {
+		printf("malloc failed\n");
+		return NULL;
+	}
+
+	// Scale the uint8t data into floats
+	for (int i=0; i<length; i++) {
+		float_data[i] = (data[i] * (max-zero) / 255) + zero;
+	}
+	return float_data;
+}
+
 static int load_and_run(uint32_t id, const char *filename, struct options *options, struct options *assumed, struct basicperf *basicperf, unsigned long long int *appreported)
 {
 	FILE *f;
@@ -298,7 +252,7 @@ static int load_and_run(uint32_t id, const char *filename, struct options *optio
 	void *data;
 	void *output;
 	int i;
-	int ret;
+	int ret = -1;
 	unsigned long long int lastreport = 0;
 	if ((output = rpcmem_alloc(ION_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, OUTPUT_SIZE)) == NULL) {
 		printf("error: malloc fail");
@@ -321,7 +275,7 @@ static int load_and_run(uint32_t id, const char *filename, struct options *optio
 	if ((filesize % elementsize != 0)
 		|| (elements % depth != 0)
 		|| (height * width != area)) {
-		printf("image size %d does not match "
+		printf("image size %zu does not match "
 			"element size %d, "
 			"depth %d, "
 			"width %d, "
@@ -333,7 +287,7 @@ static int load_and_run(uint32_t id, const char *filename, struct options *optio
 			height);
 		return -1;
 	}
-	printf("filesize=%d elementsize=%d height=%d width=%d depth=%d\n",
+	printf("filesize=%zu elementsize=%d height=%d width=%d depth=%d\n",
 		filesize,elementsize,height,width,depth);
 	if ((data = rpcmem_alloc(ION_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, filesize)) == NULL) {
 		printf("malloc failed\n");
@@ -350,6 +304,11 @@ static int load_and_run(uint32_t id, const char *filename, struct options *optio
 			return -1;
 		}
 	}
+	if (options->input_to_float) {
+		data = uint8_to_float(data,filesize,options->float_zero,options->float_max);
+		elementsize = sizeof(float);
+	}
+
 	for (i = 0; i < iters; i++) {
 		if ((ret = run(id,data,elementsize,width,height,options,basicperf,output,(i==iters-1))) != 0) {
 			printf("run failed: %d\n",ret);
@@ -371,6 +330,34 @@ static int load_and_run(uint32_t id, const char *filename, struct options *optio
 
 int main(int argc, const char **argv)
 {
+#ifdef __hexagon__
+#ifdef USE_OS_QURT
+
+    char *buf = malloc(1024);
+    if (!buf) return -1;
+    char *argvbuf = malloc(1024);
+    if (!argvbuf)
+    {
+        free(buf);
+        return -1;
+    }
+    // char buf[1024];  // for holding & parsing the command line
+    // char argvbuf[1024];
+
+    argv = (const char**) argvbuf;
+    argc = 0;
+
+    // system call to retrieve the command line, supported by q6 simulator.
+    qtest_get_cmdline(buf, 1024);
+
+    // 1st argv is the program being run (i.e. "fastcv_test.ext") and its path
+    argv[0] = strtok(buf, " ");
+
+    // loop to pick up the rest of the command line args from the command line
+    while (NULL != (argv[++argc] = strtok(NULL, " "))) {};
+#endif // #ifdef USE_OS_QURT
+#endif
+
 	int i;
 	uint32_t graph_id;
 	struct options options;
@@ -396,8 +383,24 @@ int main(int argc, const char **argv)
 		}
 	}
 
+    // This will print to the STDOUT the shared object addresses for symbols in
+    // the variable named libraries shown.  You must take those addresses and
+    // subtract them from the symbols maps via objdump to yield values compatible
+    // with pytem config_etm.py for the elfList=[]
 	if (options.showaddress) {
-               printf("INFO: Your var is at 0x%08x\n", (int)hexagon_nn_get_dsp_offset());
+            uint32_t libhexagon_addr;
+            uint32_t fastrpc_shell_addr;
+	    hexagon_nn_get_dsp_offset(&libhexagon_addr,&fastrpc_shell_addr);
+            printf("libhexagon_nn_skel.so 0x%08x\nfastrpc_shell_3.so 0x%08x\n",
+                 (unsigned int)libhexagon_addr,(unsigned int)fastrpc_shell_addr);
+	}
+
+	/* Load labels from file, if specified*/
+	if (options.labels_filename) {
+		if (load_labels(options.labels_filename) != 0) {
+			printf("Error loading labels from file\n");
+			return -1;
+		}
 	}
 
 	/* Set up environment */
@@ -417,7 +420,6 @@ int main(int argc, const char **argv)
 		}
 	}
 
-
 	for (i = 1; i < argc; ) {
 		/* Skip flags */
 		if (is_option_flag(argv[i])) {
@@ -432,6 +434,8 @@ int main(int argc, const char **argv)
 		i++;
 	}
 
+	/* Free memory allocated to labels, if specified */
+	if (options.labels_filename) free_labels();
 	if (!options.benchmark) printf("AppReported: %llu\n", appreported);
 	if (options.benchmark) return 0;
 

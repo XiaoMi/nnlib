@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -44,6 +44,44 @@
 #include <nn_graph.h>
 #include <string.h>
 
+#define MASK_UPDATE_RANGE(BIT, DIM) \
+{ \
+	if (BIT & shrink_mask) { \
+		DIM##_stop = DIM##_start + 1; \
+		DIM##_step = 1; \
+	} else { \
+		if (BIT & begin_mask) DIM##_start = (DIM##_step < 0) ? DIM##_in-1 : 0; \
+		if (BIT & end_mask) DIM##_stop = (DIM##_step < 0) ? -1 : DIM##_in; \
+	}\
+}
+
+static inline int get_out_size(int start, int stop, int step) {
+	int range = (stop > start) ? (stop - start) : (start - stop);
+	if (step < 0) step = -step;
+	return (range + step - 1) / step;
+}
+
+static inline void update_out(int shrink_mask, int * b, int * h, int * w, int * d) {
+	struct shape scratch_shape = { { { *b, *h, *w, *d } } };
+	struct shape out_shape = { { { 1, 1, 1, 1 } } };
+	int read_idx, write_idx;
+	write_idx = 3;
+	// collect dimensions from right
+	for (read_idx = 3; read_idx >= 0; read_idx--) {
+		if (0 == ((1 << read_idx) & shrink_mask)) {
+			out_shape.dimension[write_idx--] = scratch_shape.dimension[read_idx];
+		}
+	}
+	*b = out_shape.batches;
+	*h = out_shape.height;
+	*w = out_shape.width;
+	*d = out_shape.depth;
+}
+
+static inline int is_in_range(int cur, int stop, int dir) {
+	return (dir > 0) ? (cur < stop) : (cur > stop);
+}
+
 static int strided_slice_impl(
 	struct nn_node *self,
 	struct nn_graph *nn,
@@ -53,6 +91,10 @@ static int strided_slice_impl(
 	const struct tensor *start_tensor = self->inputs[1];
 	const struct tensor *stop_tensor = self->inputs[2];
 	const struct tensor *step_tensor = self->inputs[3];
+	// optional parameters - cannot be optional for quantized op as input min/max come after
+	//const struct tensor *begin_mask_tensor = self->inputs[4];
+	//const struct tensor *end_mask_tensor = self->inputs[5];
+	//const struct tensor *shrink_mask_tensor = self->inputs[6];
 	struct tensor *out_tensor = self->outputs[0];
 	int b_in = input_tensor->shape.batches;
 	int h_in = input_tensor->shape.height;
@@ -73,21 +115,39 @@ static int strided_slice_impl(
 	int h_step = (order < 3) ? 1 : tensor_get_int32(step_tensor,order-3);
 	int w_step = (order < 2) ? 1 : tensor_get_int32(step_tensor,order-2);
 	int d_step = (order < 1) ? 1 : tensor_get_int32(step_tensor,order-1);
+	int begin_mask = 0;
+	int end_mask = 0;
+	int shrink_mask = 0;
 
-	int b_out = (b_stop - b_start + b_step - 1) / (b_step);
-	int h_out = (h_stop - h_start + h_step - 1) / (h_step);
-	int w_out = (w_stop - w_start + w_step - 1) / (w_step);
-	int d_out = (d_stop - d_start + d_step - 1) / (d_step);
+	if (self->n_inputs > 6) {
+		begin_mask = tensor_get_int32(self->inputs[4], 0);
+		end_mask = tensor_get_int32(self->inputs[5], 0);
+		shrink_mask = tensor_get_int32(self->inputs[6], 0);
+
+		MASK_UPDATE_RANGE(0x1, b);
+		MASK_UPDATE_RANGE(0x2, h);
+		MASK_UPDATE_RANGE(0x4, w);
+		MASK_UPDATE_RANGE(0x8, d);
+	}
+
+	// check stride before dividing with it
+	if (0 == b_step) return errlog(nn,"invalid b_step");
+	if (0 == h_step) return errlog(nn,"invalid h_step");
+	if (0 == w_step) return errlog(nn,"invalid w_step");
+	if (0 == d_step) return errlog(nn,"invalid d_step");
+
+	// for setting output shape only
+	int b_out = get_out_size(b_start, b_stop, b_step);
+	int h_out = get_out_size(h_start, h_stop, h_step);
+	int w_out = get_out_size(w_start, w_stop, w_step);
+	int d_out = get_out_size(d_start, d_stop, d_step);
+
+	update_out(shrink_mask, &b_out, &h_out, &w_out, &d_out);
 
 	int out_elements = b_out*h_out*w_out*d_out;
 	uint32_t total_bytes = out_elements * element_size;
 	int b,h,w,d;
 	int offset;
-
-	if (b_stop == 0) b_stop = b_in;
-	if (w_stop == 0) w_stop = w_in;
-	if (h_stop == 0) h_stop = h_in;
-	if (d_stop == 0) d_stop = d_in;
 
 	logmsg(nn,2,"start_tensor: %d %d %d %d stop: %d %d %d %d step: %d %d %d %d",
 		tensor_get_int32(start_tensor,0),
@@ -102,6 +162,7 @@ static int strided_slice_impl(
 		tensor_get_int32(step_tensor,1),
 		tensor_get_int32(step_tensor,2),
 		tensor_get_int32(step_tensor,3));
+	logmsg(nn,2,"begin_mask: %x end_mask: shrink_mask: %x", begin_mask, end_mask, shrink_mask);
 	logmsg(nn,2,"slice node %p execute order=%d in=%dx%dx%dx%d start=%dx%dx%dx%d stop=%dx%dx%dx%d step=%dx%dx%dx%d out=%dx%dx%dx%d", 
 		self,order,
 		b_in,h_in,w_in,d_in,
@@ -109,6 +170,12 @@ static int strided_slice_impl(
 		b_stop,h_stop,w_stop,d_stop,
 		b_step,h_step,w_step,d_step,
 		b_out,h_out,w_out,d_out);
+
+	if (0 == out_elements) return errlog(nn,"no output");
+	if (b_out < 0) return errlog(nn, "invalid b_out");
+	if (h_out < 0) return errlog(nn, "invalid h_out");
+	if (w_out < 0) return errlog(nn, "invalid w_out");
+	if (d_out < 0) return errlog(nn, "invalid d_out");
 	if (total_bytes > out_tensor->max_size) {
 		return errlog(nn,"out too small, %d > %d",total_bytes,out_tensor->max_size);
 	}
@@ -116,10 +183,10 @@ static int strided_slice_impl(
 	tensor_set_shape(out_tensor,b_out,h_out,w_out,d_out);
 	out_tensor->data_size = total_bytes;
 
-	for (b = b_start; b < b_stop; b += b_step) {
-		for (h = h_start; h < h_stop; h += h_step) {
-			for (w = w_start; w < w_stop; w += w_step) {
-				for (d = d_start; d < d_stop; d += d_step) {
+	for (b = b_start; is_in_range(b, b_stop, b_step); b += b_step) {
+		for (h = h_start; is_in_range(h, h_stop, h_step); h += h_step) {
+			for (w = w_start; is_in_range(w, w_stop, w_step); w += w_step) {
+				for (d = d_start; is_in_range(d, d_stop, d_step); d += d_step) {
 					offset = element_size*(b*h_in*w_in*d_in 
 						+ h*w_in*d_in
 						+ w*d_in
@@ -146,15 +213,15 @@ static int sslice_execute_1b(struct nn_node *self, struct nn_graph *nn)
 
 static int sslice_execute_q8(struct nn_node *self, struct nn_graph *nn)
 {
-	tensor_copy(self->outputs[1],self->inputs[4]);
-	tensor_copy(self->outputs[2],self->inputs[5]);
+	tensor_copy(self->outputs[1],self->inputs[7]);
+	tensor_copy(self->outputs[2],self->inputs[8]);
 	return strided_slice_impl(self,nn,1);
 }
 
 static int sslice_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"checking slice node %p",self);
-	if (self->n_inputs != 4) return errlog(nn,"num inputs");
+	if (self->n_inputs != 4 && self->n_inputs != 7) return errlog(nn,"num inputs");
 	if (self->n_outputs != 1) return errlog(nn,"num outputs");
 	return 0;
 }
@@ -162,7 +229,7 @@ static int sslice_check(struct nn_node *self, struct nn_graph *nn)
 static int sslice_check_q8(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"checking slice node %p",self);
-	if (self->n_inputs != 6) return errlog(nn,"num inputs");
+	if (self->n_inputs != 9) return errlog(nn,"num inputs");
 	if (self->n_outputs != 3) return errlog(nn,"num outputs");
 	return 0;
 }

@@ -1,7 +1,7 @@
 
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -42,7 +42,7 @@
 #define mpyrsat(x,y)    (Q6_R_asrh_R(Q6_R_mpy_RlRl_s1_rnd_sat((x),(y))))
 
 #else
-short cl0(unsigned short x) {
+static short cl0(unsigned short x) {
     int l0;
     if(x == 0) return(0);
     for(l0=0; l0<16; l0++) { 
@@ -50,12 +50,12 @@ short cl0(unsigned short x) {
     }
     return  l0;
 }
-short sat_16(long long int x) { 
+static short sat_16(long long int x) {
   short y;
   if(x > 32767) y = 32767; else if(x <-32768) y =-32768; else y = (short) x;
   return(y);
 }
-short mpyrsat(short x, short y)
+static short mpyrsat(short x, short y)
 {
     long long int a = (long long int)x;
     long long int b = (long long int)y;

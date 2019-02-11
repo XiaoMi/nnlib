@@ -45,4 +45,8 @@
 #include "hexagon_types.h"
 #endif
 
+// This creates:
+//  nn_ops_for_QuantizedSub_8p8to32
+//  nn_ops_for_QuantizedSub_8p8to32_ref
+
 CREATE_OP_ADD_SUB(sub, Sub, -)

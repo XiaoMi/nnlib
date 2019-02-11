@@ -42,8 +42,9 @@
  * This contains definitions for things used internally.
  */
 #include <stdarg.h>
+#include "nn_graph_builtin.h"
 
-#define MAX_STRING_LEN 4096
+#define MAX_STRING_LEN 1024
 
 #ifdef USE_OS_QURT
 #include <HAP_farf.h>
@@ -55,49 +56,33 @@
 
 void logv(const char *filename, unsigned int line, struct nn_graph *nn, int level, const char *fmt, va_list ap);
 
-static inline void logmsg_function(const char *filename, unsigned int line, struct nn_graph *nn, int level, const char *fmt, ...)
-{
-	if ((nn!=NULL) && (level > nn->debug_level)) return;
-	char buffer[MAX_STRING_LEN];
-	va_list ap;
-	va_start(ap,fmt);
-	vsnprintf(buffer,MAX_STRING_LEN,fmt,ap);
-	FARF(ALWAYS,buffer);
-	if (nn!=NULL) logv(filename,line,nn,level,buffer,NULL);
-	va_end(ap);
-}
+void nn_logmsg_function(const char *filename, unsigned int line, struct nn_graph *nn, int level, const char *fmt, ...);
+// NOTE: the wrapper for this ignores the return value and assumes it's -1, to improve optimization in the
+// area of the call site.
+int nn_errlog_function(const char *filename, unsigned int line, struct nn_graph *nn, const char *fmt, ...);
 
-static inline int errlog_function(const char *filename, unsigned int line, struct nn_graph *nn, const char *fmt, ...)
-{
-	char buffer[MAX_STRING_LEN];
-	va_list ap;
-	va_start(ap,fmt);
-	vsnprintf(buffer,MAX_STRING_LEN,fmt,ap);
-	FARF(ALWAYS,buffer);
-	if (nn!=NULL) logv(filename,line,nn,0,buffer,NULL);
-	va_end(ap);
-	return -1;
-}
 
-// if NN_LOG_MAXLEV defined, all log(nn,lev,..) are disaabled at compile time, where lev < maxlev
-// NOTE: if there are side-effects in the parameters to logmsg, they will be not
-// be evaluated if the logging is disabled due to lev > NN_LOGMAX, but they will be
-// evaluated if the call is disabled due to lev > nn->debug_level. So, avoid that.
+
+// if NN_LOG_MAXLEV defined, all log(nn,lev,..) are disabled at compile time, where lev > NN_LOG_MAXLEV
+// (but only where 'lev' is a compile-time constant).
+// NOTE: if there are side-effects in the parameters to logmsg, they will be only
+// be evaluated if the logging is actually done; if lev > NN_LOGMAX, or lev > nn->debug_level, the side-effects
+// will be bypassed.
 //
 #ifdef NN_LOG_MAXLEV
 #if NN_LOG_MAXLEV < 0
 // must pretend to expand the call, or you get unused variable warnings
-#define logmsg(NN,LEVEL,...)  ({if(0)logmsg_function("",0,NN,LEVEL,__VA_ARGS__);})
+#define logmsg(NN,LEVEL,...)  ({if(0)nn_logmsg_function("",0,NN,LEVEL,__VA_ARGS__);})
 #else
-#define logmsg(NN,LEVEL,...) ({ if(( !__builtin_constant_p(LEVEL)) || (LEVEL <= NN_LOG_MAXLEV)) \
-				logmsg_function(__FILE__,__LINE__,NN,LEVEL,__VA_ARGS__); })
+#define logmsg(NN,LEVEL,...) do { if(( !__builtin_constant_p(LEVEL)) || ((LEVEL) <= NN_LOG_MAXLEV)) \
+		if((LEVEL) <= (NN)->debug_level)nn_logmsg_function(__FILE__,__LINE__,NN,LEVEL,__VA_ARGS__); } while(0)
 #endif
 #else // no NN_LOG_MAXLEV
-#define logmsg(NN,LEVEL,...) logmsg_function(__FILE__,__LINE__,NN,LEVEL,__VA_ARGS__);
+#define logmsg(NN,LEVEL,...) ({if((LEVEL) <= (NN)->debug_level)nn_logmsg_function(__FILE__,__LINE__,NN,LEVEL,__VA_ARGS__);})
 #endif
 
-
-#define errlog(...) errlog_function(__FILE__,__LINE__,__VA_ARGS__)
+// nn_errlog_function assumed to return -1, to improve optimization in area of call.
+#define errlog(...) (nn_errlog_function(__FILE__,__LINE__,__VA_ARGS__),-1)
 
 
 

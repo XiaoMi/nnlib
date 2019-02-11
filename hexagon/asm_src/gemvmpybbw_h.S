@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -59,9 +59,10 @@
 /*     CODESIZE = 1040 bytes                                            */
 /*     STACK    = 48 bytes                                              */
 /*     ASSUMPTIONS                                                      */
-/*        y and z are 128 byte aligned                                  */
-/*        x is16byte aligned                                            */
-/*        K%16=0 M%32=0                                                 */
+/*        ptr_be, ptr_c are 128 byte aligned                            */
+/*        ptr_a is 16 byte aligned                                      */
+/*        K >= 16, K%16=0                                               */
+/*        1<= M <=32                                                    */
 /*  C MODEL                                                             */
 /*======================================================================*/
 #if 0
@@ -76,13 +77,20 @@ void gemvmpybbw_cn(
             for (k=0; k < K; k++) {
               a_val = a[k];
               b_val = b[k*M+j];
-              sum  += a_val * b_val ;
+              sum  += (a_val + a_off) * (b_val + b_off);
             }
             c[j] = sum;
         }
     }
     return;
 }
+	// actually done as..
+              sum += a_val * b_val;
+              asum += a_val
+              bsum += b_val
+            }
+            c[j] = sum + a_off*bsum + b_off*asum + K*a_off*b_off
+        }
 #endif
 /*=============================================================================*/
         .text
@@ -143,6 +151,7 @@ gemvmpybbw_asm:
        .balign 32
 .L_32:
        {
+       	   p1 = cmp.gt(k,#31)                // must be >= 32 to need at least one loop
            ptr_bo = add(ptr_be, #128)        //[ , P]
            ki = lsr(k, #4)                   //k / 16
        } {
@@ -167,6 +176,8 @@ gemvmpybbw_asm:
            z0.uw += vrmpy(y2.ub, xbx8.ub)    //[0, 4]
            bsum.uw += vrmpy(y2.ub, c0101.ub) //[0, 4]
            sum1 = #0
+       } {
+           if( !p1 ) jump:nt .L_loop0
        }
 /*============================================================================*/
        .balign 32
@@ -194,6 +205,7 @@ gemvmpybbw_asm:
            bsum.uw += vrmpy(y2.ub, c0101.ub) //[1, 4]
        }:endloop0 
 /*=============================================================================*/
+.L_loop0:
        {   y3.tmp = vmem(ptr_bo++#2)         //[1, 5]32x4
            z0.uw += vrmpy(y3.ub, xfxc.ub)    //[1, 5]
            bsum.uw += vrmpy(y3.ub, c0101.ub) //[1, 5]

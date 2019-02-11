@@ -1,0 +1,151 @@
+
+/*
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted (subject to the limitations in the
+ * disclaimer below) provided that the following conditions are met:
+ *
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *
+ *    * Redistributions in binary form must reproduce the above
+ *      copyright notice, this list of conditions and the following
+ *      disclaimer in the documentation and/or other materials provided
+ *      with the distribution.
+ *
+ *    * Neither the name of The Linux Foundation nor the names of its
+ *      contributors may be used to endorse or promote products derived
+ *      from this software without specific prior written permission.
+ *
+ * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
+ * GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
+ * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+ * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+ * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ */
+================
+Batch Sequencing
+================
+
+This is a mechanism which allows a graph to be built for a certain maximum
+batch count, yet it can be presented at execute time with any batch count
+(larger or smaller than the number for which it was built). If the execute
+supplies a larger batch count, the graph will be internally executed multiple
+times to process the larger count.
+
+The graph must comply with these constraints:
+    (1) graph must have input(s) of shape (NB,h,w,d) or (1,NB,w,d) or
+      (1,1,NB,d) or (1,1,1,NB), where NB is the number of batches. It is also
+      permissible to have 'fixed' inputs (no 'batch' dimension; presented
+      identically to all batches) but at least one input must have an NB
+      dimension. The value NB is common to the various inputs (and outputs),
+      but each can have its own h,w,d dimensions.
+    
+    (2) Likewise, output(s) of the graph must have shape (NB,h,w,d) or
+      (1,NB,w,d) or (1,1,NB,d) or (1,1,1,NB). It is permissible to have
+      'fixed' output with no batch dimension; this is only really useful for
+      supplying fixed output values, such as a range.
+    
+    (3) The graph itself must be built to process any batch dimension up to
+      a specific limit -- this is referred to as GB; this applies to all of
+      the 'max_dimensions' on all nodes in the graph, including on the INPUT
+      node.
+    
+    (4) The graph must be able to adapt properly to a change in the 'batch'
+      input dimensions, and generate outputs with the corresponding batch
+      dimensions (within the constraint that the graph will never see a
+      batch size exceeding GB). 
+
+    
+To clarify: the graph must be built so that:
+    (a) all input and output tensors (except 'fixed' inputs) have one
+      dimension sized NB;
+    (b) there must be at least one input tensor which is not fixed (so that
+      the batch size can be determined). This is not required for outputs;
+      the graph need not have any outputs.
+    (c) The 'batch' dimension must be the outermost actual dimension (it is
+      allowed to have outer dimensions which are 1, e.g. (1,1,NB,d) is
+      allowed).
+    (d) The actual implementation of the graph should be sized for a batch
+      dimension of GB (where GB can be chosen as needed for space/speed
+      tradeoffs).
+    
+(Constraint (c) may be removed without too much trouble, if necessary)
+
+===================
+BatchSeqConfig Node
+===================
+The graph must have a single BatchSeqConfig node, which has three const input
+nodes, and no outputs; each input is an array (1,1,1,n) of int32:
+
+    Input 0: is an array [1..3] specifying  [GB,BQ,options]
+            (if omitted, BQ defaults to 1 and 'options' to 0) 
+    Input 1: is an array specifying the batch dimensions for the graph inputs.
+            Each element is a value 0..3 specifying the dimension which
+            indicates the batch count; or -1 if the input is 'fixed'. If the
+            length of the array is greater than the number of graph inputs,
+            the extra values are ignored; if the length is smaller, the last
+            element is replicated as needed. So, if all of your inputs have
+            the shape (1,NB,w,d), this array can be the single value [1].
+    Input 2: is an array specifying the 'batch' dimensions for each of the
+            outputs. As for the input descriptors, a value of -1 indicates
+            a 'fixed' shape, and the array is truncated (or the last element
+            replicated) to match the number of outputs. If the graph has no
+            outputs, this input must still be present, it may be the single
+            value [0].
+    
+When the graph is executed, the batch slicing strategy is determined by the
+supplied batch count NB, and the values GB, BQ (and options) attached to the
+BatchSeqConfig. 'BQ' is a preferred batch multiple, must be >=1 and a factor
+of GB. The algorithm will make each iteration process a multiple of BQ
+batches, when possible.
+
+The slicing strategy is designed to meet these goals:
+    (1) The NB batches will be processed in ceiling(NB/GB) iterations (the
+        minimum number)
+    (2) There will be at most 2 different sizes used amongst these
+        iterations (to reduce 'resize' costs)
+    (3) if NB is a multiple of BQ, all of the iterations will process
+        multiples of BQ; if not, then only one pass will process a number
+        which is not a multiple of BQ.
+    (4) when 3 or more iterations are used, at most 2 of them will be of
+        sizes less than GB. There is an exception (which can be disabled by
+        setting bit 0 of options): if NB can be divided exactly by BQ*niter
+        (where niter = ceiling(NB/GB)), then there will be 'niter' passes
+        all of the same size NB/niter, which could be smaller than GB.
+    
+The following process is used to determine the batch slicing:
+(1) if NB <= GB, the operation is done as one iteration of 'NB' batches
+(2) otherwise, niter = ceiling(NB/GB) is the number of iterations (>=2).
+    (2a) If NB=niter*GB, then all will be of length GB.
+    (2b) otherwise if options bit 0 is clear, and NB is a multiple of
+         BQ*niter, then all iterations will be of size NB/niter.
+    (2c) otherwise, we have (niter-2) of GB, and two more iterations to
+         process remnant = NB-(niter-2)*GB. If remnant can be divided by
+         2*BQ, the last 2 iterations are both of size remnant/2; otherwise
+         they are of size GB and NB%GB.
+        
+Examples  for GB=100, BQ = 4:
+    - NB = 300 done as 3 runs of 100
+    - NB = 276 done as 3 runs of 92; if disabled (by options bit 0),
+      done as 100+88+88
+    - NB = 277 done as 100+100+77
+
+In cases where the operation uses two different sizes, the algorithm may
+switch the order in which the sizes are used, in order to try to reduce
+resizes across executions; e.g. for the 100+100+77 example, it may be done
+as 77+100+100, if the previous execution did not end in a 100-batch run.
+The batches are still processed in increasing order (this can be disabled
+by setting bit 1 of the 'options').
+
+

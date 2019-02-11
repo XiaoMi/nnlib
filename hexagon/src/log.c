@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -85,3 +85,27 @@ done:
 #endif
 }
 
+void nn_logmsg_function(const char *filename, unsigned int line, struct nn_graph *nn, int level, const char *fmt, ...)
+{
+	if ((nn!=NULL) && (level > nn->debug_level)) return;
+	char buffer[MAX_STRING_LEN];
+	va_list ap;
+	va_start(ap,fmt);
+	vsnprintf(buffer,MAX_STRING_LEN,fmt,ap);
+	FARF(ALWAYS,buffer);
+	if (nn!=NULL) logv(filename,line,nn,level,buffer,ap);
+	va_end(ap);
+}
+// NOTE: the wrapper for this ignores the return value and assumes it's -1, to improve optimization in the
+// area of the call site.
+int nn_errlog_function(const char *filename, unsigned int line, struct nn_graph *nn, const char *fmt, ...)
+{
+	char buffer[MAX_STRING_LEN];
+	va_list ap;
+	va_start(ap,fmt);
+	vsnprintf(buffer,MAX_STRING_LEN,fmt,ap);
+	FARF(ALWAYS,buffer);
+	if (nn!=NULL) logv(filename,line,nn,0,buffer,ap);
+	va_end(ap);
+	return -1;
+}

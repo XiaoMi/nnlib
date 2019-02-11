@@ -1,0 +1,74 @@
+
+/*
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted (subject to the limitations in the
+ * disclaimer below) provided that the following conditions are met:
+ *
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *
+ *    * Redistributions in binary form must reproduce the above
+ *      copyright notice, this list of conditions and the following
+ *      disclaimer in the documentation and/or other materials provided
+ *      with the distribution.
+ *
+ *    * Neither the name of The Linux Foundation nor the names of its
+ *      contributors may be used to endorse or promote products derived
+ *      from this software without specific prior written permission.
+ *
+ * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
+ * GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
+ * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+ * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+ * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ */
+
+All about quantization schemes
+
+
+
+Instead of having a simple fixed point, or a shared exponent, we have an
+unusual quantization scheme.
+
+We have integer values, typically unsigned 8 bits, that represent 256 steps
+between two endpoints (inclusive).  Instead of just the integral values, we
+have the integral values plus the floating point value that "0" corresponds to,
+plus the floating point value that "255" corresponds to.
+
+Another way to look at this, is that we (approximately) have the offset of 0.0
+in the number space, and the size of each integer step.  (A-a_offset)*stepsize
+can then be used to convert the u8 value "A" into its floating point value.
+
+The interesting thing about this is that the same number system can be used to 
+encode signed or unsigned or even asymmetric number ranges well.
+
+The bad thing about it is that adding and multiplying is more complicated.
+
+For adding we need to first convert the numbers to a common number space before
+adding, then shrink them back down.
+
+For multiplying, we need to compute (A-a_offset)*(B-b_offset).  Since we are
+often doing dot products where a lot of the values are constant, we can compute
+sum(B) and multiply a_offset*sumb(B) more easily.  Similarly, we can multiply
+b_offset*a_offset*length(filter) to handle that constant*constant case.  The
+b_offset*sum(A) can be very tricky, but for filtering integral image style 
+techniques can be effective.
+
+We always want to try and keep 0 in the range, and make 0 an integral value.
+
+The current code passes around min/max values.  Android NN is using stepsize /
+offset values.  I think it would be cleaner if we migrate to that over time,
+although we're clearly using it internally already.
+
+https://petewarden.com/2017/06/22/what-ive-learned-about-neural-network-quantization/

@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -37,13 +37,13 @@
 #ifndef HVX_INLINES_H_
 #define HVX_INLINES_H_
 
+#if defined(__hexagon__)
 #include "locale.h"
 #ifdef LC_COLLATE_MASK		// this is how I'm detecting 8.0 compiler...
 #define HEXAGON_COMPILER_GE_8_0
 #endif
-
+#include <stdlib.h>
 #include "hexagon_types.h"
-#include "hvx_hexagon_protos.h"
 #include "hexagon_circ_brev_intrinsics.h"
 
 // this is how I'm detecting 8.1 compiler
@@ -55,10 +55,35 @@
 #define HEXAGON_COMPILER_IS_8_0
 #endif
 #endif
+#endif //__hexagon__
 
-
+#include "hvx_hexagon_protos.h"
+#include "nn_graph_builtin.h"
 #define HVX_INLINE_ALWAYS inline __attribute__((unused,always_inline))
 
+typedef struct
+{
+	HVX_Vector val[2];
+} HVX_Vector_x2;
+
+typedef struct
+{
+	HVX_Vector val[3];
+} HVX_Vector_x3;
+typedef struct
+{
+	HVX_Vector val[4];
+} HVX_Vector_x4;
+
+typedef struct {
+	HVX_VectorPair val[2];
+} HVX_VectorPair_x2;
+typedef struct {
+	HVX_VectorPair val[3];
+} HVX_VectorPair_x3;
+typedef struct {
+	HVX_VectorPair val[4];
+} HVX_VectorPair_x4;
 
 //
 // Predicate shuffle - emulated for v60
@@ -105,6 +130,17 @@ HVX_Vector q6op_V_vand_QnV(HVX_VectorPred Qv, HVX_Vector Vu)
     return Q6_V_vand_QnV( Qv, Vu);
 #else
     return Q6_V_vmux_QVV( Qv, Q6_V_vzero(),Vu);
+#endif
+}
+
+// emulate Q6_V_vand_QnR for V60
+static HVX_INLINE_ALWAYS
+HVX_Vector q6op_V_vand_QnR(HVX_VectorPred Qv, int Rt)
+{
+#if	__HEXAGON_ARCH__ >= 62
+    return Q6_V_vand_QnR( Qv, Rt);
+#else
+    return Q6_V_vand_QR( Q6_Q_not_Q(Qv), Rt);
 #endif
 }
 //
@@ -343,6 +379,7 @@ HVX_VectorPred q6op_Q_vsetq2_R( int rval)
 // These do *not* work in HVXDBL on 7.4.01 (compiler will abort with getRegForInlineAsmConstraint Unhandled data type)
 // occurs if these are used (it's ok to just have them in the header though). Seem to be ok with 8.0.05
 //
+#if defined(__hexagon__)
 static HVX_INLINE_ALWAYS void q6op_vstcc_QAV(  HVX_VectorPred cond, HVX_Vector *addr, HVX_Vector v )
 {
 #ifdef Q6_vmaskedstoreq_QAV
@@ -375,6 +412,7 @@ static HVX_INLINE_ALWAYS void q6op_vstcc_QnAV_nt(  HVX_VectorPred cond, HVX_Vect
   __asm__ __volatile__( "if(!%0) vmem(%1):nt=%2;" : : "q"(cond),"r"(addr),"v"(v) : "memory");
 #endif
 }
+#endif
 
 //
 // unaligned vector load
@@ -395,6 +433,42 @@ static HVX_INLINE_ALWAYS void q6op_vstu_AV(  HVX_Vector *addr, HVX_Vector v )
     pp->v = v;
 }
 //////////////////////////////////////////////////////////
+
+// this stores the first n bytes from vector vin to address 'addr'.
+// n must be in range 1..128, addr may have any alignment; does one or
+// two masked stores.
+// Note: if the last byte falls in lane 127, the operation on V60
+//  will do a byte-masked store to the next vector with all lanes
+//  disabled. on >=V62 it will only do stores where needed.
+//
+static inline void q6op_vstu_variable_ARV( void * addr, int n, HVX_Vector vin)
+{
+	vin = Q6_V_vlalign_VVR( vin, vin, (size_t)addr); //rotate as needed.
+	unsigned left_off = (size_t)addr & 127;
+	unsigned right_off = left_off + n;
+	HVX_VectorPred qL_not = Q6_Q_vsetq_R( (size_t)addr );
+#if __HEXAGON_ARCH__ >= 62
+	HVX_VectorPred qR = Q6_Q_vsetq2_R( right_off );
+	if( right_off > 128 ){
+#else
+	HVX_VectorPred qR = Q6_Q_vsetq_R( right_off );
+	if( right_off >= 128 ){		// v60 does a null store here when right_off = 128.
+#endif
+		q6op_vstcc_QAV( qR, (HVX_Vector*)addr + 1, vin);
+		qR = Q6_Q_vcmp_eq_VbVb( vin,vin);	// all 1's
+	}
+	qL_not = Q6_Q_or_QQn( qL_not, qR );
+	q6op_vstcc_QnAV( qL_not,(HVX_Vector*)addr, vin );
+}
+
+// this is called with a dest pointer, two vectors, and 'bytes' in range 1..256.
+// The first 'bytes' bytes from the vectors (v0 followed by v1) will be stored at the address, using
+// unaligned and masked stores as needed. If bytes <=0, nothing is stored; if bytes > 256
+// the effect is the same as bytes == 256 (all stored).
+// Done as a function; in many cases this is done just before a function returns, so it's not
+// time critical and it can be done as a a tail call and save some code bloat.
+//
+void hvx_store_vec_x2_unaligned ( void * addr, HVX_Vector v0, HVX_Vector v1, int bytes);
 
 // HVX_8_0_FAKEDEP_VM( vector_var, mem_location)
 // .. creates a fake dependency between the vector and the memory location.
@@ -423,12 +497,16 @@ static HVX_INLINE_ALWAYS void q6op_vstu_AV(  HVX_Vector *addr, HVX_Vector v )
 extern const uint8_t const_Count128[128] __attribute__((aligned(128)));	/// {0..127}
 extern const uint8_t const_Count64[128] __attribute__((aligned(128)));	/// {0..63, 0..63}
 extern const uint8_t const_Count32[128] __attribute__((aligned(128)));	/// {0..31, 0..31, 0..31, 0..31}
+extern const uint8_t const_InverseCount128[128] __attribute__((aligned(128)));	/// {127..0}
 extern const int16_t lut_Log2_and_Pow2[6*64] __attribute__((aligned(128)));
 extern const int16_t lut_fracdivide_k1k2[6*64] __attribute__((aligned(128)));
 extern const int16_t lut_root_recip[64] __attribute__ ((aligned(128)));
 extern const float lut_reciprocal[128] __attribute__ ((aligned(128)));  // 1.0/1.0   ... 1.0/128.
 extern const int32_t lut_reciprocal_i32[128] __attribute__ ((aligned(128)));    // 1/1 .. 1/128 w/31 frac bits
 
+extern const int16_t tanh_16_cubic_lookup[64] __attribute__( (aligned(128)));
+
+extern const uint32_t const_Deal3_table[7*3][32] __attribute__( (aligned(128)));
 //
 // tables for 'fracdivide'
 // two lookup tables of 32 x int16 (k1 in even lanes, k2 in odd)
@@ -620,6 +698,212 @@ reduce_in_quadrants_vadd_Vw( HVX_Vector vin )
 	return msum;
 }
 
+
+/////////////////////////////////////////////////////////
+
+// Facility to do 3-way shuffle/deal, with elementsizes
+// that are power-of-two up to 64 bytes.
+// This defines several functions that return structs
+// containing vectors; all of these functions should
+// be inlined for proper performance.
+//
+//
+// how to do 3-way deal of n-byte elements, with n being a power of 2:
+// First, sort across registers:
+// ==> if the # of elements in a vector is an *even* power of 2:
+//
+//  v0 ABCAB..ABCA
+//  v1 BCABC..BCAB
+//  v2 CABCA..CABC
+//    (a) swap v1/v2 in lanes :x::x..:x::
+//  v0 ABCAB..ABCA
+//  v1 BAABA..BAAB
+//  v2 CCBCC..CCBC
+//     (b) swap v0/v1 in lanes :xx:x..:xx:
+//  v0 AAAAA..AAAA
+//  v1 BBCBB..BBCB
+//  v2 CCBCC..CCBC
+//    (c) swap v1/v2 in lanes ::x::..::x:
+//  v0 AAAAA..AAAA
+//  v1 BBBBB..BBBB
+//  v2 CCCCC..CCCC
+//
+// ==> if the # of elements in a vector is an *odd* power of 2:
+//
+//  v0 ABCAB..BCAB
+//  v1 CABCA..ABCA
+//  v2 BCABC..CABC
+//    (a) swap v1/v2 in lanes x:xx:..x:xx
+//  v0 ABCAB..ABCA
+//  v1 BAABA..BAAB
+//  v2 CCBCC..CCBC
+// The rest is the same as before.
+//
+//
+//  next step is to 'unroll' the elements.
+//  Cases:
+//   N = 4:   | A0 A3 A2 A1 | B1 B0 B3 B2 | C2 C1 C0 C3
+//   N = 8:   | A0 A3 A6 A1 A4 A7 A2 A5 | B5 B0 B3 B6 B1 B4 B7 B2 | C2 C5 .. C7
+//   N = 16:  | A0 A11 .. A5 | B5 B0 .. B10| C10 C5 .. C15 
+//   N = 32:  | A0 A11 .. A21| B21 B0 .. B10|C10 C21 .. C31
+//
+// The mapping to unroll A can always be described as (lane 3*i mod N)-> lane i
+//    To unroll B: (lane 3*i+1 mod N)-> lane i
+//    To unroll C: (lane 3*i+2 mod N)-> lane i
+//
+// so in general we need three 'VectorPred' q0,q1,q2 and three 'rdelta'
+// controls; const_Deal3_table consists of the 3 delta controls for all
+// supported elementsize; the three q's are stored in bit 7.
+// The 'shuffle3' is the reverse process (using delta).
+//
+// pack of values needed for the 3x shuffle/deal
+// ops. these depend on elementsize. The elementsize
+// is in here; it is not needed for the shuffle/deal
+// but could be useful in containing ops (e.g. 6-way shuffle/deal)
+struct hvx_shufdeal3_consts {
+	HVX_VectorPred q0,q1,q2;		// swap controls
+	HVX_Vector rdeltaA,rdeltaB,rdeltaC;	// vdelta
+	int elementsize;
+};
+
+// set up the constants for a given elementsize, power of 2 in range 1..64
+//
+static inline struct hvx_shufdeal3_consts 
+__attribute__((always_inline))
+hvx_shufdeal3_get_consts( int elementsize )
+{
+	struct hvx_shufdeal3_consts result;
+
+	result.elementsize = elementsize;
+	int log2_elsize = Q6_R_ct0_R(elementsize);
+	HVX_Vector const * ptr = (HVX_Vector const *)const_Deal3_table + 3*log2_elsize;
+	result.rdeltaA = ptr[0];
+	result.rdeltaB = ptr[1];
+	result.rdeltaC = ptr[2];
+	result.q0 = Q6_Q_vand_VR( result.rdeltaA, 0x80808080);
+	result.q1 = Q6_Q_vand_VR( result.rdeltaB, 0x80808080);
+	result.q2 = Q6_Q_vand_VR( result.rdeltaC, 0x80808080);
+	return result;
+}
+
+// this is a 3-way deal operation.
+// 3x(128/wid) elements in; 3 packs of 128/wid out.
+static inline HVX_Vector_x3
+__attribute__((always_inline))
+hvx_deal3( struct hvx_shufdeal3_consts konst,
+	HVX_Vector v0, HVX_Vector v1, HVX_Vector v2 )
+{
+	// given A0:B0:C0:A1:B1 ... 
+	// start by getting all the A in v0, B in v1, C in v2.
+	HVX_VectorPair v12 = Q6_W_vswap_QVV( konst.q0, v2, v1 );
+	HVX_VectorPair v01 = Q6_W_vswap_QVV( konst.q1, Q6_V_lo_W(v12), v0 );
+	v12 = Q6_W_vswap_QVV( konst.q2, Q6_V_hi_W(v12), Q6_V_hi_W(v01) );
+
+	// reorder them
+	HVX_Vector_x3 result;
+	result.val[0] = Q6_V_vrdelta_VV( Q6_V_lo_W(v01), konst.rdeltaA );
+	result.val[1] = Q6_V_vrdelta_VV( Q6_V_lo_W(v12), konst.rdeltaB );
+	result.val[2] = Q6_V_vrdelta_VV( Q6_V_hi_W(v12), konst.rdeltaC );
+	return result;
+}
+
+// this is a 3-way shuffle operation.
+// 3 packs of (128/wid) elements in;   3*(128/wid) out.
+//inverse of hvx_deal3.
+static inline HVX_Vector_x3
+__attribute__((always_inline))
+hvx_shuffle3( struct hvx_shufdeal3_consts konst,
+	HVX_Vector v0, HVX_Vector v1, HVX_Vector v2 )
+{
+	v0 = Q6_V_vdelta_VV( v0, konst.rdeltaA );		// get all the elements in proper lanes
+	v1 = Q6_V_vdelta_VV( v1, konst.rdeltaB );
+	v2 = Q6_V_vdelta_VV( v2, konst.rdeltaC );
+	// then in the proper vectors.
+	HVX_VectorPair v12 = Q6_W_vswap_QVV( konst.q2, v2, v1 );
+	HVX_VectorPair v01 = Q6_W_vswap_QVV( konst.q1, Q6_V_lo_W(v12), v0 );
+	v12 = Q6_W_vswap_QVV( konst.q0, Q6_V_hi_W(v12), Q6_V_hi_W(v01) );
+
+	HVX_Vector_x3 result;
+	result.val[0] = Q6_V_lo_W(v01);
+	result.val[1] = Q6_V_lo_W(v12);
+	result.val[2] = Q6_V_hi_W(v12);
+	return result;
+}
+// Design delta (or rdelta) network
+//   - mapping indicates the desired source lane (0.. NVEC-1) for each of the outputs.
+//   - 'dontcare' = 0 where mapping is valid; 255 for lanes where the output is a don't care.
+//   - 'reverse' =  0 for delta network, 1 for rdelta network
+//   Actually, only the sign bit of the 'dontcare_lanes' is used; so you can use the same
+//   vector for 'mapping' and dontcare_lanes, if bit 7 is set in the outputs which are don't-care.
+//
+// The return value is the control word for '[r]delta' operation to implement this mapping.
+// Infeasible mappings are not detected, but you can 'test' a mapping as below:
+//
+//    // find the mapping...
+//    HVX_Vector mapping = ...
+//    HVX_Vector dontcare_lanes = ...
+//    HVX_Vector ctlvec = design_for_delta( mapping, dontcare_lanes , 0 );
+//
+//    // "test" it... use delta with input = { 0, 1 ... NVEC-1 }
+//    HVX_Vector testres = Q6_V_vdelta_VV( q6op_Vb_vindices(), ctlvec );
+//
+//    // compare equal to mapping?
+//    HVX_VectorPred match = Q6_Q_cmp_eq_VbVb( testres, mapping );
+//    // the next step is only needed if there are any dont-care lanes
+//    match = Q6_Q_vcmp_gtor_QVbVb( match, Q6_V_vzero(), dontcare_lanes );
+//    //  The resulting 'match' should have all '1'; otherwise the mapping was not feasible.
+//
+//
+static inline HVX_Vector design_for_delta( HVX_Vector mapping, HVX_VectorPred dontcare_lanes, int reverse)
+{
+
+	HVX_Vector result = Q6_V_vzero();
+
+	// work our way from output of delta to input (span from 1 to N/2)
+	// for rdelta, go from N/2 to 1
+	HVX_Vector span = Q6_V_vsplat_R( Q6_R_vsplatb_R( reverse? (int)sizeof(HVX_Vector)/2: 1));
+	int rsh = reverse ? 2: 0;
+
+	HVX_VectorPred dcare = Q6_Q_vcmp_gt_VbVb( Q6_V_vzero(), dontcare_lanes );	// dcare = 0 > lanes.
+	HVX_Vector valid = q6op_V_vand_QnR(dcare,-1);  	// 0xFF in valid lanes, 0 in non-valid
+	HVX_Vector indices = *(HVX_Vector const*)const_Count128;			// 0,1,2 ...
+
+	// starting at the last set of switches...
+    int nloops = (sizeof(HVX_Vector)==128)? 7:6;
+	for( unsigned k = 0; k < nloops; k++) {
+		// which lanes need to switch relative to previous row?
+		// true where ((mapping ^i) & span) == span
+		//
+		HVX_VectorPred sw = Q6_Q_vcmp_eq_VbVb( Q6_V_vand_VV( Q6_V_vxor_VV( mapping, indices), span ), span );
+
+		// - lanes which are valid and which are not switching
+		HVX_Vector valid_here = q6op_V_vand_QnV( sw, valid);
+		// - lanes which are valid and which are switching.
+		HVX_Vector valid_from_switched = q6op_V_vand_QV( sw, valid);
+
+		// switch the 'from_switched' to source lane
+		HVX_Vector valid_to_switched = Q6_V_vdelta_VV( valid_from_switched, span);
+		// record the switch for result.
+		result = Q6_V_vor_VV( result,Q6_V_vand_VV(span,valid_from_switched ));
+
+		// swap the mapping over switches...
+		HVX_Vector mapping_sw = Q6_V_vdelta_VV( mapping, span);
+
+		// merge to next mapping using valid_here and valid_to_switched;
+
+		mapping = Q6_V_vor_VV(
+				Q6_V_vand_VV( valid_here, mapping),
+				Q6_V_vand_VV( valid_to_switched, mapping_sw));
+
+		// this is the new 'valid'
+		valid = Q6_V_vor_VV( valid_here, valid_to_switched);
+		// << span 1 bit
+		span = Q6_Vb_vadd_VbVb( span, span);
+		// >>2 if designing reverse delta.
+		span = Q6_Vuw_vlsr_VuwR( span, rsh);
+	}
+	return result;
+}
 
 //
 // These are intended for debug

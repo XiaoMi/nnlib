@@ -36,7 +36,7 @@
 #include <nn_graph.h>
 #include <string.h>
 #include <math.h>
-
+#include "errstats.h"
 /*
  * This operator checks to see if a d32 tensor (with min and max)
  * is 'close enough' to a supplied reference (float) tensor.
@@ -69,200 +69,13 @@
  *       (Close_d32)
  */
 
+//
+// This node will now fail if the DUT's range is more than about 5x larger
+// than it needs to be, based on the range of the reference data.
+// This can be suppressed, by setting padding to NN_PAD_VALID.
+
 #define MAX_TO_SHOW 100
 
-////////////////////////////////////////////////////////
-//
-// stats on the error.
-// All stats are measured in the quantized domain.
-
-struct err_stats {
-	int ncount;					// # of points
-	float sum_delta;			// sum of errors
-	float sum2_delta;			// sum of error-squared (for rms)
-	int ncount_excerr;			// count of nonzero excess error
-	float max_excerr;			// largest 'excess error'
-	int pos_largerr;			// position of largest error
-
-	// stats of the ref vs. test, for correlation
-	// points where test = 0 or 255 are not included on the grounds
-	// that they could be affected by saturation.
-	// we want to correlate y = test result vs x= ref, but
-	// since we expect them to be about the same, it's better (from a numerical
-	// precision standpoint) to record stats for s = test+ref, d=test-ref, and
-	// sort it out after.
-	int ncount_notsat;
-	float regr_sum_s;		// sum of test+ref
-	float regr_sum_d;		// sum of test-ref
-	float regr_sum_s2;		// sum of (test+ref)^2
-	float regr_sum_d2;		// sum of (test-ref)^2
-	float regr_sum_sd;		// sum of (test+ref)*((test-ref)
-};
-
-// clear the stats
-//
-static inline void errstats_clear( struct err_stats * esp )
-{
-	esp->ncount = 0;
-	esp->sum_delta = 0.0f;
-	esp->sum2_delta = 0.0f;
-	esp->ncount_excerr = 0;
-	esp->max_excerr = 0.0f;
-	esp->pos_largerr = -1;
-
-	esp->ncount_notsat = 0;
-	esp->regr_sum_s = 0.0f;
-	esp->regr_sum_d = 0.0f;
-	esp->regr_sum_s2 = 0.0f;
-	esp->regr_sum_d2 = 0.0f;
-	esp->regr_sum_sd = 0.0f;
-}
-
-// accumulate 'sto' from 'sfrom' and then clear sfrom
-//
-static inline void errstats_dump_and_clear( struct err_stats * sto, struct err_stats *sfrom )
-{
-	sto->ncount += sfrom->ncount;
-	sto->sum_delta += sfrom->sum_delta;
-	sto->sum2_delta += sfrom->sum2_delta;
-	sto->ncount_excerr += sfrom->ncount_excerr;
-	if( sfrom->max_excerr > sto->max_excerr ){
-		sto->max_excerr = sfrom->max_excerr;
-		sto->pos_largerr = sfrom->pos_largerr;
-	}
-
-	sto->ncount_notsat += sfrom->ncount_notsat;
-	sto->regr_sum_s += sfrom->regr_sum_s;
-	sto->regr_sum_d += sfrom->regr_sum_d;
-	sto->regr_sum_s2 += sfrom->regr_sum_s2;
-	sto->regr_sum_d2 += sfrom->regr_sum_d2;
-	sto->regr_sum_sd += sfrom->regr_sum_sd;
-	errstats_clear(sfrom);
-}
-
-//
-// add a point.
-// 'ixtext' is the 'test' value, 0..255
-// 'xref' is the reference value, converted to the same units
-// 'pos' is the index in the data (for recording position of first error)
-//
-static inline void errstats_add_point( struct err_stats * esp, int ixtest, float xref, int pos )
-{
-	float xtest = ixtest;
-	float xrefi = roundf(xref);
-	float delt = xtest - xref;		// the error...
-	// 'excess' error: how much the error is in excess of the error
-	// in reference, when the reference is rounded to integer.
-	//
-	float excess_error = fabsf(delt) - fabsf(xrefi-xref);
-
-	esp->ncount ++;
-	esp->sum_delta += delt;
-	esp->sum2_delta += delt*delt;
-	if( excess_error > 0.0f ){
-		esp->ncount_excerr ++;
-		if( excess_error > esp->max_excerr ){
-			esp->max_excerr = excess_error;
-			esp->pos_largerr = pos;
-		}
-	}
-	// the regression is not done on codes 0 or 255, on the assumption that they
-	// might be distorted by saturation
-	if( ixtest >= 1 && ixtest < 255 ){
-		float sm = xtest+xref;
-		esp->ncount_notsat ++;
-		esp->regr_sum_s += sm;
-		esp->regr_sum_d += delt;
-		esp->regr_sum_s2 += sm*sm;
-		esp->regr_sum_d2 += delt*delt;
-		esp->regr_sum_sd += sm*delt;
-	}
-}
-//
-// find mean and root-mean-square of the delta.
-//
-static inline void errstats_find_mean_rms(  struct err_stats const * esp, float * mean_out, float * rms_out )
-{
-	float pop = esp->ncount;
-	*mean_out = esp->sum_delta / pop;
-
-	*rms_out = sqrtf( (pop * esp->sum2_delta - esp->sum_delta * esp->sum_delta) ) /pop;
-
-}
-//
-// find correlation between x = ref and y = tst.
-//
-
-static int errstats_find_correlation( struct nn_graph *nn, int level, struct err_stats const * esp)
-{
-	if( esp-> ncount_notsat < 6 ) return -1;
-
-	float pop = esp->ncount_notsat;
-
-	float mean_s = esp->regr_sum_s/pop;
-	float mean_d = esp->regr_sum_d/pop;
-
-	// this is sum{ ( s - s_mean)^2} /pop
-	// and  sum{ ( d - d_mean)^2} /pop
-	// and sum{  (s-s_mean)*(d-d_mean)) /pop
-	float var_s2 = (pop * esp->regr_sum_s2 - esp->regr_sum_s * esp->regr_sum_s )/(pop*pop);
-	float var_d2 = (pop * esp->regr_sum_d2 - esp->regr_sum_d * esp->regr_sum_d )/(pop*pop);
-	float var_sd = (pop * esp->regr_sum_sd - esp->regr_sum_s * esp->regr_sum_d )/(pop*pop);
-
-	float evx=1.0f, evy=0.0f;
-	float eig0 = var_s2, eig1= 0.0f;
-	// these values form a matrix
-	//  [ var_s2   var_sd ]
-	//  [ var_sd   var_d2 ]
-	// .. find its eigenvalues and eigenvevc
-	if( var_d2 >  0.0f) {	// it could be 0...
-		float mtrace = var_s2 + var_d2;
-		float d = 0.5f*(var_s2 - var_d2);
-		float eghdiff = hypotf(d, var_sd );
-		float r = fabsf(d) + eghdiff;
-		float dd = hypotf( r, var_sd );
-		if( dd> 0.0f){
-			// normally the two expressions below would be divided by dd to get a unit
-			// vector; we don't need that here
-			evx = r; /* divide /dd; to get unit vector */
-			evy = var_sd;  /* divide /dd to get unit vector */
-			if( d < 0){
-				float xt = fabsf(evy);
-				evy = copysignf(evx,evy);
-				evx = xt;
-			}
-		}
-		eig0 = 0.5f * mtrace + eghdiff;	// the big one
-		eig1 = fmaxf(0.0f, 0.5f * mtrace - eghdiff);	// the little one
-	}
-	// (evx, evy) is the direction of largest correlation (x+y) vs (y-x);
-	// we expect it to be about (1,0); we can correct this to a 'scale)
-	// by rotating 45 degrees...
-	// first ensure it makes sense.
-	//
-	if( evx <= 0.0 || fabsf(evy) > 0.5f * evx || eig0 < 16.0f || eig1 > 0.1f*eig0){
-		float dd = hypot( evx, evy );
-		logmsg(nn, level, "correlation of %d points: results unclear, eigs(%.2f,%.2f), vec = (%.6f, %.6f)",
-				esp-> ncount_notsat, eig0,eig1, evx/dd, evy/dd);
-		return 1;
-	}
-
-	// find a fit: test = ref * scale + offs
-
-	float scale = (evx + evy)/(evx-evy);		// ref->scale gain
-	// the fit passes through (mean_x, mean_y)
-	float meanx = (mean_s - mean_d)*0.5f;
-	float meany = (mean_s + mean_d)*0.5f;
-	//
-	float offs = meany - scale * meanx;
-
-	logmsg(nn,level, "correlation of %d points: sdev = %.4f across, and %.1f along axis gain = %.6f",
-			esp-> ncount_notsat, sqrtf(eig1), sqrtf(eig0), scale );
-	logmsg(nn,level, " offsets:  0->%.4f,  128-> %.4f, 255->%.4f", offs, offs + 128.0f *scale, offs + 255.0f*scale );
-
-
-	return 0;
-}
 
 
 ////////////////////////////////////////////////////////
@@ -341,6 +154,10 @@ static int close_d32_execute(struct nn_node *self, struct nn_graph *nn)
 	errstats_clear( & errstatC );
 	float const * refp = (float const *)tensor_ref->data;
 
+	float actual_min = -1e-6f;
+	float actual_max = 1e-6f;
+
+
 	for( ib = 0; ib < batches; ib++ ){
 		for (ih = 0; ih < height; ih++ ){
 			int ix_bh = (ib*height + ih) * (width*depth);
@@ -349,17 +166,30 @@ static int close_d32_execute(struct nn_node *self, struct nn_graph *nn)
 					int idx = ix_bh + iw*depth + id;
 
 					uint8_t tdata = *tensor_location_d32( tensor_in, ib, ih, iw, id );
-					float refdata = (refp[idx] - dut_min_float)*qscale;
-					errstats_add_point( &errstatA, tdata, refdata, idx );
+					float refx = refp[idx];
+					float refdata = (refx - dut_min_float)*qscale;
+					actual_min = fminf( actual_min, refx);
+					actual_max = fmaxf( actual_max, refx);
+					int is_clip = tdata == 0 || tdata == 255;
+					errstats_add_point( &errstatA, tdata, refdata, idx, is_clip );
 					if( errstatA.ncount >= 100){
 						errstats_dump_and_clear( &errstatB, &errstatA );
-						if( errstatB.ncount >= 100 )
+						if( errstatB.ncount >= 10000 )
 							errstats_dump_and_clear( &errstatC, &errstatB );
 					}
 				}
 			}
 		}
 	}
+	float over_range = 0.0;	// frac by which range is too large
+	{
+		float range_dut  = fmax(dut_max_float, actual_max ) - fmin( dut_min_float, actual_min);
+		float range_ref =  actual_max - actual_min;
+		if( range_ref >1e-3f){
+			over_range = (range_dut-range_ref)/range_ref;
+		}
+	}
+
 	// collect all the errors to errstatC.
 
 	errstats_dump_and_clear( &errstatB, &errstatA );
@@ -374,14 +204,20 @@ static int close_d32_execute(struct nn_node *self, struct nn_graph *nn)
 	int acceptable =
 			( errstatC.max_excerr <= max_exc_err )
 		&& ( errstatC.ncount_excerr  <=  max_exc_err_frac * errstatC.ncount );
+	if(self->padding != NN_PAD_VALID && over_range > 4.0f){
+		logmsg(nn,0,"Computed range is too large for the reference data");
+		acceptable = 0;
+	}
 
 	int loglev = (acceptable && !force_report)? 2: 0;
 
+	logmsg(nn,loglev,"Ref data range = %f .. %f; dut range = %f .. %f; oversize by %.2f %%\n",
+			actual_min, actual_max, dut_min_float, dut_max_float, over_range *100.0f);
 
 	logmsg(nn,loglev,"Out of %d points: mean err = %.3f, rms err = %.3f; largest excess err = %.3f (%d are nonzero)",
 			errstatC.ncount, mean_error, rms_error, errstatC.max_excerr, errstatC.ncount_excerr );
 	if( errstatC.ncount_notsat >= 16){
-		errstats_find_correlation( nn , loglev, &errstatC);
+		errstats_find_correlation( nn , loglev, &errstatC, 0,128,255);
 	}
 	if( ! acceptable ){
 		int count = batches * height * width * depth;
@@ -392,7 +228,7 @@ static int close_d32_execute(struct nn_node *self, struct nn_graph *nn)
 		if( errstatC.max_excerr > 8.0f) error_disp_lev = errstatC.max_excerr * (float)(1./16.);
 
 		logmsg(nn,0,"Exceeds error limits. Values below are in quantized units; only shown if exc err > %f", error_disp_lev);
-		logmsg(nn,0,"\t\tActual\t\tExpected\tDiff");
+		logmsg(nn,0,"\t\tActual\t\tExpected\tDiff\tExcErr");
 		int nlogged = 0;
 
 		for (ipos = 0; ipos < count; ipos++) {
@@ -405,12 +241,12 @@ static int close_d32_execute(struct nn_node *self, struct nn_graph *nn)
 			uint8_t tdata = *tensor_location_d32( tensor_in, b, h, w, d );
 			float refdat = refp[ipos];
 			float refdatq = (refdat - dut_min_float)*qscale;
-			float excerr = fabs( tdata-refdatq) - fabs( roundf(refdatq)-refdatq);
+			float excerr = fabsf( tdata-refdatq) - fabsf( roundf(refdatq)-refdatq);
 			if( excerr > error_disp_lev){
 				char const * flag = ( ipos == errstatC.pos_largerr)? " <====": "";
 
 				if( nlogged < MAX_TO_SHOW || ipos == errstatC.pos_largerr){
-					logmsg(nn,0,"%d[%d,%d,%d,%d])\t%d\t%f\t%f%s",ipos,b,h,w,d, tdata,refdatq,tdata-refdatq, flag);
+					logmsg(nn,0,"%d[%d,%d,%d,%d])\t%d\t%f\t%f\t%f%s",ipos,b,h,w,d, tdata,refdatq,tdata-refdatq,excerr, flag);
 					nlogged ++;
 				}else if( nlogged < MAX_TO_SHOW+10){
 					logmsg(nn,0, "[Stopped after %d errors]", nlogged);
@@ -457,4 +293,5 @@ struct nn_node_ops nn_ops_for_Close_d32 = {
 	.check = close_d32_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.flags = NN_NODE_FLAG_D32_INPUT,
 };

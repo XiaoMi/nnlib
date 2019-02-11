@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -58,12 +58,11 @@ static int32_t max(int a, int32_t b) { return((a>b) ? a : b); }
 
 
 #define ALIGN_SIZE 128
-#define ROUNDUP(X) (((X) + ALIGN_SIZE - 1) & (~((X)-1)))
-#define MAXPAD (ALIGN_SIZE)
+#define ROUNDUP(X) (((X) + ALIGN_SIZE - 1) & (~((ALIGN_SIZE)-1)))
 static inline void *pad_and_align(void *ptr, unsigned long minsize)
 {
 	uintptr_t ptrval = (uintptr_t)(ptr);
-	ptrval += minsize + (MAXPAD-1);
+	ptrval += minsize + (ALIGN_SIZE-1);
 	ptrval &= ~(ALIGN_SIZE-1);
 	return (void *)ptrval;
 }
@@ -504,7 +503,12 @@ static int __attribute__((unused)) conv2d_execute_hvx(struct nn_node *self, stru
 	int32_t sumb_size = out_depth_pad*sizeof(int);
 	int32_t filt_pad_size = filter_value_count_pad * out_depth_pad;
 	int32_t filt_pad_trans_size = filt_pad_size;
-	//int32_t out_pad_size = sizeof(int)*patches_pad*out_depth_pad;
+	int32_t out_pad_size = out_depth_pad * patches_pad * sizeof(int) + 128;
+
+	if(nn_scratch_grow(nn,ROUNDUP(im2col_buf_size) + ROUNDUP(minmax_size) + ROUNDUP(suma_size)
+		+ ROUNDUP(sumb_size) + ROUNDUP(filt_pad_trans_size) + ROUNDUP(filt_pad_size) + ROUNDUP(out_pad_size))){
+		return errlog(nn,"failed to get scratch");
+	}
 
         uint8_t* im2col_buf = nn->scratch;
         int *minmax = (int *) pad_and_align(im2col_buf, im2col_buf_size);
@@ -516,7 +520,7 @@ static int __attribute__((unused)) conv2d_execute_hvx(struct nn_node *self, stru
 		//printf("CCCCC alloc size scratch addr %p, : scratch_size: %d",nn->scratch, nn->scratch_size);
         /* pad out the filter weights matrix to M x K */
 	/* Zero out output since we accumulate with it */
-	memset(out_pad,0,out_depth_pad*patches_pad*sizeof(int)+128);
+	memset(out_pad,0,out_pad_size);
 	logmsg(nn,2,"im2col_buf_size = %d @ %p\n",patches_pad * filter_value_count_pad,im2col_buf);
 	logmsg(nn,2,"filt_pad = %d @ %p\n",out_depth_pad * filter_value_count_pad,filt_pad);
 	logmsg(nn,2,"out_pad = %d @ %p\n",out_depth_pad * patches_pad * 4,out_pad);
@@ -597,22 +601,20 @@ static int conv2d_check_ref(struct nn_node *self, struct nn_graph *nn)
 }
 
 
-#if 1
 struct nn_node_ops nn_ops_for_QuantizedConv2d_8x8to32 = {
+#if 1
 	.execute = conv2d_execute_ref,
 	.check = conv2d_check_ref,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
-};
 #else
-struct nn_node_ops nn_ops_for_QuantizedConv2d_8x8to32 = {
 	.execute = conv2d_execute_ref_im2col, // <-- not working yet
 	//.execute = conv2d_execute_ref,
 	.check = conv2d_check_ref,
 	.ctor = conv2d_ctor,
 	.dtor = node_free_common,
-};
 #endif
+};
 
 struct nn_node_ops nn_ops_for_QuantizedConv2d_8x8to32_ref = {
 	.execute = conv2d_execute_ref,

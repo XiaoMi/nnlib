@@ -104,7 +104,11 @@
 #include "nn_atomic.h"
 #include "hvx_mathops.h"
 
+#ifdef HEXAGON_V66
+#define AVGPOOL_MAX_THREADS 4
+#else
 #define AVGPOOL_MAX_THREADS 2
+#endif
 
 /////////////////////////////////////////////////
 // prototypes of asm routines for particular cases
@@ -138,6 +142,7 @@
 //   * set the 'input' pointer to the first padding row.
 //
 //
+
 int avgpool_slice_hvx_3x3_stride1(
 	uint8_t *out,			// pointer to output
 	const uint8_t *in, 		// pointer to input
@@ -219,6 +224,19 @@ struct avgpool_asm_parms {
 	int in_wpad_left;			// used for LR zap
 	int in_width;				// used for LR zap
 };
+
+static void avgpool_earlywork(struct nn_graph *nn, void *vinfo)
+{
+	struct integral_buffer_plan *plan = vinfo;
+	struct nn_early_work *work = plan->misc;
+	if (work == NULL) return;
+	if (work->vtcm_addr != nn->vtcm_ptr) return;
+	if (work->src_addr == NULL) return;
+	if (work->dst_addr == NULL) return;
+	if (work->bytes == 0) return;
+	nn_graph_memcpy(nn,work->dst_addr,work->src_addr,work->bytes);
+	work->valid = 1;
+}
 
 // set up the 'avgpool_asm_parms'
 //
@@ -310,7 +328,6 @@ struct avgpool_runstate
 	// The first thread waits for others and then finishes the computation.
 	int32_t * reduce1x1_result;
 	volatile int32_t reduce1x1_min_not, reduce1x1_max;
-	nn_sem_t reduce_1x1_sync_sem;		// used to ensure that other threads are done.
 
 
 	struct avgpool_thrinfo thrinfo[AVGPOOL_MAX_THREADS];
@@ -325,6 +342,7 @@ struct avgpool_runstate
 
 static void avgpool_worker_thread( struct nn_graph *nn, void *thrpv );
 static void avgpool_reduce_to_1x1_worker_thread( struct nn_graph *nn, void *thrpv );
+static void avgpool_reduce_to_1x1_post_worker_thread( struct nn_graph *nn, void *rstpv );
 
 static void avgpool_process_slice( struct avgpool_runstate const *ibp,  void * integ_buf, int batch_idx, int d32_idx  );
 static void avgpool_process_slice_hvx( struct avgpool_runstate const *ibp,  void * integ_buf, int batch_idx, int d32_idx  );
@@ -365,10 +383,6 @@ static int avgpool_execute(struct nn_node *self, struct nn_graph *nn)
 	// set up the plan. Note, this doesn't check batches = depth = 1 on stride and window.
 	// 'check' does that.
 
-	// for output wid = 1, the left-padding will be 4, unless we can use the 'reduce_to_1x1' special case
-	// handler in which case it will be 2.
-	int smallest_left_pad = 4;
-
 	int k = setup_integral_buffer_plan( self, nn, ibp, in_tensor, window_tensor, stride_tensor);
 	if( k != 0){			// new plan was made
 		if( k <0)   // there was a problem.
@@ -378,23 +392,27 @@ static int avgpool_execute(struct nn_node *self, struct nn_graph *nn)
 		if( use_hvx ){
 			if( ibp->outshape.height == 1 && ibp->outshape.width == 1){
 				special_handler = avgpool_special_reduce_to_1x1;
-				smallest_left_pad = 2;
 			}else if( use_hvx &&  ibp->window_ht ==3 && ibp->window_wid == 3 && ibp->stride_ht == 1 && ibp->stride_wid == 1
 				&& ibp->inshape.width >1 && ibp->inshape.height > 1 ){
 				ibp->hvx_specialized_handler = avgpool_slice_hvx_3x3_stride1;
 				special_handler = avgpool_special_3x3_hvx;	// though this is currently the only one
 			}
-			ibp->hvx_specialized_handler_code = special_handler;
 		}
+		ibp->hvx_specialized_handler_code = special_handler;
+	}
+	// for output wid = 1, the left-padding will be 4, unless we can use the 'reduce_to_1x1' special case
+	// handler in which case it will be 2.
+	int width_before_pad = 4;
+	if(  ibp->hvx_specialized_handler_code == avgpool_special_reduce_to_1x1){
+		width_before_pad = 2;
 	}
 
 	// if ok, then ibp->outshape is the output shape
 	int top_bottom_pad = (ibp->outshape.height == 1) ? 1 : 4;
-	int out_wpad_0 = (ibp->outshape.width == 1)? smallest_left_pad:4;
+	int out_wpad_0 = width_before_pad;
 	int out_wpad_1 = (-(out_wpad_0 + ibp->outshape.width)) & 3;
 	int out_dpad_0 = 0;
 	int out_dpad_1 = (-ibp->outshape.depth)&31;
-
 
 	if (tensor_out_prepare_padded_d32(out_tensor,
 		ibp->outshape.batches,
@@ -448,7 +466,7 @@ static int avgpool_execute(struct nn_node *self, struct nn_graph *nn)
 	// figure out how many 'jobs' we need, how many threads to launch
 	int njobs = ibp->inshape.batches * ibp->tin.nd32;
 	runstate.jobs = njobs;
-	int n_threads = min_i32(AVGPOOL_MAX_THREADS, njobs );
+	int n_threads = min_i32(AVGPOOL_MAX_THREADS, njobs);
 	nn_scratch_reset( nn );		// reset 'scratch' pointer
 
 
@@ -463,6 +481,7 @@ printf("left_padding = %d; right = %d; infeas_w = %d\n",ibp->wpad_left, ibp->wpa
 
 	void * integ_buf = NULL;
 	int integ_buf_bytes =0;
+	int need_post_work = 0;
 
 	void (*avgpool_worker_thread_func)( struct nn_graph *, void *);
 
@@ -482,8 +501,8 @@ printf("left_padding = %d; right = %d; infeas_w = %d\n",ibp->wpad_left, ibp->wpa
 		if( mbuf == NULL)
 			return errlog(nn, "could not alloc %d bytes of scratch",nvec*128 );
 		runstate.reduce1x1_result = (int32_t*)mbuf;
-		nn_sem_init(&runstate.reduce_1x1_sync_sem,0);
 		avgpool_worker_thread_func = avgpool_reduce_to_1x1_worker_thread;
+		need_post_work = 1;
 	}else{
 		// else
 		// allocate scratch for the integral buffers
@@ -496,30 +515,25 @@ printf("left_padding = %d; right = %d; infeas_w = %d\n",ibp->wpad_left, ibp->wpa
 	// fill in the 'thrinfo' and launch threads
 	runstate.n_threads = n_threads;
 	nn_sem_init(&runstate.done_sem,0);
-	runstate.thrinfo[0].job0 = 0;
-	runstate.thrinfo[0].job_end = njobs;
-	runstate.thrinfo[0].thr_index = 0;
-#if AVGPOOL_MAX_THREADS > 1
-#if AVGPOOL_MAX_THREADS > 2
-#error "assuming <=2 threads"
-#endif
-	if( n_threads > 1){
-		int split = (njobs+1)>>1;
-		runstate.thrinfo[0].job_end = split;
-		runstate.thrinfo[1].job0 = split;
-		runstate.thrinfo[1].job_end = njobs;
-		runstate.thrinfo[1].thr_index = 1;
-	}
-#endif
 
 	for(int i=0; i < n_threads; i++){
+		runstate.thrinfo[i].job0 = (i*njobs) / n_threads;
+		runstate.thrinfo[i].job_end = ((i+1)*njobs) / n_threads;
+		runstate.thrinfo[i].thr_index = i;
 		runstate.thrinfo[i].rstp = &runstate;
 		runstate.thrinfo[i].integ_buf = integ_buf;
 		integ_buf = (void*)( (char*)integ_buf + integ_buf_bytes );
 		nn_os_work_for_vector(nn, avgpool_worker_thread_func , &runstate.thrinfo[i]);
 	}
+	if(!need_post_work) nn_os_work_for_vector(nn,avgpool_earlywork,ibp);
 
-	for(int i=0; i < n_threads; i++){
+	// wait for those to be done
+	nn_sem_wait_n_times( &runstate.done_sem, n_threads);
+
+	// do post-work for 1x1 case
+	if( need_post_work ){
+		nn_os_work_for_vector(nn, avgpool_reduce_to_1x1_post_worker_thread , &runstate);
+		nn_os_work_for_vector(nn,avgpool_earlywork,ibp);
 		nn_sem_wait( &runstate.done_sem);
 	}
 
@@ -527,7 +541,6 @@ printf("left_padding = %d; right = %d; infeas_w = %d\n",ibp->wpad_left, ibp->wpa
 		|| tensor_set_single_float(out_max_tensor,runstate.range_max) != 0) {
 		return errlog(nn,"min or max out prep fail");
 	}
-
 
 #ifdef TEST_PERFORMANCE
 	end_time =  nn_os_get_cycles(nn);
@@ -582,6 +595,9 @@ avgpool_worker_thread( struct nn_graph *nn, void *thrpv )
 // padding, depth slice results in the first and last slice are 'trimmed' by
 // forcing the 'depth padding' results  to  -in_min* winsize * 255/(in_max-in_max), which is
 // the sum you get for all 'zero' input.
+// This is run in multiple threads to do the work, with a 32-bit result at rstp->reduce1x1_result
+// and then avgpool_reduce_to_1x1_post_worker_thread is called (once the range is known)
+// to convert that to u8.
 //
 
 static void
@@ -589,10 +605,8 @@ avgpool_reduce_to_1x1_worker_thread( struct nn_graph *nn, void *thrpv )
 {
 	struct avgpool_thrinfo *thrp = (struct avgpool_thrinfo *)thrpv;
 	struct avgpool_runstate * rstp = thrp->rstp;
-	int i_am_first_thread = (thrp->thr_index == 0);
 	struct integral_buffer_plan const *ibp = rstp->ibp;
 	int nd32 = ibp->tin.nd32;			// # of depth slices
-	int batches = ibp->inshape.batches;	// # of batches
 
 	int job_idx = thrp->job0;				// get range of jobs to do
 	int job_end = thrp->job_end;
@@ -683,153 +697,172 @@ avgpool_reduce_to_1x1_worker_thread( struct nn_graph *nn, void *thrpv )
 	int32_t minval_not = uu.as_i32[0];
 	int32_t maxval = uu.as_i32[1];
 
-	if( ! i_am_first_thread){
-		// accumulate min & max to these variables
-		nn_atomic_max( &rstp->reduce1x1_min_not, minval_not);
-		nn_atomic_max( &rstp->reduce1x1_max, maxval);
-		nn_sem_post( & rstp->reduce_1x1_sync_sem);
-		// and we are done, except for the final post
-	}else{
-		// wait for other threads to update min/max.
-		int n_other = rstp->n_threads-1;
-		for( int i = 0; i < n_other; ++i ){
-			nn_sem_wait( &rstp->reduce_1x1_sync_sem);
-		}
-		// combine our min/max with the other threads
-
-		int global_min = ~max_i32( rstp->reduce1x1_min_not, minval_not);
-		int global_max = max_i32( rstp->reduce1x1_max, maxval );
-
-
-		// We now have all the results, in vectors of int32; one per 'job',
-		// and we have the min and max of the whole thing. Determine how
-		// to scale it for output.
-		// first, find the output range in application units; respect
-		//   min <=0, max >= 0
-		//
-		float fglobal_min = fminf(0.0f,global_min - in_zero) * rdiff;
-		float fglobal_max = fmaxf( fmaxf(0.0f,global_max - in_zero) * rdiff, fglobal_min + 0.001f);
-		//
-		// now we need to work out how to scale the values to get them to that range.
-		//
-		// The data path is:
-		//       (1) double, and add offset;
-		//                (the result will now be 0 if the input was at the min end of the range)
-		//       (2) scale by a 16-bit 'scale_frac' (>>15) and then >> scale_rsh
-		//       (3) divide by 1 with rounding and then limit to 0..FF.
-		//
-		// The overall scaling is scale_frac * 2^-(15+scale_rsh)
-		// since scale_rsh >=0 and we need scale_frac <=32K, that means
-		/// the overall scale <= 1. In cases where it wants to be >1 we need to artificially
-		// expand the output range.
-		//
-		float out_range = fglobal_max - fglobal_min; // range of output (prior to adjusting)
-		// the corresponding range of codes in the i32 buffer is (out_range/rdiff)
-		// So the gain we want to have is 255/(out_range/rdiff), which needs to be < 1.
-		// Note that we are working with the non-corrected output range; but correcting
-		// it can only make it larger, and the gain smaller.
-		//
-		if( 255.1f * rdiff >=  out_range){	// the '.1' is a fudge to get some margin
-			float expfac = (255.1f*rdiff)/out_range;
-			fglobal_min *= expfac;
-			fglobal_max *= expfac;
-		}
-		// now fix up the range
-		float out_min, out_max;
-		float step;				// (max-min)/255
-		float recip_step;		// 255/(max-min)
-
-		quantize_adjust_range( & out_min, &out_max, &step, & recip_step, fglobal_min, fglobal_max );
-		rstp->range_min = out_min;
-		rstp->range_max = out_max;
-
-		// now, the scale we need is rdiff * recip_step
-		// this is from the int32's to the u8's.
-		float scale_target = rdiff * recip_step;
-
-		// find the scale_rsh
-		int scale_rsh = min_i32( 31, max_i32(0,-flt_getexp(scale_target)));
-		float scale_norm = flt_ldexp(scale_target, scale_rsh+15);
-
-		int scale_fac= saturate_i16( roundf_i32(scale_norm ));
-
-		// now - figure out the offset. it is the solution to this:
-		//    (2*in_zero + offset)/2 * scale_fac = out_zero
-		//
-		//  so offset = 2*(out_zero/scale_fac - in_zero)
-		// but out_zero = -out_min*255/(out_max-out_min) =  -out_min * recip_step
-		//
-		float outz_over_scale = 0.0f;
-		if( out_min < 0 ){
-			// use the actual (quantized) scale for higher precision
-			float actual_scale = flt_ldexp( (float)scale_fac, -(scale_rsh+15));
-			outz_over_scale = -out_min * recip_step/actual_scale;
-		}
-		int inp_offset = roundf_i32( 2.0f*( outz_over_scale - in_zero));
-
-		logmsg(nn,2,"reduce to 1x1: offs %d, scale %d, >> %d, out range is %f.. %f",
-			inp_offset, scale_fac, scale_rsh, out_min, out_max );
-
-		// now scale all the values to u8. We do 2 at once, in-place in the buffer,
-		// since it's more efficient; then copy them out.
-
-		HVX_Vector  * sumptr = (HVX_Vector *)rstp->reduce1x1_result;
-		HVX_Vector voffs = Q6_V_vsplat_R(inp_offset);
-		HVX_Vector vscl = q6op_Vh_vsplat_R(scale_fac);	// need it in odd words
-		int npairs = (rstp->jobs+1)>>1;		// number of pairs
-
-		for( int i =0; i < npairs; i++){
-			HVX_Vector sums0 = sumptr[2*i];
-			HVX_Vector sums1 = sumptr[2*i+1];
-
-			sums0 = Q6_Vw_vadd_VwVw(Q6_Vw_vadd_VwVw(sums0,sums0),voffs);	//*2 * offs
-			HVX_Vector scaled0 = Q6_Vw_vmpyo_VwVh_s1_rnd_sat( sums0, vscl);	// * scale
-			scaled0= Q6_Vw_vasr_VwR( scaled0, scale_rsh);
-			sums1 = Q6_Vw_vadd_VwVw(Q6_Vw_vadd_VwVw(sums1,sums1),voffs);	//*2 * offs
-			HVX_Vector scaled1 = Q6_Vw_vmpyo_VwVh_s1_rnd_sat( sums1, vscl);	// * scale
-			scaled1= Q6_Vw_vasr_VwR( scaled1, scale_rsh);
-
-			HVX_Vector val_h = Q6_Vh_vasr_VwVwR_rnd_sat( scaled1,scaled0,1);	// >> 1 and round
-			val_h = Q6_Vh_vdeal_Vh( val_h);	// 0..31 [0] followed by 0..31 [1]
-			HVX_Vector val_ub = Q6_Vub_vpack_VhVh_sat( val_h, val_h);  		// pack/sat to u8
-			// now we have 32 of [0], 32 of[1], 32 of [0], 32 of [1]
-			HVX_VectorPair xpos = Q6_W_vdeal_VVR( val_ub, val_ub, 32);	// transpose them out
-			// have 4 of each so any alignment will work.
-			sumptr[2*i] = Q6_V_lo_W(xpos);
-			sumptr[2*i+1] = Q6_V_hi_W(xpos);
-		}
-		//
-		// now copy them all out
-		//
-		uint8_t * outp0 = ibp->tout.data;
-		int out_batch_stride = ibp->tout.batch_stride;
-		int out_d32_stride = ibp->tout.d32_stride;
-		for(int ib = 0; ib < batches; ib ++){
-			for( int id32 = 0; id32 < nd32; id32++){
-				uint8_t *outp = outp0 + ib * out_batch_stride + id32 * out_d32_stride;
-				*(HVX_Vector *)outp = *sumptr++;
-			}
-		}
-
-		/* *** scalar version of the above
-		int32_t const * ptr = rstp->reduce1x1_result;
-		for( int ib = 0; ib < batches; ib++ ){
-			for(int id32 = 0; id32 < nd32; id32++){
-				uint8_t * outp = ibp->tout.data + ib * ibp->tout.batch_stride + id32* ibp->tout.d32_stride;
-				for(int i= 0; i < 32; i++ ){
-					int delt = 2*ptr[i] + inp_offset;
-					delt = ((int64_t)delt*scale_fac + 0x4000) >> 15;
-					delt >>= scale_rsh;
-					outp[i] = saturate_u8( (delt+1)>>1 );
-				}
-				ptr += 32;
-			}
-		}
-		 */
-	}	// if i_am_first_thread
+	// accumulate min & max to these variables
+	nn_atomic_max( &rstp->reduce1x1_min_not, minval_not);
+	nn_atomic_max( &rstp->reduce1x1_max, maxval);
+	// and we are done, except for the final post
 
 	nn_sem_post( &rstp->done_sem);
 }
+// this runs once after all the work is done on avgpool_reduce_to_1x1_worker_thread
+
+static void
+avgpool_reduce_to_1x1_post_worker_thread( struct nn_graph *nn, void *rstpv )
+{
+	struct avgpool_runstate * rstp = (struct avgpool_runstate *)rstpv;
+	struct integral_buffer_plan const *ibp = rstp->ibp;
+
+	int nd32 = ibp->tin.nd32;			// # of depth slices
+	int batches = ibp->inshape.batches;	// # of batches
+
+	float winsize = ibp->window_ht * ibp->window_wid;
+	float range_min = rstp->range_min;
+	float range_max = rstp->range_max;
+	// figure out the current range.
+	// By considering the 'input' (sums) to be scaled over
+	// 0.. 255*winsize, instead of 0..255, we get the /winsize in here too.
+	float rdiff= (range_max-range_min)/(float)(255 * winsize);
+	// this is the 'zero' in the acc'd input values.
+	float in_zero = -range_min/rdiff;
+
+	// get the range found in the first phase
+	int global_min = ~rstp->reduce1x1_min_not;
+	int global_max = rstp->reduce1x1_max;
+
+
+	// We now have all the results, in vectors of int32; one per 'job',
+	// and we have the min and max of the whole thing. Determine how
+	// to scale it for output.
+	// first, find the output range in application units; respect
+	//   min <=0, max >= 0
+	//
+	float fglobal_min = fminf(0.0f,global_min - in_zero) * rdiff;
+	float fglobal_max = fmaxf( fmaxf(0.0f,global_max - in_zero) * rdiff, fglobal_min + 0.001f);
+	//
+	// now we need to work out how to scale the values to get them to that range.
+	//
+	// The data path is:
+	//       (1) double, and add offset;
+	//                (the result will now be 0 if the input was at the min end of the range)
+	//       (2) scale by a 16-bit 'scale_frac' (>>15) and then >> scale_rsh
+	//       (3) divide by 1 with rounding and then limit to 0..FF.
+	//
+	// The overall scaling is scale_frac * 2^-(15+scale_rsh)
+	// since scale_rsh >=0 and we need scale_frac <=32K, that means
+	/// the overall scale <= 1. In cases where it wants to be >1 we need to artificially
+	// expand the output range.
+	//
+	float out_range = fglobal_max - fglobal_min; // range of output (prior to adjusting)
+	// the corresponding range of codes in the i32 buffer is (out_range/rdiff)
+	// So the gain we want to have is 255/(out_range/rdiff), which needs to be < 1.
+	// Note that we are working with the non-corrected output range; but correcting
+	// it can only make it larger, and the gain smaller.
+	//
+	if( 255.1f * rdiff >=  out_range){	// the '.1' is a fudge to get some margin
+		float expfac = (255.1f*rdiff)/out_range;
+		fglobal_min *= expfac;
+		fglobal_max *= expfac;
+	}
+	// now fix up the range
+	float out_min, out_max;
+	float step;				// (max-min)/255
+	float recip_step;		// 255/(max-min)
+
+	quantize_adjust_range( & out_min, &out_max, &step, & recip_step, fglobal_min, fglobal_max );
+	rstp->range_min = out_min;
+	rstp->range_max = out_max;
+
+	// now, the scale we need is rdiff * recip_step
+	// this is from the int32's to the u8's.
+	float scale_target = rdiff * recip_step;
+
+	// find the scale_rsh
+	int scale_rsh = min_i32( 31, max_i32(0,-flt_getexp(scale_target)));
+	float scale_norm = flt_ldexp(scale_target, scale_rsh+15);
+
+	int scale_fac= saturate_i16( roundf_i32(scale_norm ));
+
+	// now - figure out the offset. it is the solution to this:
+	//    (2*in_zero + offset)/2 * scale_fac = out_zero
+	//
+	//  so offset = 2*(out_zero/scale_fac - in_zero)
+	// but out_zero = -out_min*255/(out_max-out_min) =  -out_min * recip_step
+	//
+	float outz_over_scale = 0.0f;
+	if( out_min < 0 ){
+		// use the actual (quantized) scale for higher precision
+		float actual_scale = flt_ldexp( (float)scale_fac, -(scale_rsh+15));
+		outz_over_scale = -out_min * recip_step/actual_scale;
+	}
+	int inp_offset = roundf_i32( 2.0f*( outz_over_scale - in_zero));
+
+	logmsg(nn,2,"reduce to 1x1: offs %d, scale %d, >> %d, out range is %f.. %f",
+		inp_offset, scale_fac, scale_rsh, out_min, out_max );
+
+	// now scale all the values to u8. We do 2 at once, in-place in the buffer,
+	// since it's more efficient; then copy them out.
+
+	HVX_Vector  * sumptr = (HVX_Vector *)rstp->reduce1x1_result;
+	HVX_Vector voffs = Q6_V_vsplat_R(inp_offset);
+	HVX_Vector vscl = q6op_Vh_vsplat_R(scale_fac);	// need it in odd words
+	int npairs = (rstp->jobs+1)>>1;		// number of pairs
+
+	for( int i =0; i < npairs; i++){
+		HVX_Vector sums0 = sumptr[2*i];
+		HVX_Vector sums1 = sumptr[2*i+1];
+
+		sums0 = Q6_Vw_vadd_VwVw(Q6_Vw_vadd_VwVw(sums0,sums0),voffs);	//*2 * offs
+		HVX_Vector scaled0 = Q6_Vw_vmpyo_VwVh_s1_rnd_sat( sums0, vscl);	// * scale
+		scaled0= Q6_Vw_vasr_VwR( scaled0, scale_rsh);
+		sums1 = Q6_Vw_vadd_VwVw(Q6_Vw_vadd_VwVw(sums1,sums1),voffs);	//*2 * offs
+		HVX_Vector scaled1 = Q6_Vw_vmpyo_VwVh_s1_rnd_sat( sums1, vscl);	// * scale
+		scaled1= Q6_Vw_vasr_VwR( scaled1, scale_rsh);
+
+		HVX_Vector val_h = Q6_Vh_vasr_VwVwR_rnd_sat( scaled1,scaled0,1);	// >> 1 and round
+		val_h = Q6_Vh_vdeal_Vh( val_h);	// 0..31 [0] followed by 0..31 [1]
+		HVX_Vector val_ub = Q6_Vub_vpack_VhVh_sat( val_h, val_h);  		// pack/sat to u8
+		// now we have 32 of [0], 32 of[1], 32 of [0], 32 of [1]
+		HVX_VectorPair xpos = Q6_W_vdeal_VVR( val_ub, val_ub, 32);	// transpose them out
+		// have 4 of each so any alignment will work.
+		sumptr[2*i] = Q6_V_lo_W(xpos);
+		sumptr[2*i+1] = Q6_V_hi_W(xpos);
+	}
+	//
+	// now copy them all out
+	//
+	uint8_t * outp0 = ibp->tout.data;
+	// outp0 may be misaligned due to left-padding. This is ok, since
+	// we are only writing w=1, and all 4 width units are the same in the source data.
+	// align the address to make checking tools happy.
+	outp0 = (uint8_t *)((size_t)outp0 & ~(size_t)127);
+	int out_batch_stride = ibp->tout.batch_stride;
+	int out_d32_stride = ibp->tout.d32_stride;
+	for(int ib = 0; ib < batches; ib ++){
+		for( int id32 = 0; id32 < nd32; id32++){
+			uint8_t *outp = outp0 + ib * out_batch_stride + id32 * out_d32_stride;
+			*(HVX_Vector *)outp = *sumptr++;
+		}
+	}
+
+	/* *** scalar version of the above
+	int32_t const * ptr = rstp->reduce1x1_result;
+	for( int ib = 0; ib < batches; ib++ ){
+		for(int id32 = 0; id32 < nd32; id32++){
+			uint8_t * outp = ibp->tout.data + ib * ibp->tout.batch_stride + id32* ibp->tout.d32_stride;
+			for(int i= 0; i < 32; i++ ){
+				int delt = 2*ptr[i] + inp_offset;
+				delt = ((int64_t)delt*scale_fac + 0x4000) >> 15;
+				delt >>= scale_rsh;
+				outp[i] = saturate_u8( (delt+1)>>1 );
+			}
+			ptr += 32;
+		}
+	}
+	 */
+
+	nn_sem_post( &rstp->done_sem);
+}
+
 
 ////////////////////////////////////////////////////////
 //
@@ -1148,6 +1181,9 @@ static void avgpool_process_slice_special( struct avgpool_runstate const *rstp, 
 	int in_row_stride = asp->in_next_row;
 
 	uint8_t const * in_ptr = asp->in_ptr_base + input_offset;
+	l2fetch(in_ptr, in_row_stride, (asp->vecs_wide + 1) * 128, 4);
+	if (asp->bot_zap_loc)
+		l2fetch(asp->bot_zap_loc + input_offset - in_row_stride, in_row_stride, (asp->vecs_wide) * 128, 2);
 	uint8_t * out_ptr =asp->out_ptr_base  + batch_idx * ibp->tout.batch_stride  + d32_idx * ibp->tout.d32_stride;
 
 
@@ -1157,6 +1193,12 @@ static void avgpool_process_slice_special( struct avgpool_runstate const *rstp, 
 			rowptr - in_row_stride,		// output: row up
 			rowptr, rowptr + in_row_stride,	// input: 2 rows
 			asp->row_zap_nvecs, asp->row_zap_skip);
+	}
+	if (asp->lr_zap_loc) {
+		unsigned char *ptrlb = asp->lr_zap_loc + input_offset + asp->in_wpad_left * 32;
+		unsigned char *ptrrb = asp->lr_zap_loc + input_offset + (asp->in_wpad_left+asp->in_width-2)*32;
+		l2fetch((void *)((size_t)ptrlb&-128), in_row_stride, 256, asp->lr_zap_height);
+		l2fetch((void *)((size_t)ptrrb&-128), in_row_stride, 256, asp->lr_zap_height);
 	}
 	if(asp->bot_zap_loc != NULL){
 		uint8_t * rowptr = asp->bot_zap_loc + input_offset;
@@ -1221,11 +1263,21 @@ static int avgpool_dtor(struct nn_node *self, struct nn_graph *nn)
 }
 
 
+static int avgpool_earlywork_register(struct nn_node *self, struct nn_graph *nn, struct nn_early_work *work)
+{
+	struct integral_buffer_plan *ibp = self->opaque;
+	if (ibp == NULL) return errlog(nn,"not set up yet");
+	ibp->misc = work;
+	return 0;
+}
+
 struct nn_node_ops nn_ops_for_QuantizedAvgPool_8_d32 = {
 	.execute = avgpool_execute,
 	.check = avgpool_check,
 	.ctor = node_alloc_common,
 	.dtor = avgpool_dtor,
+	.earlywork_register = avgpool_earlywork_register,
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT | NN_NODE_FLAG_OUTPUT_ACCEPTS_PREPARATION
 };
 
 struct nn_node_ops nn_ops_for_QuantizedAvgPool_8_d32_ref = {
@@ -1233,5 +1285,6 @@ struct nn_node_ops nn_ops_for_QuantizedAvgPool_8_d32_ref = {
 	.check = avgpool_check,
 	.ctor = node_alloc_common,
 	.dtor = avgpool_dtor,
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT | NN_NODE_FLAG_OUTPUT_ACCEPTS_PREPARATION
 };
 

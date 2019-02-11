@@ -10,8 +10,10 @@ ifneq (,$(findstring hexagon,$(V)))
   include $(GLUE_DIR)V_hexagon.min
 else ifneq (,$(findstring android,$(V)))
   include $(GLUE_DIR)V_android.min
+else ifneq (,$(findstring UbuntuARM, $(V)))
+  include $(GLUE_DIR)V_UbuntuARM.min
 else
-include $(GLUE_DIR)V_$V.min
+  include $(GLUE_DIR)V_$V.min
 endif
 
 ifndef MAKE_D_DIR

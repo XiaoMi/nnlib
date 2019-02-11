@@ -33,10 +33,11 @@
  *
  */
 #ifndef NN_BUFFERPOOL_H
-#define NN_BUFFERPPOOL_H 1
+#define NN_BUFFERPOOL_H 1
 
 #include <stdlib.h>
 #include <stdint.h>
+#include "nn_graph_builtin.h"
 
 
 // 'struct bufferpool':
@@ -129,7 +130,8 @@ bufpool_take( struct buffer_pool *bp, int * bufind_p )
 // if the index is out of range, or the buffer is already free, this has no effect
 // and returns -1; otherwise it sets the 'free' bit and returns 0.
 //
-int bufpool_release( struct buffer_pool *bp, int bufind )
+static inline int
+bufpool_release( struct buffer_pool *bp, int bufind )
 {
     if( bufind >= 0 && bufind < 32 ){
         uint32_t m = (1u<<bufind);
@@ -142,4 +144,4 @@ int bufpool_release( struct buffer_pool *bp, int bufind )
     return -1;
 }
 
-#endif
+#endif // NN_BUFFERPOOL_H

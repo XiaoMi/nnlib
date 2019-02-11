@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -85,6 +85,99 @@ static inline int softmax_execute(struct nn_node *self, struct nn_graph *nn)
 }
 
 
+static inline int softmax_execute_uint8(struct nn_node *self, struct nn_graph *nn)
+{
+	int i;
+	int j;
+	const struct tensor *in_tensor = self->inputs[0];
+	float min = tensor_get_float(self->inputs[1],0);
+	float max = tensor_get_float(self->inputs[2],0);
+	float beta = (self->n_inputs < 4) ? 1.0f : tensor_get_float(self->inputs[3],0);
+	struct tensor *out_tensor = self->outputs[0];
+	int depth = in_tensor->shape.depth;
+	int batches = in_tensor->shape.batches;
+	int height = in_tensor->shape.height;
+	int width = in_tensor->shape.width;
+	const unsigned char *data = in_tensor->data;
+	float *out = out_tensor->data;
+	float sum;
+	float sum_recip;
+	float *precomputed = self->opaque;
+
+	float scalex = beta * (max-min);
+	if( tensor_out_prepare_normal_fromshape( out_tensor, &in_tensor->shape, NN_TYPE_FLOAT)!= 0){
+		return errlog(nn,"out too small");
+	}
+
+	if (precomputed[255] == 0.0f || precomputed[256]!= scalex ) {
+		// The precomputed-array needs initialization
+		float scale = scalex/255.0;
+		for (i=0; i<256; i++) {
+			precomputed[i] = expf(scale*((float)(i-255)));
+		}
+		precomputed[256] = scalex;
+	}
+
+	for (j = 0; j < batches*height*width; j++) {
+		sum = 0.0f;
+		for (i = 0; i < depth; i++) {
+			sum += (out[i] = precomputed[data[i]]);
+		}
+		sum_recip = 1.0f/sum;
+		for (i = 0; i < depth; i++) {
+			out[i] *= sum_recip;
+		}
+		out += depth;
+		data += depth;
+	}
+	return 0;
+}
+
+struct nn_node *node_alloc_softmax_uint8(
+	struct nn_graph *nn,
+	uint32_t node_id,
+	op_type operation,
+	padding_type padding,
+	uint32_t num_inputs,
+	uint32_t num_outputs,
+	const struct input *inputs,
+	const struct output *outputs)
+{
+	struct nn_node *newnode = node_alloc_common(nn,node_id, operation, padding, num_inputs, num_outputs, inputs, outputs);
+
+	if (newnode == NULL) {
+		return NULL;
+	}
+
+	if ((newnode->opaque = nn_calloc(256+1,sizeof(float))) == NULL) {
+		errlog(nn,"softmax cache alloc failed");
+		goto err_free;
+	}
+	return newnode;
+
+err_free:
+	node_free_common(newnode, nn);
+	return NULL;
+}
+
+int node_free_softmax_uint8(struct nn_node *node, struct nn_graph *nn)
+{
+	if (node->opaque) nn_free(node->opaque);
+	return node_free_common(node, nn);
+}
+
+
+static int softmax_check_uint8(struct nn_node *self, struct nn_graph *nn)
+{
+	logmsg(nn,2,"Checking softmax_uint8 node %p",self);
+	int k = node_check_inputs_range( self,nn, "softmax",3,4);
+	if( k==0) k = node_check_outputs_n( self, nn, "softmax", 1);	// 1 output
+	if( k!=0)
+		return k;
+	logmsg(nn,2,"softmax node %p check OK",self);
+	return 0;
+}
+
 static int softmax_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking softmax node %p",self);
@@ -101,5 +194,13 @@ struct nn_node_ops nn_ops_for_Softmax_f = {
 	.check = softmax_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+};
+
+
+struct nn_node_ops nn_ops_for_Softmax_uint8 = {
+	.execute = softmax_execute_uint8,
+	.check = softmax_check_uint8,
+	.ctor = node_alloc_softmax_uint8,
+	.dtor = node_free_softmax_uint8,
 };
 

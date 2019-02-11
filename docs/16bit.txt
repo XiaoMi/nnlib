@@ -1,0 +1,109 @@
+
+/*
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted (subject to the limitations in the
+ * disclaimer below) provided that the following conditions are met:
+ *
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *
+ *    * Redistributions in binary form must reproduce the above
+ *      copyright notice, this list of conditions and the following
+ *      disclaimer in the documentation and/or other materials provided
+ *      with the distribution.
+ *
+ *    * Neither the name of The Linux Foundation nor the names of its
+ *      contributors may be used to endorse or promote products derived
+ *      from this software without specific prior written permission.
+ *
+ * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
+ * GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
+ * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+ * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+ * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ */
+
+__BASIC THEORY__
+
+Given a sixteen bit value, break it into two halves: the most significant half
+"h" and the least significant half "l".  Each of these would be an 8-bit byte.
+
+For a single 16x16 multiply of A * B, we can compute:
+
+	hh = Ah * Bh
+	hl = Ah * Bl
+	lh = Al * Bh
+	ll = Al * Bl
+
+These partial products are then added in the appropriate place, just like elementary school addition:
+
+	(hh << 16) + (hl << 8) + (lh << 8) + ll
+
+If we are taking a dot product of values:
+
+	\sum_{i} A_{i} * B_{i}
+
+Then we can distribute the summation across the breakdown of the elements:
+
+	sum_{hh} = \sum_{i} Ah_{i} * Bh_{i}
+	sum_{hl} = \sum_{i} Ah_{i} * Bl_{i}
+	sum_{lh} = \sum_{i} Al_{i} * Bh_{i}
+	sum_{ll} = \sum_{i} Al_{i} * Bl_{i}
+
+	sum_{total} = (sum_{hh} << 16) + (sum_{hl} << 8) + (sum_{lh} << 8) + (sum_{ll})
+
+So for each dot product that makes up the NN convolution, we can break it down into (at most) 4 8x8 convolutions
+and add (with some shifting) the results together to form the final result.
+
+
+__OPTIMIZATION NOTE__
+
+It should be noted that if the result is going to be a 16-bit value, the "ll" multiplication can only affect
+the least significant bit of the result.  It may be that three convolutions:
+hh, lh, and ll provide similar accuracy.
+
+__SIGNED VS. UNSIGNED__
+
+If we have signed 16 bit values instead of unsigned, the "h" value should be treated as signed and the "l" 
+value should be treated as unsigned.  If a signed/unsigned combination is missing in the instruction set,
+there are well-known ways of forming the missing combinations from the ones that exist
+
+__IMPLEMENTATION__
+
+If we are given the values as tensors of contiguous 16-bit values, we can
+easily divide them into two tensors of the same shape with 8-bit values (quite
+fast, using the "vdeal" instruction on HVX).  Probably for activations, this
+could be done with nearly no cost as an additional instruction at the output
+time of the previous node.  For weights we can do this processing during
+graph creation time, for no extra cost at runtime.
+
+Once the activation and weight tensor are each broken into their 8-bit component planes, we do each 
+of the required convolutions: hh, hl, lh, and if desired, ll.  Given the four 32-bit accumulators
+from these 8 bit computations, we shall assume that the 32-bit values are not close to overflowing.
+We can add them in the following way:
+
+	lh += hl
+	(if ll) lh += ll >> 8
+	hh += (lh >> 8)
+
+If desired, appropriate rounding could also be added easily during initialization of the ll/hl accumulators.
+The bias should be included during the initialization of the hh accumulator.
+
+Once we have the full 32-bit accumulators, we will multiply to scale to the desired 16-bit output range, and
+saturate to 16 bits.  Then we pack the values together and, assuming this will feed into another operation
+that will also want the 16 bit values divided, vdeal the results into two vectors to store in the appropriate
+high/low parts.  Otherwise the packed values can be stored as contiguous 16-bit values to memory.
+
+
+

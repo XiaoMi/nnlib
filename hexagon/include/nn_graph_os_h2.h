@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -48,14 +48,18 @@
 
 #include <h2.h>
 #endif
+
+typedef int32_t nn_futex_t;
+
+static inline void nn_futex_wait(nn_futex_t *ptr, nn_futex_t val) { h2_futex_wait(ptr,val); }
+static inline void nn_futex_wake(nn_futex_t *ptr, int howmany) { h2_futex_wake(ptr,howmany); }
+
 struct nn_graph;
-typedef h2_sem_t nn_sem_t;
-typedef h2_mutex_t nn_mutex_t;
-typedef h2_pipe_t nn_pipe_t;
+
 typedef pthread_t nn_thread_t;
 typedef pthread_attr_t nn_thread_attr_t;
 
-#include "nn_graph_pipe.h"
+
 
 static inline int nn_thread_join(nn_thread_t id, void **retval) { return pthread_join(id,retval); }
 static inline int nn_thread_attr_init(nn_thread_attr_t *attrs) { return pthread_attr_init(attrs); }
@@ -66,7 +70,7 @@ static inline int nn_thread_create(
 	void *(*f)(void *),
 	void *arg) 
 {
-	return pthread_create(tid,attrs,f,arg);
+	return pthread_create(tid,(nn_thread_attr_t *)attrs,f,arg);
 }
 static inline int nn_thread_attr_setstack(nn_thread_attr_t *attrs, void *stackaddr, size_t stacksize)
 {
@@ -74,7 +78,13 @@ static inline int nn_thread_attr_setstack(nn_thread_attr_t *attrs, void *stackad
 	return pthread_attr_setstack(attrs,stackaddr,stacksize);
 }
 
+static inline int nn_os_get_main_thread_priority(int nn_priority) { return 0; }
+static inline int nn_os_get_current_thread_priority(int *priority) { return 0; }
+static inline int nn_os_set_current_thread_priority(int priority) { return 0; }
 
+#if 0
+typedef h2_sem_t nn_sem_t;
+typedef h2_mutex_t nn_mutex_t;
 static inline void nn_mutex_init(nn_mutex_t *mutex) { h2_mutex_init_type(mutex,H2_MUTEX_PLAIN); }
 static inline void nn_mutex_lock(nn_mutex_t *mutex) {h2_mutex_lock(mutex); }
 static inline void nn_mutex_unlock(nn_mutex_t *mutex) {h2_mutex_unlock(mutex); }
@@ -82,6 +92,11 @@ static inline void nn_mutex_unlock(nn_mutex_t *mutex) {h2_mutex_unlock(mutex); }
 static inline void nn_sem_init(nn_sem_t *sem, int val) { h2_sem_init_val(sem,val); }
 static inline void nn_sem_post(nn_sem_t *sem) { h2_sem_up(sem); }
 static inline void nn_sem_wait(nn_sem_t *sem) { h2_sem_down(sem); }
+static inline void nn_sem_add(nn_sem_t *sem, int val) { h2_sem_add(sem,val); }
+#endif
+
+#if 0
+typedef h2_pipe_t nn_pipe_t;
 static inline nn_pipe_t *nn_pipe_alloc(struct nn_graph *nn, uint32_t pipe_elements) 
 {
 	return h2_pipe_alloc(sizeof(h2_pipe_t)+sizeof(h2_pipe_data_t)*pipe_elements);
@@ -91,6 +106,17 @@ static inline void nn_pipe_send(nn_pipe_t *pipe, unsigned long long int val)
 {
 	h2_pipe_send(pipe,val);
 }
+static inline unsigned long long int nn_pipe_recv(nn_pipe_t *pipe) { return h2_pipe_recv(pipe); }
+#else
+#if 0
+#include "nn_graph_pipe.h"
+typedef nn_portable_pipe_t nn_pipe_t;
+static inline nn_pipe_t *nn_pipe_alloc(struct nn_graph *nn, uint32_t pipe_elements) { return nn_pipe_alloc_portable(nn,pipe_elements); }
+static inline void nn_pipe_free(nn_pipe_t *pipe) { nn_pipe_free_portable(pipe); }
+static inline void nn_pipe_send(nn_pipe_t *pipe, unsigned long long int val) { return nn_pipe_send_portable(pipe,val); }
+static inline unsigned long long int nn_pipe_recv(nn_pipe_t *pipe) { return nn_pipe_recv_portable(pipe); }
+#endif
+#endif
 
 static inline unsigned long long int nn_os_get_guest_pmucnt10()
 {
@@ -99,7 +125,6 @@ static inline unsigned long long int nn_os_get_guest_pmucnt10()
 	return ret;
 }
 
-static inline unsigned long long int nn_pipe_recv(nn_pipe_t *pipe) { return h2_pipe_recv(pipe); }
 static inline void nn_os_hvx_power_on(struct nn_graph *nn) {};
 static inline void nn_os_hvx_power_off(struct nn_graph *nn) {};
 static inline uint64_t nn_os_get_cycles(struct nn_graph *nn) {
@@ -114,11 +139,15 @@ uint64_t nn_os_get_perfcount(struct nn_graph *nn);
 int nn_os_vector_acquire();
 void nn_os_vector_release(int idx);
 void nn_os_vector_init();
+#if __HEXAGON_ARCH__ == 68
+int nn_os_hmx_acquire();
+void nn_os_hmx_release(int idx);
+void nn_os_hmx_init();
+#endif
 
 int nn_os_workers_spawn(struct nn_graph *nn);
 void nn_os_workers_kill(struct nn_graph *nn);
 void nn_os_work_for_vector(struct nn_graph *nn, void (*f)(struct nn_graph *, void *),void *arg);
-void nn_os_work_for_scalar(struct nn_graph *nn, void (*f)(struct nn_graph *, void *),void *arg);
 
 static inline uint64_t nn_os_get_usecs(struct nn_graph *nn)
 {

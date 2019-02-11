@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -47,7 +47,7 @@
 #define MIN_COPY_SIZE (32)
 #define USE_HVX_FLAG  (1)
 
-
+#if 0
 static inline void fast_memcpy(void *out_ptr, void *in_ptr, uint32_t len)
 {
 	if(len < MIN_COPY_SIZE)
@@ -56,6 +56,7 @@ static inline void fast_memcpy(void *out_ptr, void *in_ptr, uint32_t len)
 		vmemcpy_asm(out_ptr,in_ptr, len);
 
 }
+#endif
 
 struct tdata_pad {
 	struct nn_node *self;
@@ -172,37 +173,115 @@ static inline void do_pad_edge_hvx(
 	int pre_d_size = element_size * pre_d;
 	int post_d_size = element_size * post_d;
 	int in_d_size = d_in * element_size;
-	int h,w;
 
-	//memset(buf_pad_ptr,padval,ALIGN_SIZE*4); 
-	
-	vmemset_asm(out,padval,pre_h_size); out += pre_h_size;
+	if( element_size==1) padval = Q6_R_vsplatb_R(padval);
+	else if ( element_size == 2) padval = Q6_R_combine_RlRl(padval,padval);
 
-	if((pre_d_size == 0) && (post_d_size == 0))
-	{
-	    for (h = 0; h < h_in; h++) {
-		vmemset_asm(out,padval,pre_w_size); out += pre_w_size;
-		fast_memcpy(out,(void *)in,in_d_size*w_in); in += in_d_size*w_in; out += in_d_size*w_in;
-		vmemset_asm(out,padval,post_w_size); out += post_w_size;
-	    }
 
-	} else {
-	    for (h = 0; h < h_in; h++) {
-		vmemset_asm(out,padval,pre_w_size); out += pre_w_size;
-		for (w = 0; w < w_in; w++)
-		{
-			memset(out,padval,pre_d_size); out += pre_d_size;
-			fast_memcpy(out,(void *)in,in_d_size*w_in); in += in_d_size*w_in; out += in_d_size*w_in;
-			memset(out,padval,post_d_size); out += post_d_size;
-		}
-		vmemset_asm(out,padval,post_w_size); out += post_w_size;
-	    }
+	struct nn_memcpy_manager  mcman;
+	nn_mcmanager_init(nn, &mcman );
+	// !! Do not return from this function without doing nn_mcmanager_wait( nn, &mcman ); !!
+
+	// top
+	if( pre_h_size > 0){
+		nn_mcmanager_vmemset32_2d(nn, &mcman,  out, padval, pre_h_size, 1, 0);	// 'single row' fill
+		out += pre_h_size;
 	}
 
-	vmemset_asm(out,padval,post_h_size); out += post_h_size;
-	nn_sem_post(&td->donesem);
+	int any_d = pre_d_size | post_d_size;
+	int any_w = pre_w_size | post_w_size;
+	
+	if(any_d == 0 || any_w == 0)
+	{
+		char * out1 = out;
+
+		// paramaters of the copy
+		int rows, copywid,pre_wid, post_wid, instride,outstride;
+		if( any_d == 0){
+			// no padding in d; maybe in w
+			rows = h_in;
+			instride = in_d_size * w_in;
+			outstride = out_width_size;
+			pre_wid = pre_w_size;
+			copywid =  in_d_size * w_in;
+			post_wid = post_w_size;
+			if( any_w == 0){
+				// neither! make it a '1-row copy'
+				copywid *= rows;
+				rows  = 1;
+				// the pre_wid, post_wid are 0 and the strides don't matter now
+			}
+		}else{		// d padding, but no w: combine h*w dims
+			rows = h_in * w_in;
+			instride = in_d_size;
+			outstride = out_depth_size;
+			pre_wid = pre_d_size;
+			copywid = in_d_size;
+			post_wid = post_d_size;
+		}
+		// 2d memset the left side
+		if( pre_wid> 0 ){
+			nn_mcmanager_vmemset32_2d(nn, &mcman,  out1, padval, pre_wid, rows, outstride );
+			out1 += pre_wid;
+		}
+		// 2d copy the middle
+		nn_mcmanager_vmemcpy_2d( nn, &mcman,
+				copywid, rows,		// width, height
+				out1,   outstride,				// outp, out_stride
+				in, instride );						// inp, in_stride
+		out1 += copywid;
+
+		if( post_wid > 0){
+			nn_mcmanager_vmemset32_2d(nn, &mcman,  out1, padval, post_wid, rows, outstride );
+		}
+
+	} else {
+		// W *and * D padding....
+		int in_w_size =  in_d_size * w_in;
+		char * out1 = out;
+		if(pre_w_size){
+			nn_mcmanager_vmemset32_2d(nn, &mcman, out1, padval,pre_w_size, h_in, out_width_size );
+			out1 += pre_w_size;
+		}
+		// loop over h, doing memsets for the depth padding
+		for( int h = 0; h < h_in; h++){
+			char * out2 = out1 + out_width_size * h;		// posn in row, after width padding
+			char const * in2 = in + in_w_size*h;
+			if( pre_d_size > 0){
+				nn_mcmanager_vmemset32_2d(nn, &mcman,  out2, padval, pre_d_size, w_in, out_depth_size);
+				out2 += pre_d_size;
+			}
+			// 2d copy the middle
+			nn_mcmanager_vmemcpy_2d( nn, &mcman,
+					in_d_size, w_in,		// width, height
+					out2,  out_depth_size,				// outp, out_stride
+					in2, in_d_size );						// inp, in_stride
+			out2 += in_d_size;
+			if( post_d_size >  0)
+				nn_mcmanager_vmemset32_2d(nn, &mcman,  out2, padval, post_d_size, w_in, out_depth_size);
+		}
+		if(post_w_size){
+			out1 += out_depth_size*w_in;
+			nn_mcmanager_vmemset32_2d(nn, &mcman, out1, padval,post_w_size, h_in, out_width_size );
+		}
+	}
+	out += h_in * out_width_size;		// skip all the core rows
+
+	// bottom
+	if( post_h_size > 0){
+		nn_mcmanager_vmemset32_2d(nn, &mcman,  out, padval, post_h_size, 1, 0);	// 'single row' fill
+	}
+	nn_mcmanager_wait( nn, &mcman );
+	//nn_sem_post(&td->donesem);
 
 }
+
+// 'pads_tensor is an array [1,1,n,2]:
+//     [  pad_b_before, pad_b_after],
+//     [  pad_h_before, pad_h_after],
+//     [  pad_w_before, pad_w_after],
+//     [  pad_d_before, pad_d_after]]
+// (if w < 4, elements on the bottom are assumed to be 0)
 
 
 
@@ -215,27 +294,56 @@ static int pad_generic_execute(struct nn_node *self,
 {
 	//const struct tensor *in_tensor = self->inputs[0];
 	//const struct tensor *pads_tensor = self->inputs[1];
+	if( pads_tensor->shape.depth != 2) return errlog(nn,"bad pad tensor");
+	unsigned padt_len = pads_tensor->shape.width;
+	if( padt_len> 4) padt_len = 4;		// ignore > 4
+
 	struct tensor *out_tensor = self->outputs[0];
 	const int32_t *pads = pads_tensor->data;
-	const int32_t pad_b_before = (pads_tensor->shape.width >= 1) ? pads[0+0] : 0;
-	const int32_t pad_b_after = (pads_tensor->shape.width >= 1) ? pads[0+1] : 0;
-	const int32_t pad_h_before = (pads_tensor->shape.width >= 2) ? pads[2+0] : 0;
-	const int32_t pad_h_after = (pads_tensor->shape.width >= 2) ? pads[2+1] : 0;
-	const int32_t pad_w_before = (pads_tensor->shape.width >= 3) ? pads[4+0] : 0;
-	const int32_t pad_w_after = (pads_tensor->shape.width >= 3) ? pads[4+1] : 0;
-	const int32_t pad_d_before =(pads_tensor->shape.width >= 4) ?  pads[6+0] : 0;
-	const int32_t pad_d_after = (pads_tensor->shape.width >= 4) ? pads[6+1] : 0;
+	const uint32_t element_size = tensor_type_size( element_type);
+
+	// extract the pads, based on w dimension; ensure all are >=0 and
+	//
+	unsigned padby[4*2] = {0,0, 0,0, 0,0, 0,0};
+	for( int i = 0; i < (int)padt_len*2; i++ ){
+		int p = pads[i];
+		if( p < 0) return errlog(nn,"pad bad tensor");
+		padby[i] = p;
+	}
+	// find the new shape; validate sanity
+	struct shape out_shape;
+	uint32_t new_shape_count = 1;
+	for( int i =0; i < 4; i++){
+		unsigned p_before = padby[2*i];
+		unsigned p_after = padby[2*i+1];
+		unsigned old_dim = in_tensor->shape.dimension[i];
+		uint64_t all_dim = (uint64_t)old_dim + (uint64_t)p_before + (uint64_t)p_after;
+		if( all_dim > (uint64_t)0x7FFFFFFF) return errlog(nn,"padded size overflow");
+		uint32_t new_dim = (uint32_t)all_dim;
+		out_shape.dimension[i] = new_dim;
+		new_shape_count = mulu32_sat( new_shape_count, new_dim);
+	}
+	if (new_shape_count ==0 || new_shape_count == (uint32_t)-1
+			|| mulu32_sat( new_shape_count, element_size) == (uint32_t)-1 )
+		return errlog(nn,"padded size overflow");
+
+	const int32_t pad_b_before = padby[0];
+	const int32_t pad_b_after  = padby[1];
+	const int32_t pad_h_before = padby[2];
+	const int32_t pad_h_after  = padby[3];
+	const int32_t pad_w_before = padby[4];
+	const int32_t pad_w_after  = padby[5];
+	const int32_t pad_d_before = padby[6];
+	const int32_t pad_d_after  = padby[7];
+
 	const int32_t d_in = in_tensor->shape.depth;
 	const int32_t w_in = in_tensor->shape.width;
 	const int32_t h_in = in_tensor->shape.height;
 	const int32_t b_in = in_tensor->shape.batches;
-	const int32_t d_out = d_in + pad_d_before + pad_d_after;
-	const int32_t w_out = w_in + pad_w_before + pad_w_after;
-	const int32_t h_out = h_in + pad_h_before + pad_h_after;
-	const int32_t b_out = b_in + pad_b_before + pad_b_after;
-	const uint32_t elements_out = d_out * w_out * h_out * b_out;
-	const uint32_t element_size = tensor_type_size( element_type);
-	const uint32_t bytes_out = elements_out * element_size;
+	const int32_t d_out = out_shape.depth;
+	const int32_t w_out = out_shape.width;
+	const int32_t h_out = out_shape.height;
+	const int32_t b_out = out_shape.batches;
 	uint8_t *in_base = in_tensor->data;
 	uint8_t *inp;
 	uint8_t *out_base = out_tensor->data;
@@ -251,7 +359,7 @@ static int pad_generic_execute(struct nn_node *self,
 		pad_d_before,pad_d_after);
 	if (pad_b_before || pad_b_after) return errlog(nn,"can't pad batches");
 
-	if( tensor_out_prepare_normal( out_tensor ,b_out,h_out,w_out,d_out, element_type)!=0)
+	if( tensor_out_prepare_normal_fromshape( out_tensor, &out_shape, element_type)!=0)
 		 return errlog(nn,"out too small");
 
 	for (b = 0; b < b_out; b++) {
@@ -262,7 +370,6 @@ static int pad_generic_execute(struct nn_node *self,
 		if(hvx_flag)
 		{
 		    int bytes = h_in*w_in*d_in*element_size;
-		    
 
 		    td.self = self;
 		    td.iptr = inp;
@@ -285,10 +392,12 @@ static int pad_generic_execute(struct nn_node *self,
 		    else
 			l2fetch(inp, 1 , NUM_BYT_PERVECTOR , (32*1024)/NUM_BYT_PERVECTOR);
 
-		    nn_sem_init(&td.donesem,0);
+		    // do_pad_edge doesn't need vector thread any more
+		    do_pad_edge_hvx(nn, &td);
 
-		    nn_os_work_for_vector(nn,do_pad_edge_hvx, &td);
-		    nn_sem_wait(&td.donesem);
+		    //nn_sem_init(&td.donesem,0);
+		    //nn_os_work_for_vector(nn,do_pad_edge_hvx, &td);
+		    //nn_sem_wait(&td.donesem);
 
 		} else {
 		    do_pad( outp,
@@ -306,7 +415,7 @@ static int pad_generic_execute(struct nn_node *self,
 			padval);
 		}
 	}
-	return bytes_out;
+	return 0;
 }
 
 static int pad_f_execute(struct nn_node *self, struct nn_graph *nn)
@@ -319,9 +428,9 @@ static int pad_f_execute(struct nn_node *self, struct nn_graph *nn)
 	ret = pad_generic_execute(self,nn,self->inputs[0],self->inputs[1],NN_TYPE_FLOAT,0, 0);
 #ifdef DEBUG_PRINT_GENERIC_PAD_REF_PERFORMANCE
 	uint32_t end_time =  nn_os_get_cycles(nn);
-	printf("Pad -f cycles = %ld (elements = %d)\n", (end_time-start_time), ret);
+	printf("Pad -f cycles = %ld (elements = %d)\n", (end_time-start_time), self->outputs[0].data_size);
 #endif
-	return 0;
+	return ret;
 }
 
 static int pad_q_execute(struct nn_node *self, struct nn_graph *nn)
@@ -337,10 +446,29 @@ static int pad_q_execute(struct nn_node *self, struct nn_graph *nn)
 	float pad_val_f = 0.0f;
 	int ret;
 
-	if (self->n_inputs == 5) {
+	if (self->n_inputs > 4) {
 		pad_val_f = tensor_get_float(self->inputs[4],0);
 	}
-	int padval = quantize_uint8(pad_val_f,in_min,in_max);
+
+	if (self->n_inputs > 5 && tensor_get_int32(self->inputs[5],0)) {
+		if (pad_val_f < in_min || pad_val_f > in_max) {
+			return errlog(nn, "Pad value (%f) is outside the range of inputs (%f,%f)", pad_val_f, in_min, in_max);
+		}
+	}
+
+	int padval;
+	if( fabsf(pad_val_f) != INFINITY ){
+		padval = roundf_i32(255.0f * (pad_val_f - in_min) /(in_max-in_min));
+		// quantization creates inaccuracies if the pad val is outside the range of the inputs
+		// allow some leeway for rounding errors
+		if (padval  < -2 || padval > 257 ) {
+			return errlog(nn,"Pad value outside the range of inputs");
+		}
+		padval = saturate_u8( padval );
+	}else{
+		// treat -/+ inf as 0 or 255
+		padval = (pad_val_f < 0)? 0 : 255;
+	}
 	tensor_copy(out_min_tensor,in_min_tensor);
 	tensor_copy(out_max_tensor,in_max_tensor);
 
@@ -350,10 +478,10 @@ static int pad_q_execute(struct nn_node *self, struct nn_graph *nn)
 	ret = pad_generic_execute(self,nn,in_tensor,in_pads_tensor, NN_TYPE_QUINT8,padval, USE_HVX_FLAG);
 #ifdef	DEBUG_PRINT_EDGE_PAD_HVX_PERFORMANCE
 	uint32_t end_time=  nn_os_get_cycles(nn);
-	printf("Pad  HVX cycles = %lu (elements = %d)\n",  (end_time-start_time), ret);
+	printf("Pad  HVX cycles = %lu (elements = %d)\n",  (end_time-start_time), self->outputs[0].data_size);
 #endif
 
-	return 0;
+	return ret;
 }
 
 static int pad_f_check(struct nn_node *self, struct nn_graph *nn)
@@ -369,7 +497,7 @@ static int pad_f_check(struct nn_node *self, struct nn_graph *nn)
 static int pad_q_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"qpad node %p",self);
-	int k = node_check_inputs_range( self, nn, "pad", 4, 5 );
+	int k = node_check_inputs_range( self, nn, "pad", 4, 6 );
 	if(k==0) k = node_check_outputs_n( self, nn, "pad", 3 );
 	if (k!=0)
 		return k;

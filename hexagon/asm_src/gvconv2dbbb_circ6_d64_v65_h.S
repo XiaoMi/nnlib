@@ -31,6 +31,8 @@
  * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
+ */
+/*
   Memory
      CODESIZE 1408 bytes
      STACK     112 bytes
@@ -445,6 +447,7 @@ gvconv2dbbb_circ6_d64_v65_asm:
        w11.tmp = vmem(ptr_w1++#1)                        //[1, 7]same 2nd 32weights stream 1
        s13_s10.w += vrmpy(w11.b, x31_x01.ub)             //[1, 7]
        s14_s11.w += vrmpy(w11.b, x41_x11.ub)             //[1, 7]
+       p2 = cmp.ge(col_count,#6)                         // Do we have a full 6 cols?
    }
 /* ------------------------------------------------------------------------ */
 //     q2   q1   q0
@@ -460,10 +463,12 @@ gvconv2dbbb_circ6_d64_v65_asm:
    {   zshift = memw(sp+#40<<2)                          //final shift 7 + 16
        mine.w = vmin(mine.w, s00.w)                      //min accumulation
        maxe.w = vmax(maxe.w, s00.w)                      //max accumulation
+       if (!p2) s05 = s00                                //
    } { 
        s0_sh.w = vasl(s00.w, zshift)                     //
        maxe.w = vmax(maxe.w, s01.w)                      //max accumulation
        mine.w = vmin(mine.w, s01.w)                      //min accumulation
+       if (!p2) s15 = s00                                //
    } {
        s1_sh.w = vasl(s01.w, zshift)                     //
        maxe.w = vmax(maxe.w, s02.w)                      //max accumulation
@@ -557,7 +562,7 @@ gvconv2dbbb_circ6_d64_v65_asm:
    } {   
        if(q1)  vmem(ptr_z0+#1):nt = d054                 //
        s0_sh.w = vasl(s14.w, zshift)                     //
-       p1 = cmp.eq(col_count, #0)                        //
+       p1 = cmp.gt(col_count, #0)                        //
    } {
        if(q2) vmem(ptr_z0+#2):nt = d054                  //
        s13.w += vmpyo(s1_sh.w, vrecip.h):SSR             //
@@ -607,7 +612,7 @@ gvconv2dbbb_circ6_d64_v65_asm:
    } {
        if(q2) vmem(ptr_z1+#2):nt = d154                  //
        ptr_z1 = add(ptr_z1, #192)                        //
-       if(!p1) jump   .L_width                           //next 2 rows 8 points per row
+       if (p1) jump   .L_width                           //next 2 rows 8 points per row
    }//endloop width
 /* --------------------------------------------------------------------------- */
    {   weight_stride = memw(sp+#24<<2)                   //

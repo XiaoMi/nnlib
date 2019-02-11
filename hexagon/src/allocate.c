@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -208,7 +208,7 @@ static int allocate_storage(struct nn_graph *nn)
 	if (check_allocations(nn) != 0) return errlog(nn,"check");
 	if (nn->bulk) return errlog(nn,"bulk already allocated!?");
 	if ((nn->bulk = nn_malloc(nn->watermark_offset)) == NULL) {
-		return errlog(nn,"bulk malloc fail");
+		return errlog(nn,"bulk malloc fail, size requested==%d",nn->watermark_offset);
 	}
 	logmsg(nn,2,"Allocated %d bytes @ %p.  Hope that's enough!",
 		nn->watermark_offset,
@@ -219,6 +219,7 @@ static int allocate_storage(struct nn_graph *nn)
 	return 0;
 }
 
+#if 1
 static void remove_freenodes(struct nn_graph *nn)
 {
 	struct nn_node **p = &nn->head;
@@ -273,7 +274,7 @@ static int add_freenodes(struct nn_graph *nn)
 		for (i = 0; i < tmp->n_outputs; i++) {
 			t = tmp->outputs[i];
 			if ((t->max_size > 0) && (t->data == NULL)) {
-				dst = find_last_consumer(nn,tmp,i);
+				dst = t->last_consumer;
 				if (append_freenode(nn,dst,tmp,i) != 0) {
 					return errlog(nn,"can't append");
 				}
@@ -282,6 +283,7 @@ static int add_freenodes(struct nn_graph *nn)
 	}
 	return 0;
 }
+#endif
 
 static int allocate_and_free(struct nn_graph *nn)
 {
@@ -289,6 +291,8 @@ static int allocate_and_free(struct nn_graph *nn)
 	struct tensor *t;
 	int i;
 	for (tmp = nn->head; tmp != NULL; tmp = tmp->next) {
+#if 1
+	// OLD: look for prefree ops
 		if (tmp->node_type == OP_PreFree) {
 			if (prefree(nn,
 				&nn->root,
@@ -301,6 +305,7 @@ static int allocate_and_free(struct nn_graph *nn)
 				tmp->outputs[0]->data);
 			continue;
 		}
+#endif
 		/* Not a free node, allocate outputs */
 		for (i = 0; i < tmp->n_outputs; i++) {
 			t = tmp->outputs[i];
@@ -308,13 +313,29 @@ static int allocate_and_free(struct nn_graph *nn)
 				/* Pre-Allocate data */
 				if ((t->data = prealloc(nn,&nn->root,t->max_size))
 					== NULL) {
-					return errlog(nn,"alloc failed.  %p is output from node %p, requesting %d bytes", t, tmp, t->max_size);
+					return errlog(nn,"alloc failed.  %p is output %d from node %p (id %x), requesting %d bytes", t, i, tmp, tmp->node_id, t->max_size);
 				}
 				logmsg(nn,3,"alloc %d bytes @ %p",
 					t->max_size,
 					t->data);
 			}
 		}
+#if 0
+	// NEW: Check for being last consumer for a tensor
+	// FIXME: how do we signify that the data pointer is bulk and not malloc'd like for const nodes?
+	// Until we fix this, we can't use this newer, somewhat more efficient code.
+	// But the bulk of the performance benefit is from the last_consumer pointer.
+		for (i = 0; i < tmp->n_inputs; i++) {
+			const struct tensor *ct;
+			ct = tmp->inputs[i];
+			if (ct->last_consumer != tmp) continue;
+			if (ct->max_size == 0) continue;
+			if (prefree(nn,&nn->root,ct->data,ct->max_size) != 0) {
+				return errlog(nn,"free failed?!");
+			}
+			logmsg(nn,3,"prefree %d @ %p",ct->max_size,ct->data);
+		}
+#endif
 	}
 	return 0;
 }
@@ -334,9 +355,11 @@ static void reset_allocated_pointers(struct nn_graph *nn)
 int allocate_graph_storage(struct nn_graph *nn)
 {
 	/* initialize mm system */
+	set_last_consumers(nn);
 	alloc_init(nn);
 	/* Add the free nodes where they belong */
 	if (add_freenodes(nn) != 0) return errlog(nn,"add freenodes");
+	/* Instead of free nodes, mark last consumer in every tensor */
 	/* Go through and figure out storage requirements */
 	if (allocate_and_free(nn) != 0) return errlog(nn,"alloc/free");
 	/* 

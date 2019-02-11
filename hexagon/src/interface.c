@@ -1,4 +1,3 @@
-
 /*
  * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
@@ -35,9 +34,9 @@
  */
 
 /*
- * 
+ *
  * Now that that's out of the way, let's get to the good stuff.
- * 
+ *
  * This contains the interface code.
  */
 
@@ -46,11 +45,14 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "nn_string_map.h"
 #ifndef __hexagon__
 #include <malloc.h>
 #endif
 
+
 #if defined(USE_OS_QURT) // should be only for QURT
+#include "remote.h"
 #include "HAP_farf.h"
 #include "HAP_power.h"
 #include "HAP_mem.h"
@@ -59,7 +61,32 @@
 #include <qurt.h>
 #else
 #define AEE_EBADCLASS 10
+typedef void* remote_handle64;
 #endif
+
+#define UNUSED_PARAM(x) (void)(x)
+#define NN_VERSION 0x00020600
+
+// TODO - Move these from globals to a graph property
+extern int Num_Vector_Threads;
+extern int Total_Threads;
+extern int Stack_Size;
+extern int VTCM_User_Req;
+
+// Lookup table from qurt's qurt_sysenv_arch_version&0xffff onto known thread-counts
+struct thread_count_t {
+	int arch;
+	int threads;
+	int hvx_threads;
+	int vtcm_size;
+};
+struct thread_count_t Arch_Thread_Counts[] = {
+	{ .arch=0x8466, .threads=4, .hvx_threads=4, .vtcm_size=262144 }, //8150
+	{ .arch=0x4066, .threads=4, .hvx_threads=2, .vtcm_size=262144 }, //Talos
+	{ .arch=0,      .threads=0, .hvx_threads=0, .vtcm_size=0 },
+};
+
+
 
 static inline void fast_strncpy(char *dst, const char *src, int len)
 {
@@ -69,7 +96,7 @@ static inline void fast_strncpy(char *dst, const char *src, int len)
 	memcpy(dst,src,real_len);
 }
 
-static inline struct nn_graph *nn_id_to_graph(nn_id_t id) {
+struct nn_graph *nn_id_to_graph(nn_id_t id) {
 	return (struct nn_graph *)(id);
 }
 
@@ -77,13 +104,35 @@ static inline nn_id_t nn_graph_to_id(struct nn_graph *graph) {
 	return (nn_id_t)(graph);
 }
 
-uint32_t hexagon_nn_get_dsp_offset()
+
+// Each symbol on the right is from the library on the left of =.
+// Send back the current address for subraction from objdump symbol map.
+
+int hexagon_nn_get_dsp_offset(uint32_t *libhexagon_addr, uint32_t *fastrpc_shell_addr)
 {
-	return (uint32_t) &hexagon_nn_get_dsp_offset;
+
+        int retVal = 0;
+#if defined(USE_OS_QURT) // should be only for QURT
+	*fastrpc_shell_addr = (uint32_t)&qurt_sem_add;
+	*libhexagon_addr    = (uint32_t)&hexagon_nn_get_dsp_offset;
+#else
+	*fastrpc_shell_addr = 0;
+	*libhexagon_addr    = 0;
+#endif
+	return retVal;
 }
 
-int hexagon_nn_init(hexagon_nn_nn_id *g)
+int hexagon_nn_domains_get_dsp_offset(
+	remote_handle64 h,
+	uint32_t *libhexagon_addr,
+	uint32_t *fastrpc_shell_addr
+	)
 {
+	UNUSED_PARAM(h);
+	return hexagon_nn_get_dsp_offset(libhexagon_addr, fastrpc_shell_addr);
+}
+
+int hexagon_nn_init_with_info(hexagon_nn_nn_id* g, const struct initinfo* info) {
 	if (!g) return AEE_EBADCLASS;
 
 	/* allocate new ID */
@@ -93,6 +142,10 @@ int hexagon_nn_init(hexagon_nn_nn_id *g)
 	if ((graph = nn_calloc(1,sizeof(*graph))) == NULL) {
 		return -1;
 	}
+
+	nn_os_vtcm_choose_size(graph);
+	graph->priority = info->priority;
+
 	graph->state = NN_GRAPH_CONSTRUCTION;
 	nn_mutex_init(&graph->log_mutex);
 	if ((graph->scratch = nn_memalign(128,SCRATCH_SIZE)) == NULL) {
@@ -117,6 +170,27 @@ int hexagon_nn_init(hexagon_nn_nn_id *g)
 	return 0;
 }
 
+int hexagon_nn_domains_init_with_info(remote_handle64 h, hexagon_nn_nn_id* g, const struct initinfo* info)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_init_with_info(g,info);
+}
+
+
+int hexagon_nn_init(hexagon_nn_nn_id *g)
+{
+	struct initinfo info;
+	info.priority = 0; // 0 is default
+	return hexagon_nn_init_with_info(g, &info);
+}
+
+int hexagon_nn_domains_init(remote_handle64 h, hexagon_nn_nn_id* g)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_init(g);
+}
+
+
 int hexagon_nn_getlog(nn_id_t id, unsigned char *buf, uint32_t length)
 {
 	struct nn_graph *graph;
@@ -129,6 +203,12 @@ int hexagon_nn_getlog(nn_id_t id, unsigned char *buf, uint32_t length)
 	return 0;
 }
 
+int hexagon_nn_domains_getlog(remote_handle64 h, nn_id_t id, unsigned char *buf, uint32_t length)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_getlog(id, buf, length);
+}
+
 int hexagon_nn_snpprint(nn_id_t id, unsigned char *buf, uint32_t length)
 {
 	struct nn_graph *graph;
@@ -136,6 +216,12 @@ int hexagon_nn_snpprint(nn_id_t id, unsigned char *buf, uint32_t length)
 	if ((graph = nn_id_to_graph(id)) == NULL) return -1;
 	do_snpprint(graph,(char *)buf,length);
 	return 0;
+}
+
+int hexagon_nn_domains_snpprint(remote_handle64 h, nn_id_t id, unsigned char *buf, uint32_t length)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_snpprint(id, buf, length);
 }
 
 int hexagon_nn_set_debug_level(nn_id_t id, int level)
@@ -147,6 +233,12 @@ int hexagon_nn_set_debug_level(nn_id_t id, int level)
 	return 0;
 }
 
+int hexagon_nn_domains_set_debug_level(remote_handle64 h, nn_id_t id, int level) {
+	UNUSED_PARAM(h);
+	return hexagon_nn_set_debug_level(id, level);
+}
+
+
 int hexagon_nn_prepare(nn_id_t id)
 {
 	struct nn_graph *graph;
@@ -155,6 +247,12 @@ int hexagon_nn_prepare(nn_id_t id)
 	}
 	return do_prepare(graph);
 }
+
+int hexagon_nn_domains_prepare(remote_handle64 h, nn_id_t id) {
+	UNUSED_PARAM(h);
+	return hexagon_nn_prepare(id);
+}
+
 
 int hexagon_nn_append_node(
 	nn_id_t id,
@@ -184,10 +282,26 @@ int hexagon_nn_append_node(
 		outputs);
 }
 
+int hexagon_nn_domains_append_node(
+	remote_handle64 h,
+	nn_id_t id,
+	uint32_t node_id,
+	op_type operation,
+	padding_type padding,
+	const struct input *inputs,
+	uint32_t num_inputs,
+	const struct output *outputs,
+	uint32_t num_outputs)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_append_node(
+		id, node_id, operation, padding, inputs, num_inputs, outputs, num_outputs);
+}
+
 int hexagon_nn_append_const_node(
 	nn_id_t id,
 	uint32_t node_id,
-	uint32_t batches, 
+	uint32_t batches,
 	uint32_t height,
 	uint32_t width,
 	uint32_t depth,
@@ -212,6 +326,21 @@ int hexagon_nn_append_const_node(
 		data_len);
 }
 
+int hexagon_nn_domains_append_const_node(
+	remote_handle64 h,
+	nn_id_t id,
+	uint32_t node_id,
+	uint32_t batches,
+	uint32_t height,
+	uint32_t width,
+	uint32_t depth,
+	const uint8_t *data,
+	uint32_t data_len)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_append_const_node(
+		id, node_id, batches, height, width, depth, data, data_len);
+}
 
 
 
@@ -241,6 +370,20 @@ int hexagon_nn_append_empty_const_node(
 		data_len);
 }
 
+int hexagon_nn_domains_append_empty_const_node(
+	remote_handle64 h,
+	nn_id_t id,
+	uint32_t node_id,
+	uint32_t batches,
+	uint32_t height,
+	uint32_t width,
+	uint32_t depth,
+	uint32_t data_len)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_append_empty_const_node(
+		id, node_id, batches, height, width, depth, data_len);
+}
 
 
 int hexagon_nn_populate_const_node(
@@ -265,7 +408,17 @@ int hexagon_nn_populate_const_node(
 		target_offset);
 }
 
-
+int hexagon_nn_domains_populate_const_node(
+	remote_handle64 h,
+	nn_id_t id,
+	uint32_t node_id,
+	const uint8_t *data,
+	uint32_t data_len,
+	uint32_t target_offset)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_populate_const_node(id, node_id, data, data_len, target_offset);
+}
 
 
 /*
@@ -273,7 +426,7 @@ int hexagon_nn_populate_const_node(
  * as we make it more complex.
  * Instead, create struct tensors here and copy from hexagon_nn_tensordef values.
  * You should be able to avoid copying the bulk data though!
- * 
+ *
  * Note that in C99 you can create an array on the stack from a function argument.
  */
 
@@ -323,7 +476,13 @@ int hexagon_nn_execute_new(
 		t->data = in->data;
 		t->max_size = in->dataLen;
 		t->data_size = in->data_valid_len;
-		t->format.raw = 0;
+		t->format.raw0 = t->format.raw1 = 0;
+		int elementsize = in->data_valid_len / (in->batches * in->height * in->width * in->depth);
+		if (elementsize == 4) {
+			t->format.type = NN_TYPE_FLOAT; // Just a best guess
+		} else {
+			t->format.type = NN_TYPE_QUINT8; // Just a best guess
+		}
 	}
 	for (i = 0; i < n_outputs; i++) {
 		hexagon_nn_tensordef *out = outputs+i;
@@ -331,9 +490,6 @@ int hexagon_nn_execute_new(
 		t->data = out->data;
 		t->max_size = out->dataLen;
 		t->data_size = 0;
-	}
-	if ((graph = nn_id_to_graph(id)) == NULL) {
-		return errlog(NULL,"nn id %x not found",id);
 	}
 	if (graph->state != NN_GRAPH_PREPARED) {
 		return errlog(graph,"graph not prepared");
@@ -353,6 +509,18 @@ int hexagon_nn_execute_new(
 	graph->execution_total_cycles = pcycle_stop - pcycle_start;
 	if (ret) return errlog(graph,"fail in execute_new()");
 	return ret;
+}
+
+int hexagon_nn_domains_execute_new(
+	remote_handle64 h,
+	nn_id_t id,
+	const hexagon_nn_tensordef *inputs,
+	uint32_t n_inputs,
+	hexagon_nn_tensordef *outputs,
+	uint32_t n_outputs)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_execute_new(id, inputs, n_inputs, outputs, n_outputs);
 }
 
 int hexagon_nn_execute(
@@ -393,6 +561,30 @@ int hexagon_nn_execute(
 	return ret;
 }
 
+int hexagon_nn_domains_execute(
+	remote_handle64 h,
+	nn_id_t id,
+	uint32_t batches_in,
+	uint32_t height_in,
+	uint32_t width_in,
+	uint32_t depth_in,
+	const uint8_t *data_in,
+	uint32_t data_len_in,
+	uint32_t *batches_out,
+	uint32_t *height_out,
+	uint32_t *width_out,
+	uint32_t *depth_out,
+	uint8_t *data_out,
+	uint32_t data_out_max,
+	uint32_t *data_out_size)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_execute(
+		id,
+		batches_in, height_in, width_in, depth_in, data_in, data_len_in,
+		batches_out, height_out, width_out, depth_out, data_out, data_out_max, data_out_size);
+}
+
 int hexagon_nn_teardown(nn_id_t id)
 {
 	struct nn_graph *graph;
@@ -402,8 +594,40 @@ int hexagon_nn_teardown(nn_id_t id)
 	return do_teardown(graph);
 }
 
-int hexagon_nn_get_perfinfo(nn_id_t id, 
-	struct perfinfo *info_out, 
+int hexagon_nn_domains_teardown(remote_handle64 h, nn_id_t id) {
+	UNUSED_PARAM(h);
+	return hexagon_nn_teardown(id);
+}
+
+int hexagon_nn_get_nodetype(nn_id_t graph_id,
+			    nn_id_t node_id,
+			    uint32_t *node_type)
+{
+	struct nn_graph *graph;
+	if ((graph = nn_id_to_graph(graph_id)) == NULL) {
+		return errlog(NULL,"nn graph-id %x not found",graph_id);
+	}
+	const struct nn_node *node;
+	if ((node = get_node(graph,node_id)) == NULL) {
+		return errlog(NULL,"node-id %x not found",node_id);
+	}
+
+	*node_type = node->node_type;
+	return 0;
+}
+
+int hexagon_nn_domains_get_nodetype(
+	remote_handle64 h,
+	nn_id_t graph_id,
+	nn_id_t node_id,
+	uint32_t *nodetype)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_get_nodetype(graph_id, node_id, nodetype);
+}
+
+int hexagon_nn_get_perfinfo(nn_id_t id,
+	struct perfinfo *info_out,
 	unsigned int info_out_len,
 	unsigned int *n_items_out)
 {
@@ -418,6 +642,17 @@ int hexagon_nn_get_perfinfo(nn_id_t id,
 	}
 }
 
+int hexagon_nn_domains_get_perfinfo(
+	remote_handle64 h,
+	nn_id_t id,
+	struct perfinfo *info_out,
+	unsigned int info_out_len,
+	unsigned int *n_items_out)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_get_perfinfo(id, info_out, info_out_len, n_items_out);
+}
+
 int hexagon_nn_reset_perfinfo(nn_id_t id, uint32_t event)
 {
 	struct nn_graph *graph;
@@ -427,10 +662,26 @@ int hexagon_nn_reset_perfinfo(nn_id_t id, uint32_t event)
 	return do_perfinfo_reset(graph,event);
 }
 
+
+int hexagon_nn_domains_reset_perfinfo(
+	remote_handle64 h,
+	nn_id_t id,
+	int32_t event)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_reset_perfinfo(id, event);
+}
+
 int hexagon_nn_version(int *ver)
 {
-	*ver = 92;
+	*ver = NN_VERSION;
 	return 0;
+}
+
+int hexagon_nn_domains_version(remote_handle64 h, int* ver)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_version(ver);
 }
 
 int hexagon_nn_last_execution_cycles(nn_id_t id, unsigned int *cycles_lo, unsigned int *cycles_hi)
@@ -446,6 +697,15 @@ int hexagon_nn_last_execution_cycles(nn_id_t id, unsigned int *cycles_lo, unsign
 	return 0;
 }
 
+int hexagon_nn_domains_last_execution_cycles(
+	remote_handle64 h,
+	nn_id_t id,
+	unsigned int *cycles_lo,
+	unsigned int *cycles_hi)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_last_execution_cycles(id, cycles_lo, cycles_hi);
+}
 
 int print_node_perf(nn_id_t id)
 {
@@ -455,9 +715,112 @@ int print_node_perf(nn_id_t id)
 		return errlog(NULL,"nn id %x not found",id);
 	}
 	for (node = graph->head; node != NULL; node = node->next) {
-		logmsg(graph,0,"Node performance: %9llu - %s",node->iter_cycles,hexagon_nn_op_names[node->node_type]);
+		if (node->node_type != OP_Const)
+			logmsg(graph,0,"Node performance: %9llu - %s",node->iter_cycles,hexagon_nn_op_names[node->node_type]);
 	}
 	return 0;
+}
+int hexagon_nn_variable_read(
+	nn_id_t id,
+	uint32_t node_id,
+	int32_t output_index,
+	uint32_t *b_out,
+	uint32_t *h_out,
+	uint32_t *w_out,
+	uint32_t *d_out,
+	uint8_t *data_out,
+	uint32_t data_out_max,
+	uint32_t *data_out_len)
+{
+	struct nn_graph *graph;
+	if ((graph = nn_id_to_graph(id)) == NULL) {
+		return errlog(NULL,"nn id %x not found",id);
+	}
+	return do_variable_read( graph, node_id, output_index,
+		b_out, h_out, w_out, d_out, data_out, data_out_max, data_out_len );
+}
+
+int hexagon_nn_domains_variable_read(
+	remote_handle64 h,
+	nn_id_t id,
+	uint32_t node_id,
+	int32_t output_index,
+	uint32_t *b_out,
+	uint32_t *h_out,
+	uint32_t *w_out,
+	uint32_t *d_out,
+	uint8_t *data_out,
+	uint32_t data_out_max,
+	uint32_t *data_out_len)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_variable_read(
+		id, node_id, output_index, b_out, h_out, w_out, d_out,
+		data_out, data_out_max, data_out_len);
+}
+
+
+int hexagon_nn_variable_write (
+	nn_id_t id,
+	uint32_t node_id,
+	int32_t output_index,
+	uint32_t batches_in,
+	uint32_t height_in,
+	uint32_t width_in,
+	uint32_t depth_in,
+	const uint8_t *data_in,
+	uint32_t data_len_in)
+{
+	struct nn_graph *graph;
+	if ((graph = nn_id_to_graph(id)) == NULL) {
+		return errlog(NULL,"nn id %x not found",id);
+	}
+	return do_variable_write( graph, node_id, output_index,
+		batches_in, height_in, width_in, depth_in, data_in, data_len_in );
+}
+
+int hexagon_nn_domains_variable_write (
+	remote_handle64 h,
+	nn_id_t id,
+	uint32_t node_id,
+	int32_t output_index,
+	uint32_t batches_in,
+	uint32_t height_in,
+	uint32_t width_in,
+	uint32_t depth_in,
+	const uint8_t *data_in,
+	uint32_t data_len_in)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_variable_write(
+		id, node_id, output_index, batches_in, height_in, width_in, depth_in,
+		data_in, data_len_in);
+}
+
+int hexagon_nn_variable_write_flat(
+	nn_id_t id,
+	uint32_t node_id,
+	int32_t output_index,
+	const uint8_t *data_in,
+	uint32_t data_len_in)
+{
+	struct nn_graph *graph;
+	if ((graph = nn_id_to_graph(id)) == NULL) {
+		return errlog(NULL,"nn id %x not found",id);
+	}
+	return do_variable_write_flat( graph, node_id, output_index, data_in, data_len_in );
+}
+
+int hexagon_nn_domains_variable_write_flat(
+	remote_handle64 h,
+	nn_id_t id,
+	uint32_t node_id,
+	int32_t output_index,
+	const uint8_t *data_in,
+	uint32_t data_len_in)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_variable_write_flat(id, node_id, output_index, data_in, data_len_in);
 }
 
 
@@ -466,31 +829,82 @@ int hexagon_nn_GetHexagonBinaryVersion(int *ver)
 	return hexagon_nn_version(ver);
 }
 
+int hexagon_nn_domains_GetHexagonBinaryVersion(remote_handle64 h, int *ver)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_GetHexagonBinaryVersion(ver);
+}
+
 int hexagon_nn_PrintLog(const uint8_t data_in, unsigned int data_in_len)
 {
 	return 0;
 }
 
+int hexagon_nn_domains_PrintLog(remote_handle64 h,
+	const uint8_t data_in, unsigned int data_in_len)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_PrintLog(data_in, data_in_len);
+}
+
 int hexagon_nn_op_name_to_id(const char *name, unsigned int *id)
 {
-	int i;
-	for (i = 0; i < NN_OPS_MAX; i++) {
-		if (0==strcmp(name,hexagon_nn_op_names[i])) {
-			*id = i;
-			return 0;
-		}
-	}
-	return -1;
+	int res = op_type_from_string( name );
+	*id = res;
+	return (res <0)? -1:0;
+}
+
+int hexagon_nn_domains_op_name_to_id(remote_handle64 h,
+	const char *name, unsigned int *id)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_op_name_to_id(name, id);
 }
 
 int hexagon_nn_op_id_to_name(const unsigned int id, char *name, int name_len)
 {
-	if (id >= NN_OPS_MAX) return -1;
-	const char *opname = hexagon_nn_op_names[id];
-	if ((strlen(opname)+1) > name_len) return -1;
+	const char *opname = op_type_to_string(id);
+	if ( opname == NULL ||  (strlen(opname)+1) > name_len) return -1;
 	strcpy(name,opname);
 	return 0;
 }
+
+int hexagon_nn_domains_op_id_to_name(remote_handle64 h,
+	const unsigned int id, char *name, int name_len)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_op_id_to_name(id, name, name_len);
+}
+
+
+int hexagon_nn_get_num_nodes_in_graph(nn_id_t id, unsigned int *num_nodes){
+	struct nn_graph *graph;
+	struct nn_node *node;
+	*num_nodes = 0;
+	if ((graph = nn_id_to_graph(id)) == NULL) {
+		return errlog(NULL,"nn id %x not found",id);
+	}
+	if (graph->state != NN_GRAPH_PREPARED) {
+		return errlog(graph,"graph not prepared");
+	}
+	uint32_t i = 0;
+	for (node = graph->head; node != NULL; node = node->next) {
+		i++;
+	}
+	if (i==0){
+		return errlog(graph,"0 nodes in present graph");
+	}
+	*num_nodes = i;
+	return 0;
+}
+
+int hexagon_nn_domains_get_num_nodes_in_graph(remote_handle64 h,
+	nn_id_t id, unsigned int *num_nodes)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_get_num_nodes_in_graph(id, num_nodes);
+}
+
 
 #if defined(USE_OS_QURT) // should be only for QURT
 int hexagon_nn_disable_dcvs()
@@ -502,30 +916,484 @@ int hexagon_nn_disable_dcvs()
     return HAP_power_set(NULL, &request);
 }
 
+#if (__HEXAGON_ARCH__ >= 62)
+static int hexagon_nn_vote(unsigned int level)
+{
+    HAP_power_request_t request;
+    memset(&request, 0, sizeof(HAP_power_request_t));
+    request.type = HAP_power_set_DCVS_v2;
+    request.dcvs_v2.dcvs_enable = FALSE;
+
+    // Bounds created by an expected level from 0-255 split into 5 powersave modes
+    const unsigned int RELEASE_VOTE = 0x7FFFFFFF;
+    const unsigned int TURBO_UPPER_BOUNDS = 51;
+    const unsigned int NOMINAL_PLUS_UPPER_BOUNDS = 102;
+    const unsigned int NOMINAL_UPPER_BOUNDS = 153;
+    const unsigned int SVS_PLUS_UPPER_BOUNDS = 204;
+    const unsigned int SVS_UPPER_BOUNDS = 255;
+
+    // Suggested latency in microseconds
+    const int LOW_LATENCY = 100;
+    const int MEDIUM_LATENCY = 500;
+    const int HIGH_LATENCY = 1000;
+
+    if (level == RELEASE_VOTE){ // Release any vote
+        request.dcvs_v2.dcvs_option = HAP_DCVS_V2_POWER_SAVER_MODE;
+    }
+    else {
+        request.dcvs_v2.dcvs_option = HAP_DCVS_V2_PERFORMANCE_MODE;
+        request.dcvs_v2.set_latency = TRUE;
+        request.dcvs_v2.set_dcvs_params = TRUE;
+        if (level < TURBO_UPPER_BOUNDS){
+            request.dcvs_v2.latency = LOW_LATENCY;
+            request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_TURBO;
+            request.dcvs_v2.dcvs_params.min_corner = HAP_DCVS_VCORNER_TURBO;
+            request.dcvs_v2.dcvs_params.target_corner = HAP_DCVS_VCORNER_TURBO;
+        } else if (level < NOMINAL_PLUS_UPPER_BOUNDS){
+            request.dcvs_v2.latency = LOW_LATENCY;
+            request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_NOMPLUS;
+            request.dcvs_v2.dcvs_params.min_corner = HAP_DCVS_VCORNER_NOMPLUS;
+            request.dcvs_v2.dcvs_params.target_corner = HAP_DCVS_VCORNER_NOMPLUS;
+        } else if (level < NOMINAL_UPPER_BOUNDS){
+            request.dcvs_v2.latency = LOW_LATENCY;
+            request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_NOM;
+            request.dcvs_v2.dcvs_params.min_corner = HAP_DCVS_VCORNER_NOM;
+            request.dcvs_v2.dcvs_params.target_corner = HAP_DCVS_VCORNER_NOM;
+        } else if (level < SVS_PLUS_UPPER_BOUNDS){
+            request.dcvs_v2.latency = MEDIUM_LATENCY;
+            request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_SVSPLUS;
+            request.dcvs_v2.dcvs_params.min_corner = HAP_DCVS_VCORNER_SVSPLUS;
+            request.dcvs_v2.dcvs_params.target_corner = HAP_DCVS_VCORNER_SVSPLUS;
+        } else if (level < SVS_UPPER_BOUNDS){
+            request.dcvs_v2.latency = HIGH_LATENCY;
+            request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_SVS;
+            request.dcvs_v2.dcvs_params.min_corner = HAP_DCVS_VCORNER_SVS;
+            request.dcvs_v2.dcvs_params.target_corner = HAP_DCVS_VCORNER_SVS;
+        } else {
+            request.dcvs_v2.set_latency = FALSE;
+            request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_SVS2;
+            request.dcvs_v2.dcvs_params.min_corner = HAP_DCVS_VCORNER_SVS2;
+            request.dcvs_v2.dcvs_params.target_corner = HAP_DCVS_VCORNER_SVS2;
+        }
+    }
+    return HAP_power_set(NULL, &request);
+}
+
+int hexagon_nn_set_powersave_details(hexagon_nn_corner_type corner, hexagon_nn_dcvs_type dcvs, unsigned int latency)
+{
+    HAP_power_request_t request;
+    memset(&request, 0, sizeof(HAP_power_request_t));
+    request.type = HAP_power_set_DCVS_v2;
+    request.dcvs_v2.dcvs_enable = FALSE;
+
+    // Suggested latency in microseconds
+    const int LOW_LATENCY = 100;
+    const int MEDIUM_LATENCY = 500;
+    const int HIGH_LATENCY = 1000;
+
+    if (corner == NN_CORNER_RELEASE){ // Release any vote
+        request.dcvs_v2.dcvs_option = HAP_DCVS_V2_POWER_SAVER_MODE;
+    }
+    else {
+        request.dcvs_v2.dcvs_enable = (dcvs == NN_DCVS_DISABLE ? FALSE : TRUE);
+        request.dcvs_v2.dcvs_option = HAP_DCVS_V2_PERFORMANCE_MODE;
+        request.dcvs_v2.set_latency = TRUE;
+        request.dcvs_v2.set_dcvs_params = TRUE;
+#if (__HEXAGON_ARCH__ >= 66)
+        if (corner == NN_CORNER_TURBOPLUS){
+            request.dcvs_v2.dcvs_params.max_corner = 10;
+            request.dcvs_v2.latency = (latency == 0 ? LOW_LATENCY : latency);
+        } else
+#endif
+	if (corner == NN_CORNER_TURBO){
+            request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_TURBO;
+            request.dcvs_v2.latency = (latency == 0 ? LOW_LATENCY : latency);
+        } else if (corner == NN_CORNER_NOMPLUS){
+            request.dcvs_v2.latency = (latency == 0 ? LOW_LATENCY : latency);
+            request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_NOMPLUS;
+        } else if (corner == NN_CORNER_NOMINAL){
+            request.dcvs_v2.latency = (latency == 0 ? LOW_LATENCY : latency);
+            request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_NOM;
+        } else if (corner == NN_CORNER_SVSPLUS){
+            request.dcvs_v2.latency = (latency == 0 ? MEDIUM_LATENCY : latency);
+            request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_SVSPLUS;
+        } else if (corner == NN_CORNER_SVS){
+            request.dcvs_v2.latency = (latency == 0 ? HIGH_LATENCY : latency);
+            request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_SVS;
+        } else {
+            request.dcvs_v2.set_latency = FALSE;
+            request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_SVS2;
+        }
+        request.dcvs_v2.dcvs_params.min_corner = request.dcvs_v2.dcvs_params.max_corner;
+        request.dcvs_v2.dcvs_params.target_corner = request.dcvs_v2.dcvs_params.max_corner;
+    }
+    return HAP_power_set(NULL, &request);
+}
+
+#else
+static int hexagon_nn_vote(unsigned int level)
+{
+    HAP_power_request_t request;
+    request.type = HAP_power_set_DCVS;
+    request.dcvs.dcvs_enable = FALSE;
+    request.dcvs.dcvs_option = HAP_DCVS_ADJUST_UP_DOWN;
+    int ret;
+    if ((ret = HAP_power_set(NULL, &request)) != 0)
+        return errlog(NULL,"unable to vote DCVS off ret=%d",ret);
+
+    memset(&request, 0, sizeof(HAP_power_request_t));
+    request.type = HAP_power_set_mips_bw;
+    request.mips_bw.set_mips = request.mips_bw.set_bus_bw = request.mips_bw.set_latency = TRUE;
+
+
+    // Bounds created by an expected level from 0-255 split into 5 powersave modes
+    const unsigned int RELEASE_VOTE = 0x7FFFFFFF;
+    const unsigned int TURBO_UPPER_BOUNDS = 51;
+    const unsigned int NOMINAL_UPPER_BOUNDS = 153;
+    const unsigned int SVS_UPPER_BOUNDS = 255;
+
+    // Suggested latency in microseconds
+    const int LOW_LATENCY = 100;
+    const int MEDIUM_LATENCY = 500;
+    const int HIGH_LATENCY = 1000;
+
+    if (level == RELEASE_VOTE){ // Release any vote
+        request.mips_bw.latency = -1;
+    }
+    else {
+        if (level < TURBO_UPPER_BOUNDS){
+            request.mips_bw.mipsPerThread = 500;
+            request.mips_bw.mipsTotal = 1000;
+            request.mips_bw.bwBytePerSec = (uint64)(12000) * 1000000;
+            request.mips_bw.busbwUsagePercentage = (unsigned short) 50;
+            request.mips_bw.latency = LOW_LATENCY;
+        } else if (level < NOMINAL_UPPER_BOUNDS){
+            request.mips_bw.mipsPerThread = 100;
+            request.mips_bw.mipsTotal = 600;
+            request.mips_bw.bwBytePerSec = (uint64)(6000) * 1000000;
+            request.mips_bw.busbwUsagePercentage = (unsigned short) 50;
+            request.mips_bw.latency = LOW_LATENCY;
+        } else if (level < SVS_UPPER_BOUNDS){
+            request.mips_bw.mipsPerThread = 50;
+            request.mips_bw.mipsTotal = 400;
+            request.mips_bw.bwBytePerSec = (uint64)(3000) * 1000000;
+            request.mips_bw.busbwUsagePercentage = (unsigned short) 50;
+            request.mips_bw.latency = MEDIUM_LATENCY;
+        } else {
+            request.mips_bw.mipsPerThread = 50;
+            request.mips_bw.mipsTotal = 200;
+            request.mips_bw.bwBytePerSec = (uint64)(1000) * 1000000;
+            request.mips_bw.busbwUsagePercentage = (unsigned short) 50;
+            request.mips_bw.latency = HIGH_LATENCY;
+        }
+    }
+    return HAP_power_set(NULL, &request);
+}
+
+int hexagon_nn_set_powersave_details(hexagon_nn_corner_type corner, hexagon_nn_dcvs_type dcvs, unsigned int latency)
+{
+    HAP_power_request_t request;
+    request.type = HAP_power_set_DCVS;
+    request.dcvs.dcvs_enable = (dcvs == NN_DCVS_ENABLE ? TRUE : FALSE);
+    request.dcvs.dcvs_option = HAP_DCVS_ADJUST_UP_DOWN;
+    int ret;
+    if ((ret = HAP_power_set(NULL, &request)) != 0)
+        return errlog(NULL,"unable to vote DCVS ret=%d",ret);
+
+    memset(&request, 0, sizeof(HAP_power_request_t));
+    request.type = HAP_power_set_mips_bw;
+    request.mips_bw.set_mips = request.mips_bw.set_bus_bw = request.mips_bw.set_latency = TRUE;
+
+
+    // Suggested latency in microseconds
+    const int LOW_LATENCY = 100;
+    const int MEDIUM_LATENCY = 500;
+    const int HIGH_LATENCY = 1000;
+
+    if (corner == NN_CORNER_RELEASE){ // Release any vote
+        request.mips_bw.latency = -1;
+    }
+    else {
+        if (corner == NN_CORNER_TURBO || corner == NN_CORNER_NOMPLUS){
+            request.mips_bw.mipsPerThread = 500;
+            request.mips_bw.mipsTotal = 1000;
+            request.mips_bw.bwBytePerSec = (uint64)(12000) * 1000000;
+            request.mips_bw.busbwUsagePercentage = (unsigned short) 50;
+            request.mips_bw.latency = (latency == 0 ? LOW_LATENCY : latency);
+        } else if (corner == NN_CORNER_NOMINAL || corner == NN_CORNER_SVSPLUS){
+            request.mips_bw.mipsPerThread = 100;
+            request.mips_bw.mipsTotal = 600;
+            request.mips_bw.bwBytePerSec = (uint64)(6000) * 1000000;
+            request.mips_bw.busbwUsagePercentage = (unsigned short) 50;
+            request.mips_bw.latency = (latency == 0 ? LOW_LATENCY : latency);
+        } else if (corner == NN_CORNER_SVS){
+            request.mips_bw.mipsPerThread = 50;
+            request.mips_bw.mipsTotal = 400;
+            request.mips_bw.bwBytePerSec = (uint64)(3000) * 1000000;
+            request.mips_bw.busbwUsagePercentage = (unsigned short) 50;
+            request.mips_bw.latency = (latency == 0 ? MEDIUM_LATENCY : latency);
+        } else {
+            request.mips_bw.mipsPerThread = 50;
+            request.mips_bw.mipsTotal = 200;
+            request.mips_bw.bwBytePerSec = (uint64)(1000) * 1000000;
+            request.mips_bw.busbwUsagePercentage = (unsigned short) 50;
+            request.mips_bw.latency = (latency == 0 ? HIGH_LATENCY : latency);
+        }
+    }
+    return HAP_power_set(NULL, &request);
+}
+
+#endif
+
+
 int hexagon_nn_set_powersave_level(unsigned int level)
 {
-	if (level == 0) return hexagon_nn_disable_dcvs();
+    return hexagon_nn_vote(level);
+}
+
+
+int hexagon_nn_graph_config(
+	nn_id_t id,
+	const struct uint_option_t *uint_options,
+	uint32_t num_uint_options,
+	const struct string_option_t *string_options,
+	uint32_t num_string_options
+	)
+{
+	struct nn_graph *graph;
+	if ((graph = nn_id_to_graph(id)) == NULL) {
+		return errlog(NULL,"nn id %x not found",id);
+	}
+
+//TODO - move hexagon_nn_config_with_options code into here
+//   Don't forget to ensure that everything still works for people who
+//   do standard config()..prepare() without calling graph_config() explicitly!
+//   (Probably call graph_config during prepare() if it hasn't already been done.)
+
+	for (int i=0; i<num_string_options; i++) {
+		int string_length;
+		switch(string_options[i].option_id) {
+		case NN_OPTION_ENABLE_GRAPH_PRINT:
+			graph->enable_graph_print = 1;
+			string_length = strlen(string_options[i].string_data);
+			if ((graph->enable_graph_print_prefix = nn_calloc(1,string_length+1)) == NULL) {
+				return -1;
+			}
+			strcpy(graph->enable_graph_print_prefix, string_options[i].string_data);
+			break;
+		case NN_OPTION_ENABLE_TENSOR_PRINT:
+			if (graph->debug_level==0) {
+				graph->debug_level = 1; // Ensure debug level is high enough to enable tensor printing
+			}
+			graph->enable_tensor_print = 1;
+			string_length = strlen(string_options[i].string_data);
+			if ((graph->enable_tensor_print_prefix = nn_calloc(1,string_length+1)) == NULL) {
+				return -1;
+			}
+			strcpy(graph->enable_tensor_print_prefix, string_options[i].string_data);
+			break;
+		case NN_OPTION_TENSOR_PRINT_FILTER:
+			string_length = strlen(string_options[i].string_data);
+			if ((graph->tensor_print_filter = nn_calloc(1,string_length+1)) == NULL) {
+				return -1;
+			}
+			strcpy(graph->tensor_print_filter, string_options[i].string_data);
+			break;
+		default:
+			// UNSUPPORTED option.  Too bad we can't logmsg (TODO, FIXME)
+			errlog(graph,"DEBUG: Unknown option %d",string_options[i].option_id);
+			return 1;
+			break;
+		}
+	}
+
 	return 0;
 }
+
+int hexagon_nn_config_with_options(
+	const struct uint_option_t *uint_options,
+	uint32_t num_uint_options,
+	const struct string_option_t *string_options,
+	uint32_t num_string_options
+	)
+{
+#ifndef NN_GRAPH_ON_SIMULATOR // API not available on simulator
+	HAP_mem_set_grow_size(0x1000000, MAX_UINT64);
+#endif // NN_GRAPH_ON_SIMULATOR
+
+	// Gather DSP info from Qurt
+	// vector_mode_mask 00000200=2xHVX, 00000400=4xHVX
+	int vector_mode_mask = qurt_hvx_get_units();
+	qurt_sysenv_max_hthreads_t num_threads;
+	qurt_sysenv_get_max_hw_threads(&num_threads);
+
+	Total_Threads = num_threads.max_hthreads;
+	Num_Vector_Threads = (vector_mode_mask & 0xF00) >> 8;
+	Stack_Size = 16384;
+
+
+	// Don't trust Qurt for thread-counts if we don't have to
+	qurt_arch_version_t av;
+	qurt_sysenv_get_arch_version(&av);
+	int arch = av.arch_version & 0xffff;
+	for (int i=0; Arch_Thread_Counts[i].arch; i++) {
+		if (arch == Arch_Thread_Counts[i].arch) {
+			Total_Threads = Arch_Thread_Counts[i].threads;
+			Num_Vector_Threads = Arch_Thread_Counts[i].hvx_threads;
+			VTCM_User_Req = Arch_Thread_Counts[i].vtcm_size;
+			break;
+		}
+	}
+
+
+	// Explicitly-provided numbers override any auto-set values
+	int i;
+	for (i=0; i<num_uint_options; i++) {
+		if (uint_options[i].uint_value != (uint32_t) -1) {  // "-1" is uint equivalent of "use defaults"
+			switch(uint_options[i].option_id) {
+			case NN_OPTION_NOSUCHOPTION:
+				break;
+			case NN_OPTION_SCALAR_THREADS:
+				Total_Threads = uint_options[i].uint_value;
+				break;
+			case NN_OPTION_HVX_THREADS:
+				Num_Vector_Threads = uint_options[i].uint_value;
+				break;
+			case NN_OPTION_VTCM_REQ:
+				VTCM_User_Req = uint_options[i].uint_value;
+				break;
+			default:
+				// UNSUPPORTED option.  Too bad we can't logmsg (TODO, FIXME)
+				return 1;
+				break;
+			}
+		}
+	}
+
+	return 0;
+}
+
+
 
 int hexagon_nn_config()
 {
-	HAP_mem_set_grow_size(0x1000000, MAX_UINT64);
-	return 0;
+	return hexagon_nn_config_with_options(NULL,0,NULL,0);
 }
+
+
 #else
 int hexagon_nn_set_powersave_level(unsigned int level) { return 0; }
+int hexagon_nn_set_powersave_details(hexagon_nn_corner_type corner, hexagon_nn_dcvs_type dcvs, unsigned int latency) { return 0; }
 int hexagon_nn_disable_dcvs() { return 0; }
+
+int hexagon_nn_graph_config(
+	nn_id_t id,
+	const struct uint_option_t *uint_options,
+	uint32_t num_uint_options,
+	const struct string_option_t *string_options,
+	uint32_t num_string_options
+	)
+{
+	// TODO - All targets probably need graph_config, as the options it controls grows.
+	//        Older options like num-threads have tight interactions with the OS-specific code,
+	//        so require careful treatment
+	//        Newer options like enable_tensor_print should be enabled for all targets.
+
+	return 0;
+}
+int hexagon_nn_config_with_options(
+	const struct uint_option_t *uint_options,
+	uint32_t num_uint_options,
+	const struct string_option_t *string_options,
+	uint32_t num_string_options
+)
+{
+	return 0;
+}
 
 #if !defined(USE_OS_H2)
 int hexagon_nn_config() {
+
 	pmu_init();
 	return 0;
 }
 #else
 int hexagon_nn_config() {
+
 	return 0;
 }
 #endif
 
 #endif
+
+int hexagon_nn_domains_config(remote_handle64 h)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_config();
+}
+
+int hexagon_nn_domains_config_with_options(
+	remote_handle64 h,
+	const struct uint_option_t *uint_options,
+	uint32_t num_uint_options,
+	const struct string_option_t *string_options,
+	uint32_t num_string_options
+	)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_config_with_options(
+		uint_options, num_uint_options, string_options, num_string_options);
+}
+
+int hexagon_nn_domains_graph_config(
+	nn_id_t id,
+	const struct uint_option_t *uint_options,
+	uint32_t num_uint_options,
+	const struct string_option_t *string_options,
+	uint32_t num_string_options
+	)
+{
+	return hexagon_nn_graph_config(
+		id, uint_options, num_uint_options, string_options, num_string_options);
+}
+
+int hexagon_nn_domains_set_powersave_level(remote_handle64 h, unsigned int level)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_set_powersave_level(level);
+}
+
+
+int hexagon_nn_domains_disable_dcvs(remote_handle64 h)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_disable_dcvs();
+}
+
+int hexagon_nn_domains_set_powersave_details(remote_handle64 h,
+	hexagon_nn_corner_type corner, hexagon_nn_dcvs_type dcvs, unsigned int latency)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_set_powersave_details(corner, dcvs, latency);
+}
+
+
+int hexagon_nn_domains_open (const char* uri, remote_handle64* handle)
+{
+	if(handle == NULL) {
+        FARF(ERROR, "Null domain handle");
+        return 0;
+    }
+    /* can be any value or ignored, rpc layer doesn't care
+     * also ok
+     * *handle = 0;
+     * *handle = 0xdeadc0de;
+     */
+    *handle = (remote_handle64) 0xdeadc0de;
+    return 0;
+}
+
+int hexagon_nn_domains_close(remote_handle64 h)
+{
+	return 0;
+}

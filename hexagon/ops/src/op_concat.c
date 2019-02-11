@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -108,11 +108,11 @@ static void concat_execute_slice_ref(struct nn_graph *nn, void *vinfo)
 		if (in_min > 0.0f) {
 			in_min = 0.0f; // comport with op_quantize use of quantize_adjust_range setting minval = fminf(0.0f,min);
 		}
-		in_level = (in_max-in_min)/255.0f;
+		in_level = flt_div_255(in_max-in_min);
 		iters = t->shape.width * t->shape.height * t->shape.batches;
 		l2fetch(t->data, t->shape.depth, t->shape.depth, iters);
-		offset = (int) ((in_min-out_min)/in_level);
-		gain = (int) (out_level_recip*in_level*powf(2.0, 15));
+		offset = max_i32(0,roundf_i32((in_min-out_min)/in_level));
+		gain = roundf_i32(out_level_recip*in_level* 32768.0f );
 		if (gain > 32767) {
 			gains  = 32767; 
 		} else {
@@ -173,8 +173,9 @@ static void concat_execute_slice_asm(struct nn_graph *nn, void *vinfo)
 		t = input_tensors[i];
 		out = out_data;
 		in = t->data;
+		uint32_t in_depth = t->shape.depth;
 		if ((i & 1) != whoami) {
-			out_data += t->shape.depth;
+			out_data += in_depth;
 			continue;
 		}
 		in_min = tensor_get_float(min_tensors[i],0);
@@ -182,18 +183,28 @@ static void concat_execute_slice_asm(struct nn_graph *nn, void *vinfo)
 		if (in_min > 0.0f) {
 			in_min = 0.0f; // comport with op_quantize use of quantize_adjust_range setting minval = fminf(0.0f,min);
 		}
-		in_level = (in_max-in_min)/255.0f;
+		in_level = flt_div_255(in_max-in_min);
 		iters = t->shape.width * t->shape.height * t->shape.batches;
-		l2fetch((void*)in, t->shape.depth, t->shape.depth, iters); 
-		offset = (int) ((in_min-out_min)/in_level);
-		gain = (int) (out_level_recip*in_level*32768.0f/*0x1.0p15f*/);
+		l2fetch((void*)in, in_depth, in_depth, iters);
+		offset = max_i32(0,roundf_i32((in_min-out_min)/in_level));
+		gain = roundf_i32(out_level_recip*in_level*32768.0f/*0x1.0p15f*/);
 		if (gain > 32767) {
 			gains  = 32767; 
 		} else {
 			gains = (short) gain;
 		}
-		memconvert_hvx(out, in, t->shape.depth, offset, gains, stride, iters);
-		out_data += t->shape.depth;
+		if( offset == 0 && gain >= 0x7fc0) {	// is unity gain (0->0, 255->255)
+			vmemcpy_2d_general_asm(
+					in_depth,			// bytes wide
+			      iters,			//rows
+			      out,			// destination address, any allowed
+			      stride,		// row pitch of dest; any allowed
+			      in,			// source address, any allowed
+			      in_depth);	// source stride, any
+		}else{
+			memconvert_hvx(out, in, in_depth, offset, gains, stride, iters);
+		}
+		out_data += in_depth;
 	}
 	nn_sem_post(&info->donesem);
 }
@@ -293,6 +304,14 @@ static int concat_check(struct nn_node *self, struct nn_graph *nn)
 	logmsg(nn,2,"concat node %p check OK",self);
 	return 0;
 }
+
+// TODO: remove when deconv is "conv" optimized, i.e. all its nodes can be d32
+struct nn_node_ops nn_ops_for_QuantizedConcat_8_nond32 = {
+	.execute = concat_execute_asm,
+	.check = concat_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};
 
 struct nn_node_ops nn_ops_for_QuantizedConcat_8 = {
 	.execute = concat_execute_asm,

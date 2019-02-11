@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -40,7 +40,6 @@
 #include <quantize.h>
 #include <nn_broadcast.h>
 #include <nn_reduction.h>
-#include <op_min_max.h>
 #if defined(__hexagon__)
 #include "hexagon_types.h"
 #endif
@@ -52,57 +51,67 @@
  * This contains min and max (floating) ops
  */
 
-static inline float min_helper(float a, float b, void * u)
-{
-	return fminf(a,b);
-}
-
-static inline float max_helper(float a, float b, void * u)
-{
-	return fmaxf(a,b);
-}
-
 static int min_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return nn_reduction_float(self,nn,fminf,INFINITY);
+	return nn_reduction_float(self, nn, fminf, INFINITY);
 }
 
 static int max_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return nn_reduction_float(self,nn,fmaxf,-INFINITY);
-}
-
-static int minimum_execute(struct nn_node *self, struct nn_graph *nn)
-{
-	return broadcast_elementwise_execute_f(self,nn,min_helper,NULL);
-}
-
-static int maximum_execute(struct nn_node *self, struct nn_graph *nn)
-{
-	return broadcast_elementwise_execute_f(self,nn,max_helper,NULL);
+	return nn_reduction_float(self, nn, fmaxf, -INFINITY);
 }
 
 static int minmax_check(struct nn_node *self, struct nn_graph *nn)
 {
-	logmsg(nn,2,"Checking min/max node %p",self);
-	if (self->inputs == NULL) return errlog(nn,"NULL inputs");
-	if (self->outputs == NULL) return errlog(nn,"NULL outputs");
-	if (self->inputs[0] == NULL) return errlog(nn,"NULL input 0");
-	if (self->outputs[0] == NULL) return errlog(nn,"NULL output 0");
-	if (self->n_inputs > 3) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # inputs");
-	logmsg(nn,2,"min/max node %p check OK",self);
+	logmsg(nn, 2, "Checking min/max node %p", self);
+	if (self->inputs == NULL)
+		return errlog(nn, "NULL inputs");
+	if (self->outputs == NULL)
+		return errlog(nn, "NULL outputs");
+	if (self->inputs[0] == NULL)
+		return errlog(nn, "NULL input 0");
+	if (self->outputs[0] == NULL)
+		return errlog(nn, "NULL output 0");
+	if (self->n_inputs > 3)
+		return errlog(nn, "wrong # inputs");
+	if (self->n_outputs != 1)
+		return errlog(nn, "wrong # inputs");
+	logmsg(nn, 2, "min/max node %p check OK", self);
 	return 0;
 }
 
-struct nn_node_ops nn_ops_for_Min_f = {
-	.execute = min_execute,
-	.check = minmax_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
-};
+BROADCAST_STRIDE_11_FUNC(minimum_f_stride_11, float, fminf)
+BROADCAST_STRIDE_10_FUNC(minimum_f_stride_10, float, fminf)
 
-struct nn_node_ops nn_ops_for_Min_f_ref = {
+static const struct elementwise_funcs Minimum_f_funcs = {
+	.op_stride_11 = minimum_f_stride_11,
+	.op_stride_10 = minimum_f_stride_10,
+	.op_rev_stride_01 = minimum_f_stride_10,
+	.in_elbytes = 4,
+	.out_elbytes = 4,
+	.out_typecode = NN_TYPE_FLOAT};
+
+static int minimum_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	return nn_elementwise_with_broadcast(self, nn, &Minimum_f_funcs, NULL);
+}
+BROADCAST_STRIDE_11_FUNC(maximum_f_stride_11, float, fmaxf)
+BROADCAST_STRIDE_10_FUNC(maximum_f_stride_10, float, fmaxf)
+
+static const struct elementwise_funcs Maximum_f_funcs = {
+	.op_stride_11 = maximum_f_stride_11,
+	.op_stride_10 = maximum_f_stride_10,
+	.op_rev_stride_01 = maximum_f_stride_10,
+	.in_elbytes = 4,
+	.out_elbytes = 4,
+	.out_typecode = NN_TYPE_FLOAT};
+
+static int maximum_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	return nn_elementwise_with_broadcast(self, nn, &Maximum_f_funcs, NULL);
+}
+
+struct nn_node_ops nn_ops_for_Min_f = {
 	.execute = min_execute,
 	.check = minmax_check,
 	.ctor = node_alloc_common,
@@ -116,13 +125,19 @@ struct nn_node_ops nn_ops_for_Max_f = {
 	.dtor = node_free_common,
 };
 
+struct nn_node_ops nn_ops_for_Min_f_ref = {
+	.execute = min_execute,
+	.check = minmax_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};
+
 struct nn_node_ops nn_ops_for_Max_f_ref = {
 	.execute = max_execute,
 	.check = minmax_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
 };
-
 
 struct nn_node_ops nn_ops_for_Minimum_f = {
 	.execute = minimum_execute,
@@ -138,13 +153,87 @@ struct nn_node_ops nn_ops_for_Maximum_f = {
 	.dtor = node_free_common,
 };
 
-#if defined(__hexagon__)
-static int max(int a, int b) {return((a>b)?a:b);}
-static int min(int a, int b) {return((a<b)?a:b);}
-#endif
+#define CREATE_REF_OP_MIN_MAX(NAME, OPNAME, OPERATOR)                                      \
+	struct NAME##_info                                                                     \
+	{                                                                                      \
+		int a_offset;                                                                      \
+		int b_offset;                                                                      \
+		int a_mult;                                                                        \
+		int b_mult;                                                                        \
+		int shift;                                                                         \
+		int qzero;                                                                         \
+	};                                                                                     \
+                                                                                           \
+	static inline uint8_t q8##NAME##_helper(uint8_t a, uint8_t b, void *v##NAME_info)      \
+	{                                                                                      \
+		const struct NAME##_info *info = v##NAME_info;                                     \
+		int a_offset = info->a_offset;                                                     \
+		int b_offset = info->b_offset;                                                     \
+		int a_mult = info->a_mult;                                                         \
+		int b_mult = info->b_mult;                                                         \
+		int shift = info->shift;                                                           \
+		int qzero = info->qzero;                                                           \
+		int aval = (((a - a_offset) * a_mult) >> shift) + qzero;                           \
+		int bval = (((b - b_offset) * b_mult) >> shift) + qzero;                           \
+                                                                                           \
+		uint8_t ret = f##OPERATOR##f(aval, bval);                                          \
+                                                                                           \
+		return ret;                                                                        \
+	}                                                                                      \
+                                                                                           \
+	static int NAME##_q8_execute_ref(struct nn_node *self, struct nn_graph *nn)            \
+	{                                                                                      \
+		struct NAME##_info info;                                                           \
+		const struct tensor *a_min_tensor = self->inputs[2];                               \
+		const struct tensor *a_max_tensor = self->inputs[3];                               \
+		const struct tensor *b_min_tensor = self->inputs[4];                               \
+		const struct tensor *b_max_tensor = self->inputs[5];                               \
+		struct tensor *out_min_tensor = self->outputs[1];                                  \
+		struct tensor *out_max_tensor = self->outputs[2];                                  \
+		float a_min_float = tensor_get_float(a_min_tensor, 0);                             \
+		float a_max_float = tensor_get_float(a_max_tensor, 0);                             \
+		float b_min_float = tensor_get_float(b_min_tensor, 0);                             \
+		float b_max_float = tensor_get_float(b_max_tensor, 0);                             \
+                                                                                           \
+		float a_level_size = (a_max_float - a_min_float) / 255;                            \
+		float b_level_size = (b_max_float - b_min_float) / 255;                            \
+                                                                                           \
+		float out_min = fminf(0.0, fminf(a_min_float, b_min_float));                       \
+		float out_max = fmaxf(0.0, f##OPERATOR##f(a_max_float, b_max_float));              \
+		float out_level_size = (out_max - out_min) / 255;                                  \
+		int retval;                                                                        \
+                                                                                           \
+		tensor_set_single_float(out_min_tensor, out_min);                                  \
+		tensor_set_single_float(out_max_tensor, out_max);                                  \
+                                                                                           \
+		info.a_offset = quantize_uint8(0.0f, a_min_float, a_max_float);                    \
+		info.b_offset = quantize_uint8(0.0f, b_min_float, b_max_float);                    \
+		info.shift = 12;                                                                   \
+		info.a_mult = ((float)(1 << info.shift)) * (a_level_size / out_level_size) + 0.5f; \
+		info.b_mult = ((float)(1 << info.shift)) * (b_level_size / out_level_size) + 0.5f; \
+		info.qzero = -out_min * (255 / (out_max - out_min)) + 0.5f;                        \
+		retval = broadcast_elementwise_execute_quint8(self, nn, q8##NAME##_helper, &info); \
+                                                                                           \
+		return retval;                                                                     \
+	}                                                                                      \
+                                                                                           \
+	static int NAME##_q8_check(struct nn_node *self, struct nn_graph *nn)                  \
+	{                                                                                      \
+		logmsg(nn, 2, "##NAME node %p", self);                                             \
+		if (self->n_inputs != 6)                                                           \
+			return errlog(nn, "wrong # inputs");                                           \
+		if (self->n_outputs != 3)                                                          \
+			return errlog(nn, "wrong # outputs");                                          \
+		logmsg(nn, 2, "##NAME %p check OK", self);                                         \
+		return 0;                                                                          \
+	}                                                                                      \
+                                                                                           \
+	struct nn_node_ops nn_ops_for_Quantized##OPNAME##_8_ref = {                            \
+		.execute = NAME##_q8_execute_ref,                                                  \
+		.check = NAME##_q8_check,                                                          \
+		.ctor = node_alloc_common,                                                         \
+		.dtor = node_free_common,                                                          \
+	};
 
-CREATE_REF_OP_MIN_MAX(maximum, Maximum, max)
-CREATE_REF_OP_MIN_MAX(minimum, Minimum, min)
-
-CREATE_HVX_OP_MIN_MAX(maximum, Maximum, max)
-CREATE_HVX_OP_MIN_MAX(minimum, Minimum, min)
+CREATE_REF_OP_MIN_MAX(minimum, Minimum, min);
+CREATE_REF_OP_MIN_MAX(maximum, Maximum, max);

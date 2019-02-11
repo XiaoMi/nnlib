@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -42,35 +42,26 @@
 
 #define MAX_THREADS 3
 
-struct tensor_copy_scaled_opstate {
-	int32_t height, width, depth,d0;
-	uint8_t const * srcp;
-	int32_t src_batch_stride;
-	int32_t src_row_stride;
-	int32_t src_d32_stride;
+typedef void (*scaled_aligned_copy_fp)(
+		uint8_t *, int32_t,
+		uint8_t const * , int32_t ,
+		int32_t, int32_t, int32_t );
 
-	uint8_t * dstp;
-	int32_t dst_batch_stride;
-	int32_t dst_row_stride;
-	int32_t dst_d32_stride;
+struct tensor_copy_scaled_opstate {
+	int32_t height, width, depth;
+	struct tensor_addressing tin;		// src tensor addressing
+	struct tensor_addressing tout;		// dst tensor addressing
 
 	uint32_t scl_off;
 
-	int nd32;		// # of d32 operations
 	int n_opers;	// nd32 * batches
 	volatile int next_oper;
-	void (*scaled_aligned_copy_fp)(
-			uint8_t *, int32_t,
-			uint8_t const * , int32_t ,
-			int32_t, int32_t, int32_t );
+	scaled_aligned_copy_fp  scaled_aligned_copy_funcp;
+	nn_sem_t done_sem;
 
-	struct tcopy_threadinfo {
-		struct tensor_copy_scaled_opstate * opst_p;
-		nn_sem_t done_sem;
-	} thrinfo[MAX_THREADS];
 };
 
-static void scaled_copy_operation( struct nn_graph *nn, void * thrinfop);
+static void scaled_copy_operation( struct nn_graph *nn, void * opspv);
 static void scalemem_d32_reference(
 		uint8_t * dstp, int32_t dst_row_pitch,
 		uint8_t const * srcp, int32_t src_row_pitch,
@@ -102,6 +93,9 @@ static void scalemem_d32_reference(
 //
 //  => offset = 0, scale in range 32704..32767 will be handled as a copy
 //  => offset = 32640, scale = -32768 .. -32705  will result in a 1's complement operation.
+//  => scale = 0 will be done as a 'fill' (maybe other cases where the output is invariant , generally
+//      if abs(scale) < 128 this is possible depending on the offset. In this case src_tensor will not
+//      be used at all  (hvx is always used in this case).
 //
 // This is used for add_d32 and sub_d32 operator, when one of the inputs is a scalar, the
 // operation can be done by a copy (with possible range extension).
@@ -122,92 +116,124 @@ tensor_copy_scaled_d32(
 {
 	struct tensor_copy_scaled_opstate ops;
 	int i;
-	int batches = tensor_src->shape.batches;
-	ops.height = tensor_src->shape.height;
-	ops.width = tensor_src->shape.width;
-	int depth = tensor_src->shape.depth;
-	int d0 = tensor_src->format.depth_pad[0];
+	int batches = tensor_dst->shape.batches;
+	ops.height = tensor_dst->shape.height;
+	ops.width = tensor_dst->shape.width;
+	int depth = tensor_dst->shape.depth;
+
 
 	ops.depth = depth;
-	ops.d0 = d0;
+	ops.tout = tensor_addressing_d32( tensor_dst);
 
-	ops.srcp = tensor_location_bhw_d32( tensor_src, 0,0,0);
-	ops.src_batch_stride = tensor_batch_stride_d32( tensor_src );
-	ops.src_row_stride = tensor_row_stride_d32( tensor_src );
-	ops.src_d32_stride = tensor_d32_stride_d32( tensor_src );
+	if( scale == 0){			// is a fill operation. Use vector fill.
+		int fillval = saturate_u8( (offset + 64)>>7);	// this is the fill byte.
+		fillval = Q6_R_vsplatb_R(fillval);
 
-	ops.dstp = tensor_location_bhw_d32( tensor_dst, 0,0,0);
-	ops.dst_batch_stride = tensor_batch_stride_d32( tensor_dst );
-	ops.dst_row_stride = tensor_row_stride_d32( tensor_dst );
-	ops.dst_d32_stride = tensor_d32_stride_d32( tensor_dst );
+		int rows = ops.height * ops.tout.nd32;
+		int cols = ops.width*32;
 
-	ops.nd32 = (unsigned)( tensor_src->format.depth_pad[0] + depth + 31)/32;
+		// pad width out to full vecs.
+		uint8_t * wptr0 = ops.tout.data;
+		{	int w_align = (size_t)wptr0 & 127;
+			wptr0 -= w_align;
+			cols += w_align;
+		}
+		cols = (cols+127)& ~127;	// now is a multiple of 128
 
-	unsigned align = ((size_t)ops.srcp ^ (size_t)ops.dstp) & 127;
+		// zap all this at once. We are zapping all the depth
+		// padding and the 'intra' width padding.
+		int zaplen = cols + (rows-1)*ops.tout.d32_stride;
+
+		struct nn_memcpy_manager  mcman;
+		nn_mcmanager_init(nn, &mcman );
+		int out_batch_stride = ops.tout.batch_stride;
+		for( int b = 0; b < batches; b++){
+			uint8_t * wp = wptr0 + b * out_batch_stride;
+			nn_mcmanager_vmemset32(nn,&mcman, wp, fillval, zaplen );
+		}
+		nn_mcmanager_wait( nn, &mcman );
+		return 0;
+	}
+	ops.tin = tensor_addressing_d32( tensor_src);
+
+	unsigned align = ((size_t)ops.tin.data ^ (size_t)ops.tout.data) & 127;
 	if(  (align &31)!= 0 ){
 		return errlog( nn, "tensor_copy_scaled_d32: tensors not aligned");
 	}
+	if( use_hvx && align == 0){
+		// using hvx code since pointers have same w padding. If the w align is not zero, we need to expand
+		// the operation on the left to include left padding
+		ops.scaled_aligned_copy_funcp = scalemem_d32_hvx;
+		int wleft = (size_t)ops.tin.data & 127;
+		if(wleft != 0){
+			ops.tin.data -= wleft;
+			ops.tout.data -= wleft;
+			ops.width += wleft/32u;
+		}
+	}else{
+		ops.scaled_aligned_copy_funcp = scalemem_d32_reference;
+	}
 
-	ops.scaled_aligned_copy_fp = ( use_hvx  && (align ==0))? scalemem_d32_hvx: scalemem_d32_reference;
-
-	ops.n_opers = ops.nd32 * batches;
+	ops.n_opers = ops.tin.nd32 * batches;
 
 	ops.next_oper = 0;
 
 	ops.scl_off = (uint16_t)scale | (offset << 16);
+	nn_sem_init(&ops.done_sem,0);
 
 	int num_threads = min_i32( MAX_THREADS, ops.n_opers );
 	for( i = 0; i < num_threads; i++ ){
-		ops.thrinfo[i].opst_p = &ops;
-		nn_sem_init(&ops.thrinfo[i].done_sem,0);
-		nn_os_work_for_vector(nn,scaled_copy_operation,&ops.thrinfo[i]);
+		nn_os_work_for_vector(nn,scaled_copy_operation,&ops);
 	}
 
-	for( i = 0; i < num_threads; i++ ){
-		nn_sem_wait(&ops.thrinfo[i].done_sem);
-	}
+	nn_sem_wait_n_times(&ops.done_sem, num_threads);
 
 	return 0;
 
 }
 
 static void
-scaled_copy_operation( struct nn_graph *nn, void * thrinfovp)
+scaled_copy_operation( struct nn_graph *nn, void * opspv)
 {
-	struct tcopy_threadinfo * thrinfop = (struct tcopy_threadinfo *)thrinfovp;
 
-	struct tensor_copy_scaled_opstate const * ops = thrinfop->opst_p;
+	struct tensor_copy_scaled_opstate * ops = (struct tensor_copy_scaled_opstate *)opspv;
 	int taskno;
 
 	int width = ops->width;
 	int height= ops->height;
-	//int dend = ops->d0 + ops->depth;
+
 	int scl_off = ops->scl_off;
-	int dst_row_stride = ops->dst_row_stride;
-	int src_row_stride = ops->src_row_stride;
-	int nd32 = ops->nd32;
+	int out_row_stride = ops->tout.height_stride;
+	int in_row_stride = ops->tin.height_stride;
+	unsigned nd32 = ops->tin.nd32;
+	scaled_aligned_copy_fp funcp = ops->scaled_aligned_copy_funcp;
+
+	uint8_t const * in0 = ops->tin.data;
+	unsigned in_d32_stride = ops->tin.d32_stride;
+	unsigned in_batch_stride = ops->tin.batch_stride;
+	int pf_width = ((width+3)&~3)*32;
+	uint8_t * out0 = ops->tout.data;
+	unsigned out_d32_stride = ops->tout.d32_stride;
+	unsigned out_batch_stride = ops->tout.batch_stride;
+
+	batchslice_decode bsdecode;
+	batchslice_decode_init( &bsdecode, nd32);
 
 	while( taskno = __sync_fetch_and_add(&ops->next_oper, 1), taskno < ops->n_opers){
-		int d32_idx = taskno;
-		int batch_idx = 0;
-		if( taskno >= nd32){
-			batch_idx = taskno / nd32;
-			d32_idx -= batch_idx * nd32;
-		}
+		// transform to batch & depth id
+		int d32_idx = batchslice_decode_update( &bsdecode, taskno);
+		int batch_idx = bsdecode.ibatch;
 
-		uint8_t const * srcp = ops->srcp + batch_idx*ops->src_batch_stride + d32_idx*ops->src_d32_stride;
-		uint8_t * dstp = ops->dstp + batch_idx*ops->dst_batch_stride + d32_idx*ops->dst_d32_stride;
-		// (currently this processes the entire depth range)
-		// find depth range
-		//int dlo =  (d32_idx == 0)? ops->d0 : 0;
-		//int dhi = min_i32( 32, dend - 32* d32_idx);
+		uint8_t const * srcp = in0 + batch_idx*in_batch_stride + d32_idx*in_d32_stride;
+		l2fetch( srcp, in_row_stride, pf_width, height);
+		uint8_t * dstp = out0 + batch_idx*out_batch_stride + d32_idx*out_d32_stride;
 
-		(*ops->scaled_aligned_copy_fp)(
-				dstp, dst_row_stride,
-				srcp, src_row_stride,
+		(*funcp)(
+				dstp, out_row_stride,
+				srcp, in_row_stride,
 				height, width, scl_off );
 	}
-	nn_sem_post(&thrinfop->done_sem);
+	nn_sem_post(&ops->done_sem);
 }
 
 static void scalemem_d32_reference(

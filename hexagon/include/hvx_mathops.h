@@ -1,7 +1,7 @@
 #ifndef HVX_MATHOPS_H
 #define HVX_MATHOPS_H 1
 /*
- * Copyright (c) 2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -36,158 +36,6 @@
  */
 #include "hvx_inlines.h"
 #include <stdint.h>
-//
-//
-// 'fractional division'
-//  gives n/d  with 15 fractional bits,
-//   subject to :
-//      (1) d must be normalized in range 0x4000 .. 0x7fff
-//      (2) if abs(n) >= d, the result will saturate to 0x7fff or -0x8000
-//          (same sign as n)
-//      (3) if n==0, result is always 0, even if d is not normalized (or 0).
-// Steps are:
-//  - find k1 by lookup table from bits [13:9] of d
-//  -  d1 = d + mul_s1_round(d,k1)
-//  -  n1 = n + mul_s1_round(n,k1)
-//  -  d1 >= 0x7C00 now
-//  - find k2 by lookup table from bits [9:5] of d1
-//  -  d2 = d1 + mul_s1_round(d1,k2)
-//  -  n2 = n1 + mul_s1_round(n1,k2)
-//  -  d2 >= 0x7FDF now
-//  - find e = 0x8000 - d2
-//  - result is n2 + mul_s1_round(n2,e)
-// The first table lookup is done using (d>>10) which is always in range 16..31
-// (since d is 0x4000..0x7fff)
-// The second is done using (d1>>7)&0xF which is in range 0..15
-// So the two lookup tables can be held in odd/even 16-bit slots of a vector.
-// Each table entry for k {or k1} is chosen to be as large as possible given that the largest
-// d { or d1} value selecting the entry must not cause the calculation of d1 { or d2} to
-// exceed 0x7fff.
-// Exceptions:
-//  (1) if n=0 the result is always 0, regardless of d.
-//  (2) if d is not in the proper range, and n!=0, the result is undefined.
-//
-/*
- * const int16_t
-	lut_fracdivide_k1k2[64] = {
-            1023, 30784, 989, 28915,        955, 27153, 921, 25488,
-            887, 23913, 854, 22422,         820, 21007, 786, 19662,
-            753, 18383, 719, 17165,         686, 16004, 653, 14895,
-            620, 13836, 586, 12823,         553, 11853, 520, 10923,
-
-            487, 10032, 454, 9176,          421, 8353, 389, 7562,
-            356, 6801, 323, 6068,            291, 5362, 258, 4681,
-            226, 4024, 193, 3390,           161, 2777, 129, 2185,
-             96, 1612, 64, 1057,             32, 520, 0, 0
-       };
-*/
-
-static inline  HVX_Vector
-hvx_fracdivide_Vh_VhVh( HVX_Vector n, HVX_Vector d )
-{
-	// We extract bits 13:9 from d; since 15:14 are assumed to be 01,
-	// we end up with a value in range 0x20 .. 0x3f in the even bytes of dr).
-	//
-    HVX_Vector dx = Q6_Vuh_vlsr_VuhR( d, 9);
-	HVX_Vector lkup = *(HVX_Vector const*)lut_fracdivide_k1k2;
-	HVX_VectorPair k1a = Q6_Wh_vlut16_VbVhR( dx, lkup , 2);
-
-	HVX_Vector k1= Q6_V_lo_W( Q6_Wh_vlut16or_WhVbVhR( k1a, dx, lkup ,3 ));
-
-	// find d1 = d + d*k1  ( is >= 0x7C00, <= 0x7fff)
-	// find n1 = n + n*k1  (saturating add)
-
-    HVX_Vector d1 = Q6_Vh_vadd_VhVh_sat( d, Q6_Vh_vmpy_VhVh_s1_rnd_sat( d, k1 ));
-    HVX_Vector n1 = Q6_Vh_vadd_VhVh_sat( n, Q6_Vh_vmpy_VhVh_s1_rnd_sat( n, k1 ));
-
-	// get bits 9:5 of d1
-	dx = Q6_V_vand_VV( Q6_Vuh_vlsr_VuhR( d1, 5), Q6_V_vsplat_R( 0x001F001F));
-
-	HVX_VectorPair k2a = Q6_Wh_vlut16_VbVhR( dx, lkup , 0);
-	HVX_Vector k2= Q6_V_lo_W( Q6_Wh_vlut16or_WhVbVhR( k2a, dx, lkup ,1 ));
-
-    HVX_Vector d2 = Q6_Vh_vadd_VhVh_sat( d1, Q6_Vh_vmpy_VhVh_s1_rnd_sat( d1, k2 ));  // >= 0x7fdf
-    HVX_Vector n2 = Q6_Vh_vadd_VhVh_sat( n1, Q6_Vh_vmpy_VhVh_s1_rnd_sat( n1, k2 ));
-
-    HVX_Vector e = Q6_Vh_vsub_VhVh( Q6_V_vsplat_R( 0x80008000), d2 );		// 1 .. 0x21
-    return Q6_Vh_vadd_VhVh_sat( n2, Q6_Vh_vmpy_VhVh_s1_rnd_sat( n2, e ));
-}
-
-//
-// 'scalar' reference of the fractional divide
-//
-static inline int
-ref_fracdivide_Rh_RhRh(int n, int d )
-{
-	int dx = (d >> 9)-0x20;	// should be 0 .. 0x1f
-	int k1 = ((unsigned) dx < 32) ?  lut_fracdivide_k1k2[2*dx+1]: 0;
-	int d1 = Q6_R_vaddh_RR_sat( d, Q6_R_vmpyh_RR_s1_rnd_sat( d, k1 ));
-	int n1 = Q6_R_vaddh_RR_sat( n, Q6_R_vmpyh_RR_s1_rnd_sat( n, k1 ));
-	// get bits 9:5 of d1
-	dx =  (d1>>5) & 0x1f;
-	int k2 = lut_fracdivide_k1k2[2*dx];
-	int d2 = Q6_R_vaddh_RR_sat( d1, Q6_R_vmpyh_RR_s1_rnd_sat( d1, k2 ));
-	int n2 = Q6_R_vaddh_RR_sat( n1, Q6_R_vmpyh_RR_s1_rnd_sat( n1, k2 ));
-	int e = 0x8000 - d2;	// 0 ... 0x21
-
-    return (int16_t) Q6_R_vaddh_RR_sat( n2, Q6_R_vmpyh_RR_s1_rnd_sat( n2, e ));
-}
-
-
-
-//
-// A lower precision version of the fractional divide, fewer steps.
-//
-//  gives n/d  with 15 fractional bits (10 bits effective precision)
-//   subject to :
-//      (1) d must be normalized in range 0x4000 .. 0x7fff
-//      (2) if abs(n) >= d, the result will saturate to 0x7fff or -0x8000
-//          (same sign as n)
-//      (3) if n==0, result is always 0, even if d is not normalized (or 0).
-//
-// The '10 bits relative precision' is relative to the magnitude of the result;
-// e.g. return value in range +/- 1000 will be very accurate.
-//
-static inline  HVX_Vector
-hvx_fracdivide_10bit_Vh_VhVh( HVX_Vector n, HVX_Vector d )
-{
-	// We extract bits 13:9 from d; since 15:14 are assumed to be 0,
-	// we end up with a value in range 0x20 .. 0x3f in the even bytes of dr).
-	//
-    HVX_Vector dx = Q6_Vuh_vlsr_VuhR( d, 9);
-	HVX_Vector lkup = *(HVX_Vector const*)lut_fracdivide_k1k2;
-	HVX_VectorPair k1a = Q6_Wh_vlut16_VbVhR( dx, lkup , 2);
-	HVX_Vector k1= Q6_V_lo_W( Q6_Wh_vlut16or_WhVbVhR( k1a, dx, lkup ,3 ));
-
-	// find d1 = d + d*k1  ( is >= 0x7C00, <= 0x7fff)
-	// find n1 = n + n*k1  (saturating add)
-
-    HVX_Vector d1 = Q6_Vh_vadd_VhVh_sat( d, Q6_Vh_vmpy_VhVh_s1_rnd_sat( d, k1 ));
-    HVX_Vector n1 = Q6_Vh_vadd_VhVh_sat( n, Q6_Vh_vmpy_VhVh_s1_rnd_sat( n, k1 ));
-
-	//
-	// n/d = n1/d1  but d1 = 1-e  (where e is small)
-    // so use n1*(1+e)  - n1 + n1*e
-    //
-
-    HVX_Vector e = Q6_Vh_vsub_VhVh( Q6_V_vsplat_R( 0x80008000), d1 );
-    return Q6_Vh_vadd_VhVh_sat( n1, Q6_Vh_vmpy_VhVh_s1_rnd_sat( n1, e ));
-}
-
-//
-// 'scalar' reference of the fractional divide
-//
-static inline int
-ref_fracdivide_10bit_Rh_RhRh(int n, int d )
-{
-	int dx = (d >> 9)-0x20;	// should be 0 .. 0x1f
-	int k1 = ((unsigned) dx < 32) ?  lut_fracdivide_k1k2[2*dx+1]: 0;
-	int d1 = Q6_R_vaddh_RR_sat( d, Q6_R_vmpyh_RR_s1_rnd_sat( d, k1 ));
-	int n1 = Q6_R_vaddh_RR_sat( n, Q6_R_vmpyh_RR_s1_rnd_sat( n, k1 ));
-	int e = 0x8000 - d1;	// 0 ... 0x21
-    return (int16_t) Q6_R_vaddh_RR_sat( n1, Q6_R_vmpyh_RR_s1_rnd_sat( n1, e ));
-}
-
 
 // reciprocal square root, 10 bit  result
 // Input is a uint16_t value in range 0x4000 ..0xFFFF (considered to have 16 fractional
@@ -420,7 +268,203 @@ ref_ruh_sqrt_RuhI(int vin, int adj)
 }
 
 
+/////////////////////////////////////////////////////////////
+//
+// reciprocal operation
+// each lane of d must be in range 0x4000 .. 0x7fff
+// result is in the same range; 2^29/d.
+//
+// the 'prec' parameter *must* be constant, so the compiler
+// expands all the if's depending on it.
+// This parameter sets the desired worst-case precision, in units of 1e-5
+// relative to the result. The best precision is about 4.5e-5,
+// obtained by prec = 5 or less.
+//
+//
+//
+//  for V60, V62:
+//     prec < 17:
+//         2-order approx with 2 newton-raphson refinement;  5e-5
+//     prec >=17
+//         2-order approx with newton-raphson refinement;  17e-5
+//
+//  for >=V65:
+//     prec < 13:
+//         2-order 4seg poly with newton-raphson refinement;  5e-5
+//     prec >=13, < 52:
+//         1-order 4seg with newton-raphson refinement;  13e-5
+//     prec >= 52
+//         2-order 4seg poly with no refinement             52e-5
+//
+//
+//
+// At least one refinement is used when prec < 52. When prec <=5,
+// the last one is of higher accuracy. So prec=6 will be a bit faster, and a 
+// tiny bit less accurate than prec = 5
+//
+// IMPORTANT: you will get different results on V65 vs non-v65,
+// since different algos will be used for the same value of prec.
+// if this is a problem, use a negative value for prec; the v65
+// algos will be disabled.
 
+//----------------------------------------------------------
+// Performance measured across all 16384 valid input codes:
+//   ref_result = (2.0^29)/input_code
+//    err = result-ref_result
+//    relative_err = err/ref_result
+//  excess error = abs(err)-abs(ref_result-rounded(ref_result))
+//  average error = sum(err)/16384
+//
+// 
+// V60,V62 performance:      prec <= 5   6...16       >= 17
+// max excess err, codes:      1.00      1.00         4.05
+// average error, codes:       0.03     -0.08        -1.18
+// max relative error, 1e-5:   4.5       5.0          17.2
+// rms relative error, 1e-5:   1.6       1.8           6.8
+// 
+// >=V65 performance:        prec <= 5   6...12   13...51   >=52
+// max excess err, codes:      1.00      1.00    3.00      15.92
+// average error, codes:       0.03      0.03   -0.34      0.48
+// max relative error, 1e-5:   4.5       5.6     13.3      51.6
+// rms relative error, 1e-5:   1.6       2.1      3.4      23.2
+//
+// for comparison, an 'ideal' rounded-to-nearest result
+// has a max rel error of 3.05e-5 and rms of 1.34e-5.
+//-------------------------------------------------------------
+//
+static inline HVX_Vector __attribute__((always_inline,unused))
+hvx_recip16_inline( HVX_Vector d , int prec )
+{
+	int preca = (prec < 0)?-prec: prec;
+	HVX_Vector x0;
+	int use_v65 = 0;
+#if __HEXAGON_ARCH__ >= 65
+	if( prec >=0 ){
+		use_v65 = 1;
+		HVX_Vector d4 = Q6_Vh_vasl_VhR ( d, 2);	// shift up, it's now 0 .. 0xFFFC
+		HVX_Vector p;
+		if( prec < 13 || prec >= 52 ){
+			// 4-segment 2nd order: after one correction result is +/-1 count of best answer
+			p = Q6_Vh_vlut4_VuhPh( d4, 0x09E20F69199B2E12ull);
+			p = Q6_Vh_vmps_VhVhVuhPuh_sat( p, d4, 0x472E57516AB67D56ull );
+			p = Q6_Vh_vmpa_VhVhVuhPuh_sat( p, d4, 0x736C794E7DE88001ull );
+		}else{
+			// linear version - result +/- 3 units after one correction
+			p = Q6_Vh_vlut4_VuhPh( d4, 0xEE58E790DF56CAC2ull);
+			p = Q6_Vh_vmpa_VhVhVuhPuh_sat( p, d4, 0x63516D7D75B78001ull );
+		}
+		x0 = Q6_Vh_vadd_VhVh_sat(p,p);
+	}
+#endif	
+	if( !use_v65 ){
+		// 2nd order poly in d2= (2*d-2)
+		HVX_Vector d2 = Q6_Vh_vadd_VhVh( d, d ); // intentional overflow to negative
+		HVX_Vector p = Q6_Vh_vmpy_VhRh_s1_rnd_sat( d2, 10598* 0x10001);
+		p = Q6_Vh_vadd_VhVh_sat( p, q6op_Vh_vsplat_R( -5306 ));
+		p = Q6_Vh_vmpy_VhVh_s1_rnd_sat( d2, p );
+		x0 = Q6_Vh_vadd_VhVh_sat( p, q6op_Vh_vsplat_R( 16569 ));
+	}
+	// now he have result x0 ... need to iterate it once or twice
+	// depending on prec.
+	if( preca < 17 && !use_v65 ){
+		HVX_Vector pd = Q6_Vh_vmpy_VhVh_s1_rnd_sat( d, x0);
+		pd = Q6_Vh_vsub_VhVh_sat( pd, q6op_Vh_vsplat_R(1<<14 ));
+		HVX_Vector pd15 = Q6_Vh_vadd_VhVh_sat( pd, pd );
+		HVX_Vector xpd15 = Q6_Vh_vmpy_VhVh_s1_rnd_sat( pd15, x0 );
+		x0 = Q6_Vh_vsub_VhVh_sat( x0, xpd15 );
+	}
+	if( preca < 52 || !use_v65 ){
+		HVX_Vector pd15;
+		if(  preca > 5){
+			HVX_Vector pd = Q6_Vh_vmpy_VhVh_s1_rnd_sat( d, x0);
+			pd = Q6_Vh_vsub_VhVh_sat( pd, q6op_Vh_vsplat_R(1<<14 ));
+			pd15 = Q6_Vh_vadd_VhVh_sat( pd, pd );
+		}else{		// 'high accuracy' iteration - pd15 has 1 more bit.
+			HVX_VectorPair pd = Q6_Ww_vmpy_VhVh( d, x0 );
+			pd15 = Q6_Vh_vasr_VwVwR( Q6_V_hi_W(pd),Q6_V_lo_W(pd),13);
+			pd15 = Q6_Vh_vavg_VhVh_rnd( pd15, Q6_V_vzero());
+		}
+		HVX_Vector xpd15 = Q6_Vh_vmpy_VhVh_s1_rnd_sat( pd15, x0 );
+		x0 = Q6_Vh_vsub_VhVh_sat( x0, xpd15 );
+	}
+	return x0;
+}	
+
+
+//
+// This is given a vector of 32 x u32 and a uint32 scalar;
+// it finds the exact 64-bit products and returns the lower and upper 32 in a
+// HVX_Vector_x2. If you only want the upper 32, this function is good to use,
+// the operations which generate the lower will be dropped if you don't  use it.
+//
+// - Start by finding four u16xu16->32 partial products.
+// - Lower result:
+//       add the two middle pps, then add with <<16 to lower pp.
+// - upper result is trickier:
+//    (1) add lower pp to one of the middles, with >> 16 (it won't overflow)
+//  >=v65:
+//    (2) average the two middle PPs (using Vuw average)
+//    (3) add with >>15 to upper PP, that's the result.
+//  <= v65
+//    (2) add the middle PPs together; check for overflow
+//    (3) add with >> 16 to upper PP;
+//    (4) add 64K where overflow occurred.
+//
+static inline
+HVX_Vector_x2  __attribute__((always_inline,unused))
+find_u64_prod_VuwRuw( HVX_Vector input, uint32_t factor)
+{
+	int32_t lo_lo = Q6_R_combine_RlRl( factor,factor);
+	int32_t hi_hi = Q6_R_combine_RhRh( factor,factor);
+
+	// find PPs
+	HVX_VectorPair prodH = Q6_Wuw_vmpy_VuhRuh( input, hi_hi);
+	HVX_VectorPair prodL = Q6_Wuw_vmpy_VuhRuh( input, lo_lo);
+	HVX_Vector pp_HH = Q6_V_hi_W( prodH);
+	HVX_Vector pp_M0 = Q6_V_lo_W( prodH);
+	HVX_Vector pp_M1 = Q6_V_hi_W( prodL);
+	HVX_Vector pp_LL = Q6_V_lo_W( prodL);
+
+	HVX_Vector_x2 result;
+
+	result.val[0] = Q6_Vw_vaslacc_VwVwR(
+			pp_LL,								// low product
+			Q6_Vw_vadd_VwVw( pp_M0, pp_M1), 16);	// sum of middles << 16
+
+	// now do upper.
+	// >> pp_LL by 16 with zero-extend (it will be <= 0xFFFE)
+	pp_LL = Q6_Vh_vshuffo_VhVh( Q6_V_vzero(), pp_LL);
+	// add that to pp_M0; max sum is 0xFFFE0001 + 0xFFFE = 0xFFFEFFFF
+	pp_M0 = Q6_Vw_vadd_VwVw( pp_M0, pp_LL);
+
+
+#if __HEXAGON_ARCH__ >= 65
+	// average the two pp_M together (without rounding, of course)...
+	HVX_Vector pp_M = Q6_Vuw_vavg_VuwVuw( pp_M0, pp_M1);
+	result.val[1] = Q6_Vw_vadd_VwVw(		// add to ppHH with >>15 (zero extend)
+			pp_HH,
+			Q6_Vuw_vlsr_VuwR( pp_M, 15));
+
+#else
+	// add middle PP's together
+	HVX_Vector pp_M = Q6_Vw_vadd_VwVw( pp_M0, pp_M1);
+	// overflow iff result < either input (or both)
+	HVX_VectorPred pp_oflo = Q6_Q_vcmp_gt_VuwVuw( pp_M0, pp_M);
+	// >> the sum by 16 with zero extend
+	pp_M = Q6_Vh_vshuffo_VhVh( Q6_V_vzero(), pp_M);
+	// meanwhile add 64K to pp_H where overflow occurred
+	pp_HH = Q6_Vw_vadd_VwVw( pp_HH, Q6_V_vand_QR( pp_oflo, 0x00010000));
+	result.val[1] = Q6_Vw_vadd_VwVw(pp_HH, pp_M);
+#endif
+	return result;
+}
+
+
+
+
+
+
+/////////////////////////////////////////////////////////////
 //
 // find the sum all of the elements in a single d32 slice; giving
 // separate sums for each of 32 depth positions.

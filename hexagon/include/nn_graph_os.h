@@ -48,17 +48,35 @@
 #error please define a USE_OS or be smarter about how we figure out our OS
 #endif
 
+#include "nn_graph_os_checkpoint.h"
+#include "nn_os_portable.h"
+
+int nn_os_update_main_thread_priority(struct nn_graph *nn, int *priority /* save priority before update if not null */);
+int nn_os_restore_main_thread_priority(struct nn_graph *nn, int priority);
+
 int nn_os_workers_spawn(struct nn_graph *nn);
 void nn_os_workers_kill(struct nn_graph *nn);
 void nn_os_work_for_vector(struct nn_graph *nn, void (*f)(struct nn_graph *, void *),void *arg);
-void nn_os_work_for_scalar(struct nn_graph *nn, void (*f)(struct nn_graph *, void *),void *arg);
 void nn_os_vector_workers_acquire(struct nn_graph *nn);
 void nn_os_vector_workers_release(struct nn_graph *nn);
 
 int nn_os_vector_call(struct nn_graph *nn, int (*f)(struct nn_graph *, void *),void *arg);
 
+int nn_os_vtcm_choose_size(struct nn_graph *nn);
 int nn_os_vtcm_acquire(struct nn_graph *nn);
 int nn_os_vtcm_release(struct nn_graph *nn);
+
+typedef union {
+	struct {
+		void (*f)(struct nn_graph *, void *);
+		void *arg;
+	};
+	uint64_t raw;
+} nn_os_workitem_t;
+		
+
+/* EJP: FIXME: Should be inline , but we don't get struct nn_graph until later... */
+void nn_os_worklist_for_vector(struct nn_graph *nn, nn_os_workitem_t *items, int n_items);
 
 
 //
@@ -290,5 +308,61 @@ static inline void nn_free_debug(void *ptr, const char *filename, int line) { nn
 #define realloc(p,s) OOPS REALLOC
 #define free(p) OOPS FREE
 #endif
+
+
+//
+// nn_progress_t allows threads to stall
+// waiting for progress made by other thread(s).
+// The 'progress' is expressed as a 24-bit unsigned value
+// which starts at 1 and increments each time nn_condition_advance() is called.
+//
+// nn_progress_waitfor( &cond, n ) will stall until the condition reaches n.
+// nn_progress_advance( &cond ) will add 1 to cond, and notify any waiting threads.
+//
+//
+typedef struct nn_progress {
+	volatile uint32_t progvar;		// 24 msbs: progress count; 8 lsbs: notify count.
+	nn_sem_t notify;
+}  nn_progress_t;
+
+static inline void nn_progress_init( nn_progress_t* prp)
+{
+	prp->progvar = 0;
+	nn_sem_init( &prp->notify,0);
+}
+
+static inline unsigned nn_progress_getcount(  nn_progress_t const *prp ){
+	return prp->progvar >> 8;
+}
+static inline void nn_progress_advance( nn_progress_t* prp)
+{
+	uint32_t curprog = prp->progvar;
+	uint32_t cur0;
+	do{
+		uint32_t next_prog = (curprog + 0x100) & ~(unsigned)0xFF;
+		// change curprog to nextprog: atomically advance the count +1 and clear the notify count.
+		cur0 = curprog;
+		curprog = __sync_val_compare_and_swap( &prp->progvar, curprog,next_prog);
+	}while( curprog != cur0 );	 		// keep going until we succeed
+	int notifies = curprog & 0xFF;
+	for(int i =0 ; i < notifies; i++) nn_sem_post( &prp->notify );
+}
+
+static inline void nn_progress_waitfor( nn_progress_t* prp, uint32_t needprog )
+{
+	needprog <<= 8;
+	uint32_t curprog = prp->progvar; 
+	while( curprog < needprog ){			// not there yet
+		uint32_t newprog = curprog + 1;		// attempt to add one to notify count field
+		uint32_t cur0 = curprog;
+		curprog = __sync_val_compare_and_swap( &prp->progvar, curprog,newprog);
+		if( curprog == cur0 ){				// it worked -> notify will be posted.
+			nn_sem_wait( & prp->notify );	// so wait for this
+			curprog = prp->progvar;			// and freshen this
+		}
+		// if the cas didn't work, we might exit the while loop (progress may
+		// have advanced).
+	}
+}
 
 #endif // NN_GRAPH_OS_H

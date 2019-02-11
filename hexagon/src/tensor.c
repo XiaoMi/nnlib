@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -51,7 +51,7 @@
 struct tensor *tensor_alloc(const struct shape *shape, size_t data_size)
 {
 	struct tensor *newtensor;
-	if ((newtensor = nn_malloc(sizeof(*newtensor))) == NULL) {
+	if ((newtensor = nn_calloc(1,sizeof(*newtensor))) == NULL) {
 		return NULL;
 	}
 	if (data_size) {
@@ -85,6 +85,44 @@ void tensor_free(struct tensor *tensor)
 	nn_free(tensor);
 }
 
+void print_tensor_to_file(struct nn_graph *nn, uint32_t id, uint32_t index, const struct tensor *t)
+{
+#if defined(V66)
+	FILE *outfile;
+	char filename[255];
+
+	if ( !tensor_is_plain(t) && !tensor_is_d32(t)) {
+		errlog(nn,"Can't determine tensor format");
+		return;
+	}
+
+	int elementsize = tensor_type_size(t->format.type);
+
+	snprintf(filename, 255, "%s_%x_%u.dat", nn->enable_tensor_print_prefix, (unsigned)id, (unsigned)index);
+	if ((outfile = fopen(filename, "w")) == NULL) {
+		errlog(nn,"Ooops... Couldn't open file '%s'", filename);
+		return;
+	} else {
+		logmsg(nn,1,"INFO: Writing '%s'", filename);
+	}
+
+	for (int b=0; b < t->shape.batches; b++) {
+		for (int h=0; h < t->shape.height; h++) {
+			for (int w=0; w < t->shape.width; w++) {
+				for (int d=0; d < t->shape.depth; d++) {
+					// TODO - There's a faster way to do this... At least for plain tensors;
+					//    fwrite(t,1,(b*h*w*d),outfile);
+					for (int e=0; e<elementsize; e++) {
+						putc(*(uint8_t*)tensor_location(t,b,h,w,d)+e, outfile);
+					}
+				}
+			}
+		}
+	}
+	fclose(outfile);
+#endif
+}
+
 #ifdef SHOWY_DEBUG
 void print_tensor(const struct tensor *t, const char *str)
 {
@@ -92,7 +130,7 @@ void print_tensor(const struct tensor *t, const char *str)
 	char filename[255];
 
 	uint64_t pcycle = nn_os_get_cycles(NULL);
-	if( t->format.layout != NN_LAYOUT_PLAIN && t->format.layout != NN_LAYOUT_D32){
+	if ( !tensor_is_plain(t) && !tensor_is_d32(t)) {
 		printf("Can't determine tensor format\n");
 		return;
 	}

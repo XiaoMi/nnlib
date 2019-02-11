@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -139,11 +139,13 @@ inconv2dbbb_s1_v60_asm:
        } {
            memd(sp+#32) = r25:24                        //
            memd(sp+#40) = r27:26                        //
-           maxe = #0                                    //
-           mine = vsplat(r23)                           //
        } {
            memw(sp+#52) = ptr_wi                        //
-           maxe.w = vsub(maxe.w, mine.w)                //
+           ptr_max = memw(sp+#24<<2)                    //ptr pre computed max value in output
+       } {
+           maxe = vmem(ptr_max+#0)                      //[E, 1]store total max
+       } {
+           mine = vmem(ptr_max+#1)                      //[E, 2]store total min
        } {
            in_depth = memw(sp+#20<<2)                   //
            filt_height = memw(sp+#22<<2)                //extract filt_height 
@@ -371,9 +373,12 @@ inconv2dbbb_s1_v60_asm:
            if(!p1.new) jump:t .L_height                 //next height
        }//end lines per block
 /* ---------------------------------------------------------------------------- */
+           ptr_max = memw(sp+#24<<2)                    //ptr pre computed max value in output
+           vmem(ptr_max+#0) = maxe                      //[E, 1]store total max
+           vmem(ptr_max+#1) = mine                      //[E, 2]store total min
+#if 0
        {
            loop0(.L_peak, #4)                           //[P, 0]
-           ptr_max = memw(sp+#24<<2)                    //ptr pre computed max value in output
            maxomaxe=vshuff(maxe,maxe,c4)                //[P, 0]
        } 
 .L_peak:
@@ -392,6 +397,7 @@ inconv2dbbb_s1_v60_asm:
            mine.w = vmin(mino.w, mine.w)                //[1, 2]
            vmem(ptr_max+#1) = mine.new                  //[E, 2]store total min
        }
+#endif
 /*=============================================================================*/
        {   r17:16 = memd(sp+#0)                         //restore stack
            r19:18 = memd(sp+#8)                         //Q

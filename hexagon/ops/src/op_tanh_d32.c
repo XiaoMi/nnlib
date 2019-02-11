@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -39,9 +39,7 @@
 #include <stdio.h>
 #include <quantize.h>
 #include <math.h>
-#if defined(__hexagon__)
 #include "hvx_inlines.h"
-#endif
 
 //#define TEST_PERFORMANCE
 //
@@ -83,6 +81,13 @@
 static const int16_t tanh_lut[64];
 static const int16_t sigmoid_lut[64];
 
+// this is attached to  the node, and caches the lut for a given min/max
+struct lookup_table_cache {
+	float minval, maxval;
+	uint8_t lut[256];		// note: not vector aligned
+};
+
+
 struct tanh_scaling_parms {
 	int16_t in_zero;		// the input 'zero point
 	int16_t scalek;			// amount to multiply by
@@ -118,10 +123,18 @@ set_scaling_parms( struct tanh_scaling_parms * sprm, float minval, float maxval,
 struct tanh_run_state;
 typedef void (*operate_func_fp)( struct tanh_run_state*,uint8_t *, uint8_t const *, int,int);
 
+//
+// 'flat' tensors are also processed by this code; each 'work unit'
+// is TANH_FLATMODE_WORKUNIT_VECS in length. The last one may be short.
+//
+#define TANH_FLATMODE_WORKUNIT_VECS 64
+
+
 struct tanh_run_state {
 	struct shape shape;			// shape of operation
 	struct tensor_addressing tin;
 	struct tensor_addressing tout;
+	uint32_t flat_total_bytes;		// for 'flat' tensors, total # of bytes
 	volatile int next_job_index;
 	int n_jobs;
 	nn_sem_t done_sem;
@@ -132,11 +145,12 @@ struct tanh_run_state {
 	nn_sem_t table_built_sem;
 
 	struct tanh_scaling_parms  sparms;
-	uint8_t *runlut;		// where the pre-built LUT is (if hvx; null otherwise)
+	uint8_t *runlut;		// where the pre-built LUT is (if hvx; null otherwise). Not vector aligned.
 	operate_func_fp operate_func;
 };
 
 static void tanh_d32_run_thread( struct nn_graph * nn, void * rstpv);
+static void tanh_flat_run_thread( struct nn_graph * nn, void * rstpv);
 static  void  operate_ref_function(
 		struct tanh_run_state * rstp,
 		uint8_t *outp, uint8_t const * inp,	// 32-aligned
@@ -165,6 +179,7 @@ static int tanh_d32_execute(struct nn_node *self, struct nn_graph *nn)
 	char const * opname = hexagon_nn_op_names[ self->node_type];
 	int is_sigmoid= 0;
 	int use_hvx = 1;
+	int is_d32 = 1;
 	switch( self->node_type){
 	 case OP_QuantizedTanh_8_d32:
 		break;
@@ -178,65 +193,97 @@ static int tanh_d32_execute(struct nn_node *self, struct nn_graph *nn)
 	    is_sigmoid= 1;
 		use_hvx = 0;
 		break;
+	 case OP_QuantizedTanh_8:
+		is_d32 = 0;
+		break;
+	 case OP_QuantizedSigmoid_8:
+	    is_sigmoid= 1;
+		is_d32 = 0;
+		break;
+
 	 default:
 		 return errlog(nn,"bad node_type= %d", self->node_type);
 	}
 	logmsg(nn,2,"%s execute. self=%p ",opname,self);
 
 	struct tanh_run_state rstt;
-
-	set_scaling_parms( &rstt.sparms, in_min, in_max, is_sigmoid );
+	// get cache
+	// this is only non-null if use_hvx = 1
+	struct lookup_table_cache *cachep = (struct lookup_table_cache *)self->opaque;
+	// avoid the scaling calc if the cache is ok
+	int cached_table_ok = use_hvx && (in_min == cachep->minval && in_max == cachep->maxval );
+	if( !cached_table_ok)
+		set_scaling_parms( &rstt.sparms, in_min, in_max, is_sigmoid );
 
 	// set up the runstate for input tensor
 	rstt.shape = in_tensor->shape;
-	rstt.tin = tensor_addressing_d32(in_tensor);
 
-	// set up the output tensor
+	int njobs;
+	if( is_d32){
 
-	int b = in_tensor->shape.batches;
-	int h = in_tensor->shape.height;
-	int h_pad_before = in_tensor->format.height_pad[0];
-	int h_pad_after = in_tensor->format.height_pad[1];
-	int w = in_tensor->shape.width;
-	int w_pad_before = in_tensor->format.width_pad[0];
-	int w_pad_after = in_tensor->format.width_pad[1];
-	int d = in_tensor->shape.depth;
-	int d_pad_before = in_tensor->format.depth_pad[0];
-	int nd32 = rstt.tin.nd32;
+		rstt.tin = tensor_addressing_d32(in_tensor);
 
-	int d_pad_after = nd32*32 - (d_pad_before + d);
-	if( tensor_out_prepare_padded_d32( out_tensor, b,
-			h,  h_pad_before,  h_pad_after,
-			w,  w_pad_before,  w_pad_after,
-			d,  d_pad_before,  d_pad_after,
-			NN_TYPE_QUINT8) != 0 ){
-		return errlog(nn,"out too small");
+		// set up the output tensor
+
+		int b = in_tensor->shape.batches;
+		int h = in_tensor->shape.height;
+		int h_pad_before = in_tensor->format.height_pad[0];
+		int h_pad_after = in_tensor->format.height_pad[1];
+		int w = in_tensor->shape.width;
+		int w_pad_before = in_tensor->format.width_pad[0];
+		int w_pad_after = in_tensor->format.width_pad[1];
+		int d = in_tensor->shape.depth;
+		int d_pad_before = in_tensor->format.depth_pad[0];
+		int nd32 = rstt.tin.nd32;
+		njobs = b*nd32;
+
+		int d_pad_after = nd32*32 - (d_pad_before + d);
+		if( tensor_out_prepare_padded_d32( out_tensor, b,
+				h,  h_pad_before,  h_pad_after,
+				w,  w_pad_before,  w_pad_after,
+				d,  d_pad_before,  d_pad_after,
+				NN_TYPE_QUINT8) != 0 ){
+			return errlog(nn,"out too small");
+		}
+		rstt.tout = tensor_addressing_d32(out_tensor);
+
+	}else{	// FLAT tensors.
+		rstt.flat_total_bytes = tensor_element_count(in_tensor);
+		nn_tensor_out_prepare_normal_fromshape(out_tensor,&rstt.shape, NN_TYPE_QUINT8);
+		njobs = (rstt.flat_total_bytes  + TANH_FLATMODE_WORKUNIT_VECS*128-1)/(unsigned)(TANH_FLATMODE_WORKUNIT_VECS*128);
+		rstt.tin.data = in_tensor->data;
+		rstt.tout.data = out_tensor->data;
 	}
-
 	// set up the rest of the run state
 	rstt.operate_func = use_hvx? operate_hvx_function: operate_ref_function;
-	rstt.runlut = use_hvx? (uint8_t *) nn->scratch:NULL;
-	rstt.tout = tensor_addressing_d32(out_tensor);
+	rstt.runlut = use_hvx? (uint8_t *) &cachep->lut :NULL;
 
 	rstt.next_job_index = 0;
-	rstt.n_jobs = b*nd32;
+	rstt.n_jobs = njobs;
 	nn_sem_init( &rstt.done_sem, 0);
 
-	rstt.table_built= 1;
-	if( use_hvx){
-		rstt.table_built = 0;
+	int table_built = 1;
+	if( use_hvx && !cached_table_ok){
+		// rebuild table if use_hvx and if min, max have changed
+		cachep->minval = in_min;
+		cachep->maxval = in_max;
+		table_built = 0;
 		nn_sem_init( &rstt.table_built_sem,0);
 	}
+	rstt.table_built = table_built;
 	int nthreads = min_i32( rstt.n_jobs, 3);
+
+	void (*thread_run_fp)( struct nn_graph * nn, void * rstpv) =  is_d32? tanh_d32_run_thread:tanh_flat_run_thread;
+
 	// launch first thread
-	nn_os_work_for_vector(nn, tanh_d32_run_thread , &rstt);
-	if( use_hvx){
+	nn_os_work_for_vector(nn, thread_run_fp , &rstt);
+	if( !table_built){
 		// hold off until table built.
 		nn_sem_wait( & rstt.table_built_sem);
 	}
 	// launch the rest
 	for( int i =1; i < nthreads; i++){
-		nn_os_work_for_vector(nn, tanh_d32_run_thread , &rstt);
+		nn_os_work_for_vector(nn,thread_run_fp  , &rstt);
 	}
 
 	float out_min, out_max;
@@ -250,9 +297,8 @@ static int tanh_d32_execute(struct nn_node *self, struct nn_graph *nn)
 	tensor_set_single_float( out_min_tensor, out_min);
 	tensor_set_single_float( out_max_tensor, out_max);
 
-	for( int i =0; i < nthreads; i++){
-		nn_sem_wait( & rstt.done_sem);
-	}
+	nn_sem_wait_n_times( & rstt.done_sem, nthreads);
+
 #ifdef TEST_PERFORMANCE
 	end_time =  nn_os_get_cycles(nn);
 	printf("qsigmoid/tanh_d32 %s cycles = %d (elements = %d)\n",
@@ -270,7 +316,6 @@ tanh_d32_run_thread( struct nn_graph * nn, void * rstpv)
 	struct tanh_run_state *rstp = (struct tanh_run_state *)rstpv;
 
 	int job_index;
-	int b = rstp->shape.batches;
 	int d = rstp->shape.depth;
 	int nd32 = rstp->tin.nd32;
 	int d0 = rstp->tin.d0;
@@ -289,14 +334,13 @@ tanh_d32_run_thread( struct nn_graph * nn, void * rstpv)
 		}*/
 	}
 	operate_func_fp funcp = rstp->operate_func;
+	batchslice_decode bsdecode;
+	batchslice_decode_init( &bsdecode,nd32);
+	int njobs = rstp->n_jobs;
 
-	while( job_index = __sync_fetch_and_add( &rstp->next_job_index, 1), job_index < rstp->n_jobs ){
-		int id32 = job_index;
-		int ib = 0;
-		if( b> 1){
-			ib = job_index/nd32;
-			id32 = job_index - ib*nd32;
-		}
+	while( job_index = __sync_fetch_and_add( &rstp->next_job_index, 1), job_index < njobs ){
+		int id32 = batchslice_decode_update( &bsdecode, job_index);
+		int ib = bsdecode.ibatch;
 		uint8_t const * in_ptr = rstp->tin.data + ib*rstp->tin.batch_stride + id32*rstp->tin.d32_stride;
 		l2pref( in_ptr, pfheight, pfwid, pfstride );
 		uint8_t * out_ptr = rstp->tout.data + ib*rstp->tout.batch_stride + id32*rstp->tout.d32_stride;
@@ -305,6 +349,70 @@ tanh_d32_run_thread( struct nn_graph * nn, void * rstpv)
 		int dn = min_i32(d0 + d - id32*32, 32)-d_start;
 
 		(*funcp)( rstp, out_ptr, in_ptr, dn, d_start);
+	}
+	nn_sem_post( & rstp->done_sem);
+}
+
+static inline HVX_Vector
+hvx_table_lookup_u8( HVX_Vector vin, HVX_Vector lut0, HVX_Vector lut1)
+{
+	HVX_Vector vout =  q6op_Vb_vlut32_VbVbI( vin,lut0, 0 );
+	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut0,1);
+	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut0,2);
+	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut0,3);
+	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut1,4);
+	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut1,5);
+	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut1,6);
+	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut1,7);
+	return vout;
+}
+
+//
+// flat mode is like d32 mode except
+//  - no 'reference' operator
+//  - each 'work unit' is TANH_FLATMODE_WORKUNIT_VECS vectors (the last one can be smaller,
+//   and may not be a full vector.
+//
+
+static void
+tanh_flat_run_thread( struct nn_graph * nn, void * rstpv)
+{
+	struct tanh_run_state *rstp = (struct tanh_run_state *)rstpv;
+
+	int job_index;
+
+	if( rstp->table_built == 0){	// need to build lut
+		make_tanh_lookup_table(rstp);
+		rstp->table_built = 1;
+		nn_sem_post( & rstp->table_built_sem);
+	}
+	uint32_t total_len = rstp->flat_total_bytes;
+	uint8_t const  *inp0 = rstp->tin.data;
+	uint8_t *outp0 = rstp->tout.data;
+
+	HVX_Vector vlut0 = q6op_V_vldu_A( (HVX_Vector const *)rstp->runlut);
+	HVX_Vector vlut1 = q6op_V_vldu_A( (HVX_Vector const *)(rstp->runlut +128));
+	int njobs = rstp->n_jobs;
+
+	while( job_index = __sync_fetch_and_add( &rstp->next_job_index, 1), job_index < njobs ){
+		uint32_t offs = job_index * (TANH_FLATMODE_WORKUNIT_VECS*128);
+		uint8_t const  *inp = inp0+offs;
+		int32_t bytes = min_i32( (TANH_FLATMODE_WORKUNIT_VECS*128), total_len - offs);
+		int nvecs = (bytes+127)>>7;		// # of vectors to process (>=1)
+		if( nvecs < 1 ) break;			// shouldn't happen
+		l2pref( inp, /*height*/nvecs , /*width*/ 128, /*stride*/128 );
+
+		HVX_VectorPred qlast = q6op_Q_vsetq2_R(bytes);	// mask for last operation
+		HVX_Vector const *pvin = (HVX_Vector const *)inp;
+		HVX_Vector  *pvout = (HVX_Vector  *)(outp0 + offs);
+		HVX_Vector v = *pvin++;
+		HVX_Vector vout = hvx_table_lookup_u8( v, vlut0, vlut1);
+		for( int i  =0 ; i <nvecs-1; i++){
+			*pvout++ = vout;
+			v = *pvin++;
+			vout = hvx_table_lookup_u8( v, vlut0, vlut1);
+		}
+		q6op_vstcc_QAV(qlast,pvout,vout);
 	}
 	nn_sem_post( & rstp->done_sem);
 }
@@ -495,20 +603,6 @@ tanh_second_stage( struct first_stage_result fstg , HVX_Vector tbl, int midrange
 	return Q6_Vub_vasr_VhVhR_rnd_sat( tanh_1, tanh_0,7);
 }
 
-static inline HVX_Vector
-hvx_table_lookup_u8( HVX_Vector vin, HVX_Vector lut0, HVX_Vector lut1)
-{
-	HVX_Vector vout =  q6op_Vb_vlut32_VbVbI( vin,lut0, 0 );
-	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut0,1);
-	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut0,2);
-	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut0,3);
-	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut1,4);
-	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut1,5);
-	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut1,6);
-	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut1,7);
-	return vout;
-}
-
 //
 // This function builds a full lookup table for the operation defined
 // in the runstate.
@@ -522,7 +616,8 @@ make_tanh_lookup_table(  struct tanh_run_state * rstp )
 	// or as int16's,  { 0x100, 0x302, 0x504, .. 0x7f7e}
 	// and average it with 0x7f00 we get { 0x4000, 0x4101, .. 0x7f3f}
 	// which is the first input.
-	uint8_t * pout = rstp->runlut;
+	uint8_t * pout = rstp->runlut;	// 256 bytes, unaligned
+
 	HVX_Vector count128 = *(HVX_Vector const *)const_Count128;
 	HVX_Vector in0 = Q6_Vh_vavg_VhVh(count128, q6op_Vh_vsplat_R(0x7f00));
 	HVX_Vector in1 = Q6_V_vxor_VV( in0,q6op_Vb_vsplat_R(0x80) );
@@ -535,8 +630,11 @@ make_tanh_lookup_table(  struct tanh_run_state * rstp )
 	struct first_stage_result fstg0 = tanh_first_stage( in0, offs, kgain, rsh);
 	struct first_stage_result fstg1 = tanh_first_stage( in1, offs, kgain, rsh);
 
-	((HVX_Vector *)pout)[0] = tanh_second_stage( fstg0, vtbl, midrange);
-	((HVX_Vector *)pout)[1] = tanh_second_stage( fstg1, vtbl, midrange);
+	HVX_Vector vlut0 =  tanh_second_stage( fstg0, vtbl, midrange);
+	HVX_Vector vlut1  = tanh_second_stage( fstg1, vtbl, midrange);
+	q6op_vstu_AV( (HVX_Vector *)pout, vlut0);
+	q6op_vstu_AV( (HVX_Vector *)(pout+128), vlut1 );
+
 }
 
 //
@@ -557,8 +655,8 @@ static void operate_hvx_function(
 	int out_height_stride = rstp->tout.height_stride;
 	HVX_Vector lut0,lut1;
 
-	lut0 = ((HVX_Vector const *)rstp->runlut)[0];
-	lut1 = ((HVX_Vector const *)rstp->runlut)[1];
+	lut0 = q6op_V_vldu_A( (HVX_Vector const *)rstp->runlut);
+	lut1 = q6op_V_vldu_A( (HVX_Vector const *)(rstp->runlut +128));
 
 	// offset for width padding
 	int wpad = (int)(size_t)outp & 127;
@@ -601,7 +699,14 @@ static void operate_hvx_function(
 }
 
 #endif
-
+static int tanh_dtor(struct nn_node *self, struct nn_graph *nn)
+{
+	if(self->opaque != NULL){
+		nn_free( self->opaque);
+		self->opaque = NULL;
+	}
+	return node_free_common(self,nn);
+}
 
 static int tanh_d32_check(struct nn_node *self, struct nn_graph *nn)
 {
@@ -611,6 +716,15 @@ static int tanh_d32_check(struct nn_node *self, struct nn_graph *nn)
 	k = node_check_inputs_outputs_n( self,nn, "tanh_d32", 3, 3);
 	if( k!= 0) return k;
 
+	if( self->node_type != OP_QuantizedTanh_8_d32_ref && self->node_type != OP_QuantizedSigmoid_8_d32_ref)
+	{
+		// allocate space for the table cache
+		void * t = nn_calloc(1, sizeof(struct lookup_table_cache ));
+		if( t == NULL)return errlog(nn,"can't alloc %d bytes",(int)sizeof(struct lookup_table_cache ) );
+		self->opaque = t;
+		((struct lookup_table_cache*)t)->maxval = -999.0f;	// anything impossible, to invalidate
+	}
+
 	logmsg(nn,2,"tanh_d32 node %p check OK",self);
 	return 0;
 }
@@ -619,7 +733,7 @@ struct nn_node_ops nn_ops_for_QuantizedTanh_8_d32 = {
 	.execute = tanh_d32_execute,
 	.check = tanh_d32_check,
 	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	.dtor = tanh_dtor,
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
 };
 
@@ -635,7 +749,7 @@ struct nn_node_ops nn_ops_for_QuantizedSigmoid_8_d32 = {
 	.execute = tanh_d32_execute,
 	.check = tanh_d32_check,
 	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	.dtor = tanh_dtor,
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
 };
 
@@ -647,7 +761,22 @@ struct nn_node_ops nn_ops_for_QuantizedSigmoid_8_d32_ref = {
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
 };
 
+///
+/// flat mode
+///
+struct nn_node_ops nn_ops_for_QuantizedTanh_8 = {
+	.execute = tanh_d32_execute,
+	.check = tanh_d32_check,
+	.ctor = node_alloc_common,
+	.dtor = tanh_dtor
+};
 
+struct nn_node_ops nn_ops_for_QuantizedSigmoid_8= {
+	.execute = tanh_d32_execute,
+	.check = tanh_d32_check,
+	.ctor = node_alloc_common,
+	.dtor = tanh_dtor
+};
 
 
 

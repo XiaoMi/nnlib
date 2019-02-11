@@ -1,12 +1,12 @@
 # pakman tree build file
 _@ ?= @
 
-.PHONY: QAIC_DIR MAKE_D_EXT_3_DIR MAKE_D_3_LIBDIR MAKE_D_4_LIBDIR MAKE_D_5_LIBDIR MAKE_D_2_LIBDIR tree QAIC_DIR_clean MAKE_D_EXT_3_DIR_clean MAKE_D_3_LIBDIR_clean MAKE_D_4_LIBDIR_clean MAKE_D_5_LIBDIR_clean MAKE_D_2_LIBDIR_clean tree_clean
+.PHONY: QAIC_DIR MAKE_D_EXT_3_DIR MAKE_D_3_LIBDIR_clean MAKE_D_3_LIBDIR MAKE_D_4_LIBDIR MAKE_D_5_LIBDIR MAKE_D_2_LIBDIR tree QAIC_DIR_clean MAKE_D_EXT_3_DIR_clean MAKE_D_4_LIBDIR_clean MAKE_D_5_LIBDIR_clean MAKE_D_2_LIBDIR_clean tree_clean
 
-tree: MAKE_D_3_LIBDIR MAKE_D_EXT_3_DIR MAKE_D_4_LIBDIR MAKE_D_5_LIBDIR MAKE_D_2_LIBDIR MAKE_D_2_LIBDIR MAKE_D_3_LIBDIR MAKE_D_4_LIBDIR
+tree: MAKE_D_3_LIBDIR MAKE_D_EXT_3_DIR MAKE_D_4_LIBDIR MAKE_D_5_LIBDIR MAKE_D_2_LIBDIR MAKE_D_2_LIBDIR MAKE_D_4_LIBDIR
 	$(call job,,$(MAKE) V=$(V),making .)
 
-tree_clean: MAKE_D_3_LIBDIR_clean MAKE_D_EXT_3_DIR_clean MAKE_D_4_LIBDIR_clean MAKE_D_5_LIBDIR_clean MAKE_D_2_LIBDIR_clean MAKE_D_2_LIBDIR_clean MAKE_D_3_LIBDIR_clean MAKE_D_4_LIBDIR_clean
+tree_clean: MAKE_D_EXT_3_DIR_clean MAKE_D_3_LIBDIR_clean MAKE_D_4_LIBDIR_clean MAKE_D_5_LIBDIR_clean MAKE_D_2_LIBDIR_clean MAKE_D_2_LIBDIR_clean MAKE_D_4_LIBDIR_clean
 	$(call job,,$(MAKE) V=$(V) clean,cleaning .)
 
 MAKE_D_2_LIBDIR: MAKE_D_EXT_3_DIR MAKE_D_4_LIBDIR MAKE_D_5_LIBDIR
@@ -37,14 +37,13 @@ MAKE_D_EXT_3_DIR: QAIC_DIR
 
 MAKE_D_EXT_3_DIR_clean: QAIC_DIR_clean
 
-W := $(findstring ECHO,$(shell echo))# W => Windows environment
-
 QAIC_DIR: 
-	$(if $W,,$(call job,$(HEXAGON_SDK_ROOT)/tools/qaic,make,making $(HEXAGON_SDK_ROOT)/tools/qaic))
+	$(call job,$(HEXAGON_SDK_ROOT)/tools/qaic,make,making $(HEXAGON_SDK_ROOT)/tools/qaic)
 
 QAIC_DIR_clean: 
-	$(if $W,,$(call job,$(HEXAGON_SDK_ROOT)/tools/qaic,make clean,cleaning $(HEXAGON_SDK_ROOT)/tools/qaic))
+	$(call job,$(HEXAGON_SDK_ROOT)/tools/qaic,make clean,cleaning $(HEXAGON_SDK_ROOT)/tools/qaic)
 
+W := $(findstring ECHO,$(shell echo))# W => Windows environment
 @LOG = $(if $W,$(TEMP)\\)$@-build.log
 
 C = $(if $1,$(if $W,cd /D,cd) $1 && )$2

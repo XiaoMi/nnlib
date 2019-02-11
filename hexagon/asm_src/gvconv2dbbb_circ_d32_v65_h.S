@@ -31,8 +31,10 @@
  * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
+ */
+/*
   Memory
-     CODESIZE 1120 bytes
+     CODESIZE 1128 bytes
      STACK     112 bytes
 
   Description
@@ -192,6 +194,7 @@ gvconv2dbbb_circ_d32_v65_asm:
 #define mino_mine              v7:6   //packed mins 
 #define mino                   v7     //odd mins
 #define mine                   v6     //even mins
+#define stmp                   v7     // temp for min/max
 #define SSR        <<1:rnd:sat:shift  //simplfy mpy instruction
 /* --------------------------------------------------------------------------- */
    {   allocframe(#112)                                  //0th entry on stack is (112+8)/4=30 ints
@@ -438,6 +441,8 @@ gvconv2dbbb_circ_d32_v65_asm:
    } {
        s04_s00.w += vrmpy(w00.b, x40_x00.ub)             //[0, 6]acc 0,4,1,5 out 0
        s14_s10.w += vrmpy(w01.b, x41_x01.ub)             //[0, 6]
+       p2 = cmp.gt(col_count,#1);                        // do we need col 1?
+       col_count = add(col_count, #-8)                   //decrement width count by 8
    }
 /* ------------------------------------------------------------------------ */
    {   s00.w = vadd(s00.w, s10.w)                        //combine reducnent accs
@@ -453,54 +458,70 @@ gvconv2dbbb_circ_d32_v65_asm:
        mine.w = vmin(mine.w, s00.w)                      //min accumulation
        maxe.w = vmax(maxe.w, s00.w)                      //max accumulation
        s0_sh.w = vasl(s00.w, zshift)                     //o
-//     adjust = memw(sp+#23<<2) 
+       stmp = s00;                                       // keep for replacing s01 etc
+//     adjust = memw(sp+#23<<2)
    } {
-       col_count = add(col_count, #-8)                   //decrement width count by 8
-       maxe.w = vmax(maxe.w, s01.w)                      //max accumulation
+       if(p2) stmp = s01;                                // col 1 if needed
+       p2 = cmp.gt(col_count,#-6);                       // do we need col 2?
+       p0 = cmp.gt(col_count, #-4)                       // => 4..7 need store
+   } {
+       maxe.w = vmax(maxe.w, stmp.w)                     //max accumulation col 1
+       mine.w = vmin(mine.w, stmp.w)                     //min accumulation col 1
+       if( p2) stmp = s02;                               // col 2 if needed
+       p2 = cmp.gt(col_count,#-5);                       // do we need col 3?
+
 //     ptr_x0 = sub(ptr_x0, adjust)                      //-=filt_height if stride_height > filt_height
    } {   
        s1_sh.w = vasl(s01.w, zshift)                     //o
        s00.w = vmpye(s0_sh.w, vrecip.uh)                 //
-       mine.w = vmin(mine.w, s01.w)                      //min accumulation
+       maxe.w = vmax(maxe.w, stmp.w)                     //max accumulation col 2
    } {
-       maxe.w = vmax(maxe.w, s02.w)                      //max accumulation
-       mine.w = vmin(mine.w, s02.w)                      //min accumulation
+       mine.w = vmin(mine.w, stmp.w)                     //min accumulation col 2
+       if( p2) stmp = s03;                               // col 3 if needed
        s00.w += vmpyo(s0_sh.w, vrecip.h):SSR             //
        ptr_x0 += mpyi(stride, #16)                       //stride*2*4 advance buffer by 8 outputs
    } {
-       mine.w = vmin(mine.w, s03.w)                      //min accumulation
+       mine.w = vmin(mine.w, stmp.w)                     //min accumulation col 3
+       maxe.w = vmax(maxe.w, stmp.w)                     //max accumulation col 3
+       p2 = cmp.gt(col_count,#-3);                       // do we need col 5?
+   } {
        s0_sh.w = vasl(s02.w, zshift)                     //o
        s01.w = vmpye(s1_sh.w, vrecip.uh)                 //
+       if( p0) stmp = s04;                               // col 4 if needed
    } {
        s01.w += vmpyo(s1_sh.w, vrecip.h):SSR             //
-       maxe.w = vmax(maxe.w, s03.w)                      //max accumulation
-       mine.w = vmin(mine.w, s04.w)                      //min accumulation
-       p0 = cmp.ge(col_count, #0)                        //will be back at saem place just advance
+       mine.w = vmin(mine.w, stmp.w)                     //min accumulation col 4
+       maxe.w = vmax(maxe.w, stmp.w)                     //max accumulation col 4
    } {
+       if( p2) stmp = s05;                               // col 5 if needed
+       p2 = cmp.gt(col_count,#-2)                        // do we need col 6?
        s1_sh.w = vasl(s03.w, zshift)                     //o
        s02.w = vmpye(s0_sh.w, vrecip.uh)                 //
-       maxe.w = vmax(maxe.w, s04.w)                      //max accumulation
    } {
        d010.h = vpacke(s01.w, s00.w)                     //pack high 16bits of accs 
        s02.w += vmpyo(s0_sh.w, vrecip.h):SSR             //
-       mine.w = vmin(mine.w, s05.w)                      //min accumulation
-       p1 = cmp.gt(col_count, #0)                        //will be back at saem place just advance
    } {
-       maxe.w = vmax(maxe.w, s05.w)                      //max accumulation
+       mine.w = vmin(mine.w, stmp.w)                     //min accumulation, col 5
+       maxe.w = vmax(maxe.w, stmp.w)                     //max accumulation, col 5
+       p1 = cmp.gt(col_count, #0)                        // not last iteration
+       if( p2) stmp = s06;                               // col 6 if needed
+   } {
+       p2 = cmp.gt(col_count,#-1);                       // do we need col 7?
        s0_sh.w = vasl(s04.w, zshift)                     //o
+       mine.w = vmin(mine.w, stmp.w)                     //min accumulation col 6
        s03.w = vmpye(s1_sh.w, vrecip.uh)                 //
    } {
        s03.w += vmpyo(s1_sh.w, vrecip.h):SSR             //
-       mine.w = vmin(mine.w, s06.w)                      //min accumulation
-       maxe.w = vmax(maxe.w, s06.w)                      //max accumulation
+       maxe.w = vmax(maxe.w, stmp.w)                     //max accumulation col 6
+       if( p2) stmp = s07;                               // col 7 if needed
    } {
        s1_sh.w = vasl(s05.w, zshift)                     //o
        s04.w = vmpye(s0_sh.w, vrecip.uh)                 //
-       mine.w = vmin(mine.w, s07.w)                      //min accumulation
+       mine.w = vmin(mine.w, stmp.w)                     //min accumulation, col 7
    } {
        d032.h = vpacke(s03.w, s02.w)                     //pack high 16bits of accs 
        s04.w += vmpyo(s0_sh.w, vrecip.h):SSR             //
-       maxe.w = vmax(maxe.w, s07.w)                      //max accumulation
+       maxe.w = vmax(maxe.w, stmp.w)                     //max accumulation. col 7
    } {
        s0_sh.w = vasl(s06.w, zshift)                     //o
        s05.w = vmpye(s1_sh.w, vrecip.uh)                 //

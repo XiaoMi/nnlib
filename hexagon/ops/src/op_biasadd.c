@@ -93,13 +93,73 @@ static int biasadd_32p32to32_execute(struct nn_node *self, struct nn_graph *nn)
 
 	float bias_to_in = bias_level_size/in_level_size;
 
-	int stripe;
-	int i;
-	for (stripe = 0; stripe < height*width*batches; stripe++) {
-		for (i = 0; i < depth; i++) {
-			out[stripe*depth+i] = in[stripe*depth+i]+fast_roundf(bias[i]*bias_to_in);
-			//logmsg(nn,2,"in=%x bias=%x bias_to_in=%f out=%x",in[stripe*depth+i],bias[i],bias_to_in,out[stripe*depth+i]);
+	// get buffer for rescaled bias
+	nn_scratch_reset(nn);
+	int rescaled_bias_num = depth;
+	if( depth& 1) rescaled_bias_num *= 2;	// double up so we can use 64-bit
+
+	int32_t *rescaled_bias = nn_scratch_alloc( nn, sizeof(int32_t)* rescaled_bias_num );
+
+	// scale the bias (we should do this once only...
+
+	for( int i =0; i < depth; i++ ){
+		rescaled_bias[i] = fast_roundf(bias[i]*bias_to_in);
+	}
+	// if depth is odd, make a second copy so we can use 64-bit adds.
+	// e.g. if depth =9, we will make the rescaled_bias 18 long,
+	// and work in units of 18).
+
+	int nloops = height*width*batches;
+	int perloop = depth;
+	int remain = 0;
+	if( depth & 1){
+		memcpy( &rescaled_bias[depth], &rescaled_bias[0], depth*sizeof(int32_t));
+		remain = nloops & 1;	//  need an extra loop at end?
+		nloops >>= 1;			// half as many outer loops
+	}else{
+		perloop >>=1;		// depth/2 per loop if depth is even
+	}
+
+
+	int64_t const * __restrict inp = (int64_t const *)in;
+	int64_t  *  __restrict outp = (int64_t *)out;
+
+	int perloop_quads = perloop>>2;
+
+	for( int outer = 0; outer < nloops; outer++){
+		int64_t const *biasp = (int64_t const*)rescaled_bias;
+		if (perloop&1){
+			*outp++ = Q6_P_vaddw_PP(*inp++,*biasp++);
 		}
+		if (perloop&2){
+			int64_t sum0 = Q6_P_vaddw_PP(inp[0],biasp[0]);
+			int64_t sum1 = Q6_P_vaddw_PP(inp[1],biasp[1]);
+			outp[0] = sum0;
+			outp[1] = sum1;
+			outp += 2;
+			inp += 2;
+			biasp += 2;
+		}
+		for( int i = 0; i < perloop_quads;i++){
+			int64_t sum0 = Q6_P_vaddw_PP(inp[0],biasp[0]);
+			int64_t sum1 = Q6_P_vaddw_PP(inp[1],biasp[1]);
+			int64_t sum2 = Q6_P_vaddw_PP(inp[2],biasp[2]);
+			int64_t sum3 = Q6_P_vaddw_PP(inp[3],biasp[3]);
+			outp[0] = sum0;
+			outp[1] = sum1;
+			outp[2] = sum2;
+			outp[3] = sum3;
+			outp += 4;
+			inp += 4;
+			biasp += 4;
+		}
+	}
+
+	if( remain ){	// odd depth, odd batches
+		int32_t * op = (int32_t*)outp;
+		int32_t const * ip = (int32_t const*)inp;
+		for(int i = 0; i < depth; i++)
+			op[i] = ip[i]+rescaled_bias[i];
 	}
 	return 0;
 }

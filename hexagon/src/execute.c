@@ -90,17 +90,27 @@ int do_execute(struct nn_graph *nn)
 	uint64_t pcycle_stop;
 	uint64_t pcycle_overhead;
 	int i;
-	int j;
+
 	static nn_mutex_t exec_mutex = NN_MUTEX_INIT;
 	struct nn_node *start_node = nn->head;
+	int saved_priority;
+	if (nn_os_update_main_thread_priority(nn, &saved_priority)) return errlog(nn, "priority update failed");
 	if (nn->nonconst_head_ptr && *nn->nonconst_head_ptr) start_node = *nn->nonconst_head_ptr;
 	nn_mutex_lock(&exec_mutex);
 	nn_os_hvx_power_on(nn);
+	if (nn_os_vtcm_acquire(nn) != 0) {
+		nn_mutex_unlock(&exec_mutex);
+		if (nn_os_restore_main_thread_priority(nn, saved_priority)) errlog(nn, "priority restore failed");
+		return errlog(nn,"vtcm acquire error");
+	}
 	nn_os_vector_workers_acquire(nn);
-	nn_os_vtcm_acquire(nn);
 	pcycle_start = nn_os_get_cycles(nn);
 	pcycle_overhead = nn_os_get_cycles(nn) - pcycle_start;
 	for (i = 0; i < ITERS; i++) {
+
+	// reset batch sequencing;
+	nn_batchseqstate_before_outer_exec(&nn->batchseq);
+	do{
 	//print_tensors(inputs, n_inputs);
 	for (node = start_node; node != NULL; node = node->next) {
 		logmsg(nn,4,"do_execute(): node=%p id=%x, next at %p",node,node->node_id, node->next);
@@ -109,28 +119,48 @@ int do_execute(struct nn_graph *nn)
 		perf_start = nn_os_get_perfcount(nn);
 		pcycle_node = nn_os_get_cycles(nn);
 		nn_scratch_reset(nn);
-		for (j = 0; j < node->n_inputs; j++) {
-			//print_tensor(node->inputs[j],"in");
+		/* for (int j = 0; j < node->n_inputs; j++) {
+			print_tensor(node->inputs[j],"in");
+		}*/
+		if ((err = node->ops->execute(node,nn)) != 0) {
+			errlog(nn,"execute() failed on node id=%x err=%d",node->node_id,err);
+			goto quit;
 		}
-		if ((err = node->ops->execute(node,nn)) != 0) break;
 		pcycle_stop = nn_os_get_cycles(nn);
 		perf_stop = nn_os_get_perfcount(nn);
-		if ((node->n_outputs > 0) && (node->outputs != NULL)) {
-			for (j = 0; j < node->n_outputs; j++) {
-				//print_tensor(node->outputs[j],"out");
+
+		// Print the output tensors, if printing enabled
+#if defined(V66)
+		if (nn->debug_level && nn->enable_tensor_print) {
+			for (int j = 0; j < node->n_outputs; j++) {
+				print_tensor_to_file(nn, node->node_id, j, node->outputs[j]);
 			}
 		}
+#endif
+
+		/*
+		if ((node->n_outputs > 0) && (node->outputs != NULL)) {
+			for (int j = 0; j < node->n_outputs; j++) {
+				print_tensor(node->outputs[j],"out");
+			}
+		}*/
+		// uncomment to show size & checksums of all outputs
+		//nn_report_node_outputs( nn, 0, node);
+
 		//execute_check_dst_canaries(nn,node);
 		node->perfcounter += (perf_stop - perf_start);
 		node->executions += 1;
 		node->iter_cycles = pcycle_stop - pcycle_node - pcycle_overhead;
 		//print_node_checksum(nn, node);
-	}
-	}
-	nn_os_vtcm_release(nn);
+	} // for node list
+	}while( nn_batchseqstate_loop_update( &nn->batchseq )); // batch seq loop
+	} // for ITERS
+  quit:
 	nn_os_vector_workers_release(nn);
+	nn_os_vtcm_release(nn);
 	nn_os_hvx_power_off(nn);
 	nn_mutex_unlock(&exec_mutex);
+	if (nn_os_restore_main_thread_priority(nn, saved_priority)) errlog(nn, "priority restore failed");
 	return err;
 }
 

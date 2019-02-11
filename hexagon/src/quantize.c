@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -74,7 +74,7 @@
 //
 // return value:
 //  -1 : test failed for max > min (includes either being NaN)
-//   0 : ok, no adjustment made; zero point already an integer +/- 2^-14
+//   0 : ok, no adjustment made; zero point already an integer +/- 2^-14 (8b) or 2^-6 (16b)
 //   1 : adjusted min downward
 //   2 : adjusted max upward
 //
@@ -107,6 +107,35 @@ int adjust_minmax_for_zero( float *min_p, float *max_p )
 	}else{
 		// move min; change z to zi+1
 		*min_p = mx*(zi+1.0f)/(zi-254.0f);
+		return 1;
+	}
+}
+
+int adjust_minmax_for_zero_16b(float *min_p, float *max_p)
+{
+	float mn = *min_p;
+	float mx = *max_p;
+	float dif = mx - mn;
+	if (!(dif >= 1e-6f)) return -1;	// check valid min,max_p
+	if (mn == 0.0f) return 0;		// common case
+	float z = (-65535.0f)*mn / dif;		// current 'zero point'
+	float zi = floorf(z);
+	float zf = z - zi;
+	// if within 2^-6 of an integer, call it close enough
+	if (zf <= 0.015625f || zf >= 0.984375f)
+		return 0;
+	// choose which end to move
+	// if zi <= 0  or >= 65534, the decision is based on that only (to
+	// avoid divide by 0) otherwise choose based on zf.
+	//
+	if (zi > 0.0f && (zi > 65533.0f || (zf - 1.0f)*mn >= zf * mx)) {
+		// move max, change z to zi
+		*max_p = mn - 65535.0f*mn / zi;
+		return 2;
+	}
+	else {
+		// move min; change z to zi+1
+		*min_p = mx * (zi + 1.0f) / (zi - 65534.0f);
 		return 1;
 	}
 }
@@ -200,4 +229,85 @@ int adjust_minmax_for_zero_with_constraints( float *min_p, float *max_p , int co
    move_min_nearest:  	// move min, change z to nearest
 	*min_p = mx*zirnd/(zirnd-255.0f);
 	return 1;
+}
+
+int quantize_adjust_range_and_check( float *out_min, float *out_max, float *out_stepsize, float *out_recip_stepsize, float in_min, float in_max)
+{
+	int k = check_range_is_sane( in_min, in_max);
+	if( k == 0)
+		quantize_adjust_range( out_min,out_max, out_stepsize, out_recip_stepsize, in_min, in_max);
+	return k;
+}
+
+///////////////////////////////////////
+static void scalar_requantize_i32_to_qu8(int32_t const * inp, int offseti, int gaini, uint8_t *outp, int n);
+static void fallback_requantize_i32_to_qu8(int32_t const * inp, float offset, float gain, uint8_t *outp, int n);
+
+//
+// requantize n 32-bit numbers to u8; equiv to
+//     outp[i] =  quantize_uint8( in_level_size* (float)inp[i],out_min,out_max);
+//
+// This uses quantize_asm for larger n, and so it must be called from a vector thread.
+// If n <= 128, or if either pointer is not aligned, it will use a scalar operation which is equivalent.
+//
+void
+nn_requantize_i32_to_qu8_hvx( uint8_t *outp, int32_t const * inp, int n, float in_level_size, float out_min, float out_max)
+{
+
+	// we want to do:  ( x * in_levelsize- out_min)*255/(out_max-out_min)
+	//  = (  x - offs) * alpha
+	//  where alpha = in_level_size * 255/(out_max-out_min)
+	//       offs = out_min/in_level_size
+	float gain = in_level_size * 255.0f / (out_max-out_min);
+	float offset_f = out_min / in_level_size;
+
+	if( gain > 1.0f){
+		fallback_requantize_i32_to_qu8(inp, offset_f, gain, outp,  n);
+		return;
+	}
+	int gaini  = roundf_i32( gain* (float)(1u<<31) );
+	int offseti = roundf_i32(offset_f);
+	//
+	if( n < 128 || (((size_t)outp | (size_t)inp)&127)!= 0){		// use scalar loop
+		scalar_requantize_i32_to_qu8(inp, offseti, gaini, outp, n);
+	}else{
+		quantize_asm(inp, offseti, gaini, outp, n);
+	}
+}
+
+//
+// non-hvx version of nn_requantize_i32_to_qu8
+void
+nn_requantize_i32_to_qu8( uint8_t *outp, int32_t const * inp, int n, float in_level_size, float out_min, float out_max)
+{
+
+	float gain = in_level_size * 255.0f  / (out_max-out_min);
+	float offset_f = out_min / in_level_size;
+
+	if( gain >1.0f){
+		fallback_requantize_i32_to_qu8(inp, offset_f, gain, outp,  n);
+		return;
+	}
+	int gaini  = roundf_i32( gain * (float)(1u<<31) );
+	int offseti = roundf_i32(offset_f);
+	scalar_requantize_i32_to_qu8( inp, offseti, gaini, outp, n);
+}
+static void
+scalar_requantize_i32_to_qu8(int32_t const * inp, int offseti, int gaini, uint8_t *outp, int n)
+{
+	for( int i =0; i < n; i++){
+		int delt = inp[i]-offseti;
+		int64_t p =(int64_t)delt*gaini;
+		p = Q6_P_asrrnd_PI(p,31);
+		outp[i] = saturate_u8( (int32_t)p);
+	}
+}
+// when the i32->u8 conversion requires a gain > 1.0, this is used.
+//
+static void fallback_requantize_i32_to_qu8(int32_t const * inp, float offset, float gain, uint8_t *outp, int n)
+{
+	for( int i= 0; i < n; i++){
+		float x = ((float)inp[i]- offset) * gain;
+		outp[i] = saturate_u8( roundf_i32(x));
+	}
 }

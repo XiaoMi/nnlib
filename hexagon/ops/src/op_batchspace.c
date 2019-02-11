@@ -38,7 +38,7 @@
 #include <string.h>
 #include <quantize.h>
 #include <math.h>
-
+#include "nn_gentranspose.h"
 
 static int batchspace_s2b_execute(struct nn_node *self, struct nn_graph *nn, int elementsize, int dtype)
 {
@@ -61,6 +61,15 @@ static int batchspace_s2b_execute(struct nn_node *self, struct nn_graph *nn, int
 	int32_t in_pad_bottom = tensor_get_int32(pad_tensor,1);
 	int32_t in_pad_left = 0;
 	int32_t in_pad_right = 0;
+
+	uint8_t quantized_zero = 0;
+	if (dtype == NN_TYPE_QUINT8) {
+		const struct tensor *min_in_tensor = self->inputs[3];
+		const struct tensor *max_in_tensor = self->inputs[4];
+		float in_max_float = tensor_get_float(max_in_tensor,0);
+		float in_min_float = tensor_get_float(min_in_tensor,0);
+		quantized_zero = quantize_uint8(0.0f,in_min_float,in_max_float);
+	}
 
 	const char *in_base = in_tensor->data;
 	char *out = out_tensor->data;
@@ -100,6 +109,22 @@ static int batchspace_s2b_execute(struct nn_node *self, struct nn_graph *nn, int
 	if (tensor_out_prepare_normal(out_tensor,out_batches,out_height,out_width,out_depth,dtype)!=0){
 		return errlog(nn,"failed to prepare output");
 	}
+
+	if( in_pad_top == 0 && in_pad_bottom == 0 && in_pad_left == 0 && in_pad_right == 0){
+		struct nn_transpose_desc txdesc;
+		// reshape as below:
+		uint32_t dims[5] = { in_batches * out_height, h_stride, out_width, w_stride, in_depth };
+		// transpose to:   { h_stride, w_stride, in_batches* out_height, out_width, in_depth };
+		int32_t perm_arr[5] = { 1, 3, 0, 2, 4 };
+		int res = nn_transpose_analyze_direct( &txdesc,elementsize, perm_arr, 5, dims,5 );
+		if(res ==0){
+			if( txdesc.buffer_needed > nn->scratch_size) res = errlog(nn,"scratch too small");
+			else res = nn_transpose_execute( nn, &txdesc, nn->scratch, (uint8_t*) out,(uint8_t const*)in_base);
+		}
+		if( res != 0)return errlog(nn,"transpose failed");
+		return 0;
+	}
+
 	for (h_start = 0; h_start < h_stride; h_start++) {
 		int h_begin = h_start - in_pad_top;
 		int h_end = in_height + in_pad_bottom;
@@ -109,15 +134,15 @@ static int batchspace_s2b_execute(struct nn_node *self, struct nn_graph *nn, int
 			for (b = 0; b < in_batches; b++) {
 				for (h = h_begin; h < h_end; h += h_stride) {
 					for (w = w_begin; w < w_end; w += w_stride) {
-						const char *in = in_base 
-							+ elementsize * (b*in_depth*in_width*in_height
-							+ h*in_width*in_depth
-							+ w*in_depth);
-						if (h < 0) memset(out,0,copy_size);
-						else if (h >= in_height) memset(out,0,copy_size);
-						else if (w < 0) memset(out,0,copy_size);
-						else if (w >= in_width) memset(out,0,copy_size);
-						else memcpy(out,in,copy_size);
+						if (h < 0 || h >= in_height || w < 0 || w >= in_width){
+							memset(out,quantized_zero,copy_size);
+						}else{
+							const char *in = in_base
+								+ elementsize * (b*in_depth*in_width*in_height
+								+ h*in_width*in_depth
+								+ w*in_depth);
+							memcpy(out,in,copy_size);
+						}
 						out += copy_size / sizeof(*out);
 					}
 				}
@@ -187,12 +212,32 @@ static int batchspace_b2s_execute(struct nn_node *self, struct nn_graph *nn, int
 		return errlog(nn,"failed to prepare output");
 	}
 
+	if( in_pad_top == 0 && in_pad_bottom == 0 && in_pad_left == 0 && in_pad_right == 0){
+		struct nn_transpose_desc txdesc;
+		// reshape as below:
+		uint32_t dims[5] = { h_stride, w_stride, out_batches* in_height, in_width, in_depth };
+		// transpose to :  { out_batches* in_height, h_stride, in_width, w_stride, in_depth }
+		int32_t perm_arr[5] = { 2, 0, 3, 1, 4 };
+		int res = nn_transpose_analyze_direct( &txdesc,elementsize,
+                perm_arr, 5, dims,5 );
+		if(res ==0){
+			if( txdesc.buffer_needed > nn->scratch_size) res = errlog(nn,"scratch too small");
+			else res = nn_transpose_execute( nn, &txdesc, nn->scratch, (uint8_t*) out_base,(uint8_t const*)in_base);
+		}
+		if( res != 0)return errlog(nn,"transpose failed");
+		return 0;
+	}
+
 	for (b = 0; b < out_batches; b++) {
 		for (h = 0; h < out_height; h++) {
+			unsigned hp = h + in_pad_top;		// h including padding.
+			int h_in = hp/h_stride;				// h from the actual input
+			int h_rem = hp-h_stride*h_in;		// = hp%h_stride
 			for (w = 0; w < out_width; w++) {
-				int h_in = (h+in_pad_top)/h_stride;
-				int w_in = (w+in_pad_left)/w_stride;
-				int b_in = ((h%h_stride)*w_stride + (w%w_stride))*out_batches+b;
+				unsigned wp = w + in_pad_left;		// w including padding.
+				int w_in = wp/w_stride;
+				int w_rem = wp-w_stride*w_in;
+				int b_in = (h_rem*w_stride + w_rem)*out_batches+b;
 				char *out = out_base 
 					+ elementsize*(b*out_depth*out_width*out_height
 					+ h*out_width*out_depth
@@ -272,6 +317,7 @@ struct nn_node_ops nn_ops_for_BatchToSpaceND_8 = {
 	.check = batchspace_check_q,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.flags = NN_NODE_FLAG_OUTPUT_USES_INPUT_RANGE,
 };
 
 struct nn_node_ops nn_ops_for_SpaceToBatchND_8 = {
@@ -279,5 +325,6 @@ struct nn_node_ops nn_ops_for_SpaceToBatchND_8 = {
 	.check = batchspace_check_q,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.flags = NN_NODE_FLAG_OUTPUT_USES_INPUT_RANGE,
 };
 

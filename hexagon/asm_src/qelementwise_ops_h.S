@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -64,552 +64,356 @@
         .text
         .file "qelementwise_ops_h.S"
         .global qmul_asm
-		.balign 32
-		.type	qmul_asm,@function
+        .balign 32
+        .type   qmul_asm,@function
 qmul_asm:                               // @qmul_asm
-// BB#0:                                // %entry
-	{
-		r6=asr(r4,#31)
-		r7=r4
-		memd(r29+#-16)=r17:16
-		allocframe(#8)
-	}
-	{
-		r7+=lsr(r6,#25)
-		r16=#0
-		r9=memw(r3+#0)
-		r13=memw(r3+#4)
-	}
-	{
-		r6=and(r7,#-128)
-	}
-	{
-		r12=sub(r4,r6)
-		if (cmp.gtu(r12.new,#31)) jump:t .L_qmul_BB0_2
-	}
-// BB#1:                                // %cond.end.thread
-	{
-		r3=r12
-	}
-	{
-		r3=and(#124,asl(r3,#2))
-	}
-	{
-		r16=r3 ; jump .L_qmul_BB0_3
-	}
-	.falign
-.L_qmul_BB0_2:                                // %cond.end
-	{
-		r3=#128
-		p1=cmp.gt(r12,#-1)
-	}
-	{
-		if (p1) r16=r3
-	}
-	.falign
-.L_qmul_BB0_3:                                // %cond.end9
-	{
-		r3=add(r12,#-32)
-	}
-	{
-		r6=#32
-		if (!cmp.gtu(r6.new,r3)) jump:t .L_qmul_BB0_5
-	}
-// BB#4:                                // %cond.end.thread.1
-	{
-		r3=and(#124,asl(r3,#2))
-	}
-	{
-		r6=r3 ; jump .L_qmul_BB0_6
-	}
-	.falign
-.L_qmul_BB0_5:                                // %cond.end.1
-	{
-		r3=#128
-		r6=#0
-		p0=cmp.gt(r12,#31)
-	}
-	{
-		if (p0) r6=r3
-	}
-	.falign
-.L_qmul_BB0_6:                                // %cond.end9.1
-	{
-		r3=add(r12,#-64)
-	}
-	{
-		r7=#32
-		if (!cmp.gtu(r7.new,r3)) jump:t .L_qmul_BB0_8
-	}
-// BB#7:                                // %cond.end.thread.2
-	{
-		r3=and(#124,asl(r3,#2))
-	}
-	{
-		r7=r3 ; jump .L_qmul_BB0_9
-	}
-	.falign
-.L_qmul_BB0_8:                                // %cond.end.2
-	{
-		r3=#128
-		r7=#0
-		p0=cmp.gt(r12,#63)
-	}
-	{
-		if (p0) r7=r3
-	}
-	.falign
-.L_qmul_BB0_9:                                // %cond.end9.2
-	{
-		p0=cmp.gt(r12,#95)
-		r3=add(r12,#-96)
-		r14=memw(r29+#16)
-	}
-	{
-		r8=#32
-		if (!cmp.gtu(r8.new,r3)) jump:t .L_qmul_BB0_11
-	}
-// BB#10:                               // %cond.end.thread.3
-	{
-		r3=and(#124,asl(r3,#2))
-	}
-	{
-		jump .L_qmul_BB0_12
-		r8=r3
-	}
-	.falign
-.L_qmul_BB0_11:                               // %cond.end.3
-	{
-		r3=#128
-		r8=#0
-	}
-	{
-		if (p0) r8=r3
-	}
-	.falign
-.L_qmul_BB0_12:                               // %cond.end9.3
-	{
-		r13|=asl(r13,#8)
-		r5|=asl(r5,#8)
-	}
-	{
-		r9|=asl(r9,#8)
-		r14|=asl(r14,#8)
-		r12=combine(r5.l,r5.l)
-		r13=combine(r13.l,r13.l)
-	}
-	{
-		v1=vsplat(r12)
-		p1=cmp.eq(r12,#0)
-		r3=combine(r9.l,r9.l)
-		r9=combine(r14.l,r14.l)
-	}
-	{
-		v0=vsplat(r3)
-		v3=vsplat(r9)
-		r5=r2
-	}
-	{
-		r28=asr(r4,#7)
-		v2=vsplat(r13)
-		if (!cmp.gt(r28.new,#0)) jump:nt .L_qmul_BB0_27
-	}
-// BB#13:                               // %for.body23.lr.ph
-	{
-		r3=extractu(r4,#25,#7)
-		r4=add(r1,#16384)
-		r13=add(r0,#16384)
-	}
-	{
-		r5+=asl(r3,#9)
-		r14=addasl(r1,r3,#7)
-		if (!p1) r3=#-4
-	}
-	{
-		if (p1) jump:nt .L_qmul_BB0_17
-	}
-// BB#14:                               // %for.body23.lr.ph.split
-	{
-		if (p1.new) jump:nt .L_qmul_BB0_21
-		v5:4.h=vsub(v1.ub,v0.ub)
-		p1=cmp.eq(r9,#0)
-		if (p1.new) r3=#-4
-	}
-// BB#15:
-	{
-		loop0(.L_qmul_BB0_16,r28)
-		r15=#0x80;r14=##0x00800001 //EJP
-	}
-	{
-		v21:20.h=vsub(v3.ub,v2.ub)
-	}
-	{
-		v23:22.w=vmpy(v4.h,v20.h)
-	}
-	{
-		v25:24.w=vmpy(v5.h,v21.h)
-		v27:26=vshuff(v23,v22,r3)
-	}
-	{
-		v29:28=vshuff(v25,v24,r3)
-	}
-	{
-		v13:12=vshuff(v28,v26,r3)
-	}
-	{
-		v15:14=vshuff(v29,v27,r3)
-	}
-	.falign
-.L_qmul_tmp0:                                 // Block address taken
-.L_qmul_BB0_16:                               // %for.body23
+        {
+                loop0(.LBB0_1,#4)
+                r7=asr(r4,#31)
+                r6=r4
+                allocframe(r29,#640):raw
+        }
+        {
+                r6+=lsr(r7,#25)
+                r29=and(r29,#-128)
+                r8=memw(r3+#0)
+                r9=memw(r30+#8)
+        }
+        {
+                r6=and(r6,#-128)
+                r12=add(r29,#112)
+                r14=add(r29,#128)
+                r7=memw(r3+#4)
+        }
+        {
+                r6=sub(r4,r6)
+                r3=##16843009
+        }
+        {
+                r13=asl(r6,#2)
+        }
+        {
+                r15=and(r13,#127)
+        }
+        .falign
+.Ltmp0:                                 // Block address taken
+.LBB0_1:                                // %for.body
                                         // =>This Inner Loop Header: Depth=1
-	//# InlineAsm Start
-	 l2fetch(r13,r15:14)
-	//# InlineAsm End
-	//# InlineAsm Start
-	 l2fetch(r4,r15:14)
-	//# InlineAsm End
-	{
-		vmem(r2++#1)=v12
-	}
-	{
-		vmem(r2++#1)=v13
-	}
-	{
-		vmem(r2++#1)=v14
-	}
-	{
-		nop
-		vmem(r2++#1)=v15
-	}:endloop0
-	{
-		jump .L_qmul_BB0_27
-	}
-	.falign
-.L_qmul_BB0_17:                               // %for.body23.us.preheader
-	{
-		r15=asl(r3,#7)
-		if (p0.new) jump:nt .L_qmul_BB0_24
-		p0=cmp.eq(r9,#0)
-		if (!p0.new) r3=#-4
-	}
-// BB#18:
-	r10=##0x00800001 //EJP
-	{
-		loop0(.L_qmul_BB0_19,r28)
-		v5:4.h=vsub(v3.ub,v2.ub)
-		r11=#0x80;
-	}
-	.falign
-.L_qmul_tmp1:                                 // Block address taken
-.L_qmul_BB0_19:                               // %for.body23.us
+        {
+                p0=cmp.gtu(r6,#31); if (!p0.new) jump:t .LBB0_3
+                r28=r15
+                if (!p0.new) memw(r12+#0)=r15
+        }
+// BB#2:                                // %cond.end
+                                        //   in Loop: Header=BB0_1 Depth=1
+        {
+                r28=#128
+                p0=cmp.gt(r6,#-1)
+                memw(r12+#0)=r28.new
+        }
+        {
+                if (!p0) r28=#0
+        }
+.LBB0_3:                                // %cond.end9
+                                        //   in Loop: Header=BB0_1 Depth=1
+        {
+                r6=add(r6,#-32)
+                q0=vsetq(r28)
+                memw(r12++#4)=r28
+        }
+        {
+                v6=vand(q0,r3)
+                r14=add(r14,#128)
+                vmem(r14+#0)=v6.new
+        }:endloop0
+// BB#4:                                // %for.end
+        {
+                r7|=asl(r7,#8)
+                r5|=asl(r5,#8)
+        }
+        {
+                r9|=asl(r9,#8)
+                r8|=asl(r8,#8)
+                r6=combine(r5.l,r5.l)
+                r7=combine(r7.l,r7.l)
+        }
+        {
+                r14=asr(r4,#7)
+                v0=vsplat(r6)
+                r13=combine(r9.l,r9.l)
+                r5=combine(r8.l,r8.l)
+        }
+        {
+                v2=vsplat(r13)
+                v3=vsplat(r5)
+                p0=cmp.gt(r14,#0)
+                if (p0.new) r9=#128
+        }
+        {
+                if (!p0) jump:nt .LBB0_15
+                v1=vsplat(r7)
+                if (p0) r7=add(r4,#-128)
+        }
+// BB#5:                                // %for.body24.lr.ph
+        {
+                loop0(.LBB0_6,r14)
+                r5=extractu(r14,#25,#0)
+                p1=cmp.eq(r13,#0)
+        }
+        {
+                r12=asl(r5,#7)
+                r8=##8388609
+        }
+        {
+                p0=cmp.eq(r6,#0)
+                r5=#-4
+                r14=r2
+        }
+        .falign
+.Ltmp1:                                 // Block address taken
+.LBB0_6:                                // %for.body24
                                         // =>This Inner Loop Header: Depth=1
-	//# InlineAsm Start
-	 l2fetch(r13,r11:10)
-	//# InlineAsm End
-	//# InlineAsm Start
-	 l2fetch(r4,r11:10)
-	//# InlineAsm End
-	{
-		r14=add(r13,#-16384)
-		r13=add(r13,#128)
-	}
-	{
-		v6=vmem(r14+#0)
-	}
-	{
-		v7:6.h=vsub(v6.ub,v0.ub)
-	}
-	{
-		v9:8.w=vmpy(v6.h,v4.h)
-	}
-	{
-		v11:10.w=vmpy(v7.h,v5.h)
-		v13:12=vshuff(v9,v8,r3)
-	}
-	{
-		v15:14=vshuff(v11,v10,r3)
-	}
-	{
-		v17:16=vshuff(v14,v12,r3)
-	}
-	{
-		v19:18=vshuff(v15,v13,r3)
-		vmem(r2++#1)=v16
-	}
-	{
-		vmem(r2++#1)=v17
-	}
-	{
-		vmem(r2++#1)=v18
-	}
-	{
-		nop
-		vmem(r2++#1)=v19
-	}:endloop0
-// BB#20:
-	{
-		jump .L_qmul_BB0_26
-		r14=r1
-	}
-	.falign
-.L_qmul_BB0_21:                               // %for.body23.us125.preheader
-	{
-		loop0(.L_qmul_BB0_22,r28)
-		v7:6.h=vsub(v1.ub,v0.ub)
-		r11=#0x80;
-	}
-	r10=##0x00800001 //EJP
-	.falign
-.L_qmul_tmp2:                                 // Block address taken
-.L_qmul_BB0_22:                               // %for.body23.us125
-                                        // =>This Inner Loop Header: Depth=1
-	//# InlineAsm Start
-	 l2fetch(r13,r11:10)
-	//# InlineAsm End
-	//# InlineAsm Start
-	 l2fetch(r4,r11:10)
-	//# InlineAsm End
-	{
-		r15=add(r4,#-16384)
-		r4=add(r4,#128)
-	}
-	{
-		v31:30.h=vsub(v8.ub,v2.ub)
-		v8.cur=vmem(r15+#0)
-	}
-	{
-		v9:8.w=vmpy(v6.h,v30.h)
-	}
-	{
-		v11:10.w=vmpy(v7.h,v31.h)
-		v13:12=vshuff(v9,v8,r3)
-	}
-	{
-		v15:14=vshuff(v11,v10,r3)
-	}
-	{
-		v17:16=vshuff(v14,v12,r3)
-	}
-	{
-		v19:18=vshuff(v15,v13,r3)
-		vmem(r2++#1)=v16
-	}
-	{
-		vmem(r2++#1)=v17
-	}
-	{
-		vmem(r2++#1)=v18
-	}
-	{
-		nop
-		vmem(r2++#1)=v19
-	}:endloop0
-// BB#23:
-	{
-		jump .L_qmul_BB0_27
-		r1=r14
-	}
-	.falign
-.L_qmul_BB0_24:                               // %for.body23.us.us.preheader
-	{
-		loop0(.L_qmul_BB0_25,r28)
-		r1=#-4
-		r11=#0x80;
-	}
-	r10=##0x00800001 //EJP
-	.falign
-.L_qmul_tmp3:                                 // Block address taken
-.L_qmul_BB0_25:                               // %for.body23.us.us
-                                        // =>This Inner Loop Header: Depth=1
-	//# InlineAsm Start
-	 l2fetch(r13,r11:10)
-	//# InlineAsm End
-	//# InlineAsm Start
-	 l2fetch(r4,r11:10)
-	//# InlineAsm End
-	{
-		r3=add(r13,#-16384)
-		r28=add(r4,#-16384)
-		r4=add(r4,#128)
-		r13=add(r13,#128)
-	}
-	{
-		v17:16.h=vsub(v4.ub,v0.ub)
-		v4.cur=vmem(r3+#0)
-	}
-	{
-		v19:18.h=vsub(v5.ub,v2.ub)
-		v5.cur=vmem(r28+#0)
-	}
-	{
-		v21:20.w=vmpy(v16.h,v18.h)
-	}
-	{
-		v23:22.w=vmpy(v17.h,v19.h)
-		v25:24=vshuff(v21,v20,r1)
-	}
-	{
-		v27:26=vshuff(v23,v22,r1)
-	}
-	{
-		v29:28=vshuff(v26,v24,r1)
-	}
-	{
-		v31:30=vshuff(v27,v25,r1)
-		vmem(r2++#1)=v28
-	}
-	{
-		vmem(r2++#1)=v29
-	}
-	{
-		vmem(r2++#1)=v30
-	}
-	{
-		nop
-		vmem(r2++#1)=v31
-	}:endloop0
-	.falign
-.L_qmul_BB0_26:                               // %for.end42.loopexit
-	{
-		r1=r14
-		r0=add(r0,r15)
-	}
-	.falign
-.L_qmul_BB0_27:                               // %for.end42
-	{
-		r2=add(r0,#16384)
-		r15=#0x80;r14=##0x00800001 //EJP
-	}
-	//# InlineAsm Start
-	 l2fetch(r2,r15:14)
-	//# InlineAsm End
-	{
-		r2=add(r1,#16384)
-	}
-	//# InlineAsm Start
-	 l2fetch(r2,r15:14)
-	//# InlineAsm End
-	{
-		if (!p0.new) jump:nt .L_qmul_BB0_29
-		p0=cmp.eq(r12,#0)
-	}
-// BB#28:                               // %cond.false47
-	{
-		v1=vmem(r0+#0)
-	}
-	.falign
-.L_qmul_BB0_29:                               // %cond.end49
-	{
-		if (!p1.new) jump:nt .L_qmul_BB0_31
-		p1=cmp.eq(r9,#0)
-	}
-// BB#30:                               // %cond.false53
-	{
-		v3=vmem(r1+#0)
-	}
-	.falign
-.L_qmul_BB0_31:                               // %cond.end55
-	{
-		v1:0.h=vsub(v1.ub,v0.ub)
-		r4=#-4
-		p0=cmp.eq(r16,#128)
-		q0=vsetq(r16)
-	}
-	{
-		v3:2.h=vsub(v3.ub,v2.ub)
-	}
-	{
-		v7:6.w=vmpy(v0.h,v2.h)
-	}
-	{
-		v5:4.w=vmpy(v1.h,v3.h)
-		v1:0=vshuff(v7,v6,r4)
-	}
-	{
-		v3:2=vshuff(v5,v4,r4)
-	}
-	{
-		if (!p0) jump:nt .L_qmul_BB0_33
-		v11:10=vshuff(v2,v0,r4)
-	}
-// BB#32:                               // %if.else
-	{
-		jump .L_qmul_BB0_34
-		vmem(r5+#0)=v10
-	}
-	.falign
-.L_qmul_BB0_33:                               // %if.then
-	{
-		if (q0) vmem(r5+#0):nt=v10
-	}
-	.falign
-.L_qmul_BB0_34:                               // %if.end
-	{
-		if (!p1.new) jump:nt .L_qmul_BB0_36
-		r2=add(r5,#128)
-		p1=cmp.eq(r6,#128)
-		q1=vsetq(r6)
-	}
-// BB#35:                               // %if.else67
-	{
-		jump .L_qmul_BB0_37
-		vmem(r2+#0)=v11
-	}
-	.falign
-.L_qmul_BB0_36:                               // %if.then64
-	{
-		if (q1) vmem(r2+#0):nt=v11
-	}
-	.falign
-.L_qmul_BB0_37:                               // %if.end69
-	{
-		if (!p0.new) jump:nt .L_qmul_BB0_39
-		r2=add(r5,#256)
-		p0=cmp.eq(r7,#128)
-		v9:8=vshuff(v3,v1,r4)
-	}
-// BB#38:                               // %if.else75
-	{
-		jump .L_qmul_BB0_40
-		vmem(r2+#0)=v8
-	}
-	.falign
-.L_qmul_BB0_39:                               // %if.then72
-	{
-		q2=vsetq(r7)
-	}
-	{
-		if (q2) vmem(r2+#0):nt=v8
-	}
-	.falign
-.L_qmul_BB0_40:                               // %if.end77
-	{
-		if (!p1.new) jump:nt .L_qmul_BB0_42
-		r2=add(r5,#384)
-		p1=cmp.eq(r8,#128)
-		q3=vsetq(r8)
-	}
-// BB#41:                               // %if.end85
-	{
-		r17:16=memd(r29+#0)
-		vmem(r2+#0)=v9
-	}
-	{
-		dealloc_return
-	}
-	.falign
-.L_qmul_BB0_42:                               // %if.then80
-	{
-		r17:16=memd(r29+#0)
-		if (q3) vmem(r2+#0):nt=v9
-	}
-	{
-		dealloc_return
-	}
-.L_qmul_func_end0:
-.L_qmul_tmp4:
-	.size	qmul_asm, .L_qmul_tmp4-qmul_asm
+        {
+                if (!p2.new) jump:nt .LBB0_8
+                p2=cmp.gt(r7,#0)
+                r28=add(r0,#128)
+                r15=add(r1,#128)
+        }
+// BB#7:                                // %if.then
+                                        //   in Loop: Header=BB0_6 Depth=1
+        //# InlineAsm Start
+         l2fetch(r28,r9:8)
+        //# InlineAsm End
+        //# InlineAsm Start
+         l2fetch(r15,r9:8)
+        //# InlineAsm End
+        {
+                r7=add(r7,#-128)
+        }
+.LBB0_8:                                // %if.end
+                                        //   in Loop: Header=BB0_6 Depth=1
+        {
+                if (p0) jump:nt .LBB0_11
+        }
+// BB#9:                                //   in Loop: Header=BB0_6 Depth=1
+        {
+                if (p1) jump:nt .LBB0_12
+                v4=v0
+        }
+.LBB0_10:                               //   in Loop: Header=BB0_6 Depth=1
+        {
+                jump .LBB0_13
+                v5=v2
+        }
+        .falign
+.LBB0_11:                               // %cond.false30
+                                        //   in Loop: Header=BB0_6 Depth=1
+        {
+                if (!p1) jump:nt .LBB0_10
+                r0=r28
+                v4=vmem(r0+#0)
+        }
+.LBB0_12:                               // %cond.false35
+                                        //   in Loop: Header=BB0_6 Depth=1
+        {
+                r1=r15
+                v5=vmem(r1+#0)
+        }
+.LBB0_13:                               // %cond.end37
+                                        //   in Loop: Header=BB0_6 Depth=1
+        {
+                v9:8.h=vsub(v4.ub,v3.ub)
+        }
+        {
+                v11:10.h=vsub(v5.ub,v1.ub)
+        }
+        {
+                v13:12.w=vmpy(v8.h,v10.h)
+        }
+        {
+                v15:14.w=vmpy(v9.h,v11.h)
+        }
+        {
+                v17:16=vshuff(v13,v12,r5)
+        }
+        {
+                v19:18=vshuff(v15,v14,r5)
+        }
+        {
+                v21:20=vshuff(v18,v16,r5)
+                vmem(r14++#1)=v20.new
+        }
+        {
+                v23:22=vshuff(v19,v17,r5)
+                vmem(r14++#1)=v21
+        }
+        {
+                vmem(r14++#1)=v22
+        }
+        {
+                nop
+                vmem(r14++#1)=v23
+        }:endloop0
+// BB#14:                               // %for.end45.loopexit
+        {
+                r2=addasl(r2,r12,#2)
+        }
+.LBB0_15:                               // %for.end45
+        {
+                r5=#127
+        }
+        {
+                p0=bitsclr(r4,r5)
+                if (p0.new) r31:30=dealloc_return(r30):t:raw
+        }
+.LBB0_16:                               // %if.then46
+        {
+                p0=cmp.eq(r6,#0); if (p0.new) jump:nt .LBB0_31
+        }
+// BB#17:                               // %cond.end51
+        {
+                if (p0.new) jump:nt .LBB0_32
+                p0=cmp.eq(r13,#0)
+        }
+.LBB0_18:                               // %cond.end57
+        {
+                v25:24.h=vsub(v0.ub,v3.ub)
+                r7=#-4
+                r4=memw(r29+#112)
+        }
+        {
+                v27:26.h=vsub(v2.ub,v1.ub)
+                p0=cmp.eq(r4,#128)
+                if (!p0.new) r4=add(r29,##128)
+        }
+        {
+                v29:28.w=vmpy(v24.h,v26.h)
+        }
+        {
+                v31:30.w=vmpy(v25.h,v27.h)
+        }
+        {
+                v1:0=vshuff(v29,v28,r7)
+        }
+        {
+                v3:2=vshuff(v31,v30,r7)
+        }
+        {
+                if (!p0) jump:nt .LBB0_20
+                v7:6=vshuff(v2,v0,r7)
+        }
+// BB#19:                               // %if.else
+        {
+                jump .LBB0_21
+                vmem(r2+#0)=v6
+        }
+.LBB0_20:                               // %if.then61
+        {
+                q1=vand(v8,r3)
+                v8.cur=vmem(r4+#0)
+        }
+        {
+                if (q1) vmem(r2+#0):nt=v6
+        }
+.LBB0_21:                               // %if.end65
+        {
+                r4=memw(r29+#116)
+        }
+        {
+                if (!p0.new) jump:t .LBB0_23
+                p0=cmp.eq(r4,#128)
+                r4=add(r2,#128)
+        }
+// BB#22:                               // %if.else71
+        {
+                jump .LBB0_24
+                vmem(r4+#0)=v7
+        }
+.LBB0_23:                               // %if.then68
+        {
+                r5=add(r29,#128)
+        }
+        {
+                r5=add(r5,#128)
+        }
+        {
+                q2=vand(v9,r3)
+                v9.cur=vmem(r5+#0)
+        }
+        {
+                if (q2) vmem(r4+#0):nt=v7
+        }
+.LBB0_24:                               // %if.end73
+        {
+                v5:4=vshuff(v3,v1,r7)
+                r5=add(r29,#128)
+                r4=memw(r29+#120)
+        }
+        {
+                if (!p0.new) jump:t .LBB0_26
+                r5=add(r5,#256)
+                p0=cmp.eq(r4,#128)
+                r4=add(r2,#256)
+        }
+// BB#25:                               // %if.else79
+        {
+                jump .LBB0_27
+                vmem(r4+#0)=v4
+        }
+.LBB0_26:                               // %if.then76
+        {
+                q3=vand(v7,r3)
+                v7.cur=vmem(r5+#0)
+        }
+        {
+                if (q3) vmem(r4+#0):nt=v4
+        }
+.LBB0_27:                               // %if.end81
+        {
+                r2=add(r2,#384)
+                r4=memw(r29+#124)
+        }
+        {
+                if (!p0.new) jump:t .LBB0_30
+                p0=cmp.eq(r4,#128)
+                if (!p0.new) r4=add(r29,##128)
+        }
+// BB#28:                               // %if.else87
+        {
+                vmem(r2+#0)=v5
+        }
+// BB#29:                               // %if.end90
+        {
+                r31:30=dealloc_return(r30):raw
+        }
+.LBB0_30:                               // %if.then84
+        {
+                r4=add(r4,#384)
+        }
+        {
+                q0=vand(v10,r3)
+                v10.cur=vmem(r4+#0)
+        }
+        {
+                if (q0) vmem(r2+#0):nt=v5
+        }
+        {
+                r31:30=dealloc_return(r30):raw
+        }
+.LBB0_31:                               // %cond.false49
+        {
+                if (!p0.new) jump:t .LBB0_18
+                p0=cmp.eq(r13,#0)
+                v0=vmem(r0+#0)
+        }
+.LBB0_32:                               // %cond.false55
+        {
+                jump .LBB0_18
+                v2=vmem(r1+#0)
+        }
+.Lfunc_end0:
+        .size   qmul_asm, .Lfunc_end0-qmul_asm
+
 //===============================================================================================================================================================
     .text
     .file "qelementwise_ops_h.S"

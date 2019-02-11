@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -128,10 +128,11 @@ static int close_execute_f(struct nn_node *self, struct nn_graph *nn)
 	}
 	range = ref_max - ref_min;
 	epsilon = range*fudge;
+	if (epsilon < FUDGE_FACTOR) epsilon = FUDGE_FACTOR;
 
 	if (max_diff > epsilon) {
 		i = max_diff_idx;
-		errlog(nn,"data stats: mean_error=%f sd_error=%f", mean_err, sqrt(S_err/count));
+		errlog(nn,"data stats: mean_error=%f sd_error=%f", mean_err, sqrtf(S_err/count));
 		errlog(nn,"data not close. Worst offender: i: %d/%d a[i]: %a %f b[i]: %a %f max_diff=%f range=%f epsilon=%f shape=%d,%d,%d,%d",
 			max_diff_idx,count,a[i],a[i],b[i],b[i],
 			max_diff,range,epsilon,

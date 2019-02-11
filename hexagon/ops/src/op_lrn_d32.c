@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -496,4 +496,5 @@ struct nn_node_ops nn_ops_for_QuantizedLRN_8_d32 = {
 	.check = lrn_d32_check,
 	.ctor = node_alloc_common,
 	.dtor = lrn_d32_dtor,
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };

@@ -470,7 +470,7 @@ static int maxpool_d32_ref(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-static void maxpool_earlywork(struct nn_graph *nn, void *vinfo)
+static void maxpool_earlywork_v(struct nn_graph *nn, void *vinfo)
 {
 	struct nn_node *self = vinfo;
 	struct nn_early_work *work = self->opaque;
@@ -481,6 +481,11 @@ static void maxpool_earlywork(struct nn_graph *nn, void *vinfo)
 	if (work->bytes == 0) return;
 	nn_graph_memcpy(nn,work->dst_addr,work->src_addr,work->bytes);
 	work->valid = 1;
+}
+static int maxpool_earlywork(struct nn_graph *nn, void *vinfo)
+{
+	maxpool_earlywork_v(nn,vinfo);
+	return 0;
 }
 
 static int maxpool_execute(struct nn_node *self, struct nn_graph *nn)
@@ -773,7 +778,7 @@ if( use_rollbuf){
 	for( int i=0; i < n_threads; i++ ) {
 		nn_os_work_for_vector(nn,use_rollbuf? maxpool_execute_rollbuf_worker: maxpool_execute_worker, &rstt);
 	}
-	nn_os_work_for_vector(nn,maxpool_earlywork,self);
+	nn_os_vector_call(nn,maxpool_earlywork,self);
 	nn_sem_wait_n_times( &rstt.donesem, n_threads );
 
 	return 0;

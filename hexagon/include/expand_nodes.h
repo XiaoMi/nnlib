@@ -1,5 +1,6 @@
+
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -33,12 +34,11 @@
  *
  */
 
-#ifndef NN_OP_SOFTMAX_H
-#define NN_OP_SOFTMAX_H
+#ifndef NN_GRAPH_EXPAND_NODES_H
+#define NN_GRAPH_EXPAND_NODES_H 1
+#include <nn_prepare.h>
 
-#include <op_non_lin_common.h>
-#include <op_softmax_exp2_8_coef_i.h>
-#include <nonlin_clib.h>
-#include <op_softmax_exp2_8_func_i.h>
+int expand_transpose_conv_nodes(struct nn_graph *nn, struct nn_node **transpose_conv_node_p);
+int expand_grouped_conv_nodes(struct nn_graph *nn, struct nn_node **grouped_conv_node_p);
 
-#endif
+#endif //NN_GRAPH_EXPAND_NODES_H

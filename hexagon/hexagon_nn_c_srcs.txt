@@ -33,11 +33,15 @@ hexagon/src/gentranspose.c
 hexagon/src/shape_util.c 
 hexagon/src/hvx_constants.c 
 hexagon/src/quantize.c 
-hexagon/src/supernode_procweights.c 
+hexagon/src/supernode_procweights.c
+hexagon/src/transpose_conv_procweights.c
 hexagon/src/qf16.c 
 hexagon/src/tensor_copy_scaled.c 
 hexagon/src/metanode_lens_lstm.c
 hexagon/src/nn_os_portable.c
+hexagon/src/expand_transpose_conv_nodes.c
+hexagon/src/prepare_utils.c
+hexagon/src/expand_grouped_conv_nodes.c
 hexagon/ops/src/op_resizebilinear.c 
 hexagon/ops/src/op_resizebilinear_d32.c 
 hexagon/ops/src/op_batchspace.c 
@@ -185,3 +189,8 @@ hexagon/ops/src/op_topk_q.c
 hexagon/ops/src/op_cast.c
 hexagon/ops/src/op_axisshuffle.c
 hexagon/ops/src/op_moments.c
+hexagon/ops/src/op_argmin.c
+hexagon/ops/src/op_select_f.c
+hexagon/ops/src/op_select_8.c
+hexagon/ops/src/op_transpose_conv.c
+hexagon/ops/src/op_grouped_conv.c

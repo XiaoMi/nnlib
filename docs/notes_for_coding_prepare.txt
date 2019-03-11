@@ -402,6 +402,64 @@ If you add a new pass please DO NOT add a new OPTIMIZE_PERF() to separate it fro
 existing adjacent passes. The necessary changes to the rest of the function clutter the diffs and
 are very likely to cause merge conflicts.
 
+========================================================================
+check_graph
+========================================================================
+Amongst the optimization passes you will see lines like this
+	CHECK(GRAPHCHECK_HASH)  OPTIMIZE_PERF(-1)
+... the CHECK expands to 
+   if ((err= check_graph(nn,(GRAPHCHECK_HASH)))!=0) return err;
+(the OPTIMIZE_PERF(-1) is so that the time calling check_graph is not attributed
+ to the following optimization pass).
+
+'check_graph' is defined in graph_check.c; it does nothing unless debug_level>=1
+ since it is quite time-consuming. The parameter is a set of or'd flags which indicates
+ what should be be checked:
+     GRAPHCHECK_HASH          - check find_node hash is consistent
+     GRAPHCHECK_DEADNODES     - report 'dead' nodes (only used after remove_dead_nodes)
+     GRAPHCHECK_NONCONST      - report any nodes out of place wrt nonconst_head_ptr (only used at end)
+
+     Even with flags=0, it will check the following (note that some failures will
+     cause it to abandon further checking):
+ 
+    - list is valid (no 'loop'; and 'tail' is within the list, node_count is correct)
+    - all nodes have distinct ids
+    - Each input reference must refer to a valid output of a node which is earlier
+      in the list. This is done without using the find_node hash.
+    - Each node's noderefhash is consistent with the input_refs.
+
+  with GRAPHCHECK_NONCONST:
+    - nn->nonconst_head_ptr must be in list; all prior nodes must be Const; all
+      nodes at and after this point must be non-const.
+
+  with GRAPHCHECK_DEADNODES:
+    - each node must have at least one consumer (except for 'exempt' nodes: those
+      with NN_NODE_FLAG_RETAIN; this includes all nodes with n_outputs = 0, plus
+      a few special things like Assign). This is not considered an error; only
+      a log message is produced.
+
+  with GRAPHCHECK_HASH:
+    - check that all nodes in the find_node hash are actually in the list.
+      If there are nodes in the list which are not in the hash, this is not considered an
+      error (they will still be found, but more slowly). But if debug_level > 2, a
+      message is always printed like this, indicating how many are in the hash:
+        hash ok; 205 of 205 nodes are in hash
+
+If you are testing a fairly complex graph transformation, it is a good
+idea to temporarily insert a call to check_graph_check( nn, GRAPHCHECK_HASH) immediately
+after your pass, and run with debug_level >= 1.
+
+if hexagon_nn is built with NN_LOG_MAXLEV <=0, the check_graph function 
+is entirely omitted from the build.
+
+Note: 
+ (1) the nn->tail is a 'weak' tail: it may be null, or it may point to any node
+     on the list. Attempts are made to keep it near the end for faster 'append'.
+     graph_check only complains if it doesn't meet the weak requirements.
+ (2) nn->node_count is defined as an unreliable indication of the number of nodes
+     in the list; it will be correct if the utility functions are used to remove &
+     insert nodes. But no code relies on it being accurate. graph_check will always
+     log a message if it does not match the actual count (and if debug_level > 0).
 
 ========================================================================
 Etc

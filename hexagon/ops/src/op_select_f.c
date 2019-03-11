@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -34,293 +34,48 @@
  */
 
 
-#ifndef NN_OP_SOFTMAX_EXP2_H
-#define NN_OP_SOFTMAX_EXP2_H
-
-#ifndef CINTRINSIC_NONLIN_DEFS
-#define CINTRINSIC_NONLIN_DEFS
+#include <nn_graph.h>
+#if defined(__hexagon__)
+#include "hexagon_types.h"
 #endif
 
-#ifdef CINTRINSIC_NONLIN_DEFS
-const signed char lut_non_lin_exp2_8[256] __attribute__ ((aligned(128))) = {
-64,
-0,
-65,
-0,
-67,
-0,
-68,
-0,
-70,
-0,
-71,
-0,
-73,
-0,
-74,
-0,
-76,
-0,
-78,
-0,
-79,
-0,
-81,
-0,
-83,
-0,
-85,
-0,
-87,
-0,
-89,
-0,
-91,
-0,
-92,
-0,
-95,
-0,
-97,
-0,
-99,
-0,
-101,
-0,
-103,
-0,
-105,
-0,
-108,
-0,
-110,
-0,
-112,
-0,
-115,
-0,
-117,
-0,
-120,
-0,
-123,
-0,
-125,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-3,
-0,
-3,
-0,
-3,
-0,
-3,
-0,
-3,
-0,
-3,
-0,
-3,
-0,
-3,
-0,
-3,
-0,
-3,
-0,
-3,
-0,
-4,
-0,
-4,
-0,
-4,
-0,
-4,
-0,
-4,
-0,
-4,
-0,
-4,
-0,
-4,
-0,
-4,
-0,
-4,
-0,
-4,
-0,
-5,
-0,
-5,
-0,
-5,
-0,
-5,
-0,
-5,
-0,
-5,
-0,
-5,
-0,
-5,
-0,
-5,
-0,
-5,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0,
-0
+static int select_execute(struct nn_node *self, struct nn_graph *nn)
+{
+    // Unpack the input and output tensors of this node.
+    const struct tensor *c_tensor = self->inputs[0];
+    const struct tensor *x_tensor = self->inputs[1];
+    const struct tensor *y_tensor = self->inputs[2];
+    struct tensor *out_tensor = self->outputs[0];
+
+    // Set the size of the output tensor.
+    if (tensor_out_prepare_normal_fromshape(out_tensor, &y_tensor->shape, NN_TYPE_FLOAT) !=0) return errlog(nn,"out too small");
+
+    int i;
+    char *cond = (char *) c_tensor->data;
+    float *in1 = (float *) x_tensor->data;
+    float *in2 = (float *) y_tensor->data;
+    float *out = (float *) out_tensor->data;
+    for (i=0; i<out_tensor->shape.batches *
+                out_tensor->shape.height *
+                out_tensor->shape.width *
+                out_tensor->shape.depth; i++) {
+        *(out+i) = *(cond+i) ? *(in1+i) : *(in2+i);
+    }
+
+    return 0;
+}
+
+// .check functions validate the number of inputs and outputs for the op-type.
+static int select_check(struct nn_node *self, struct nn_graph *nn)
+{
+    if (self->n_inputs != 3) return errlog(nn,"Wrong # inputs");
+    if (self->n_outputs != 1) return errlog(nn,"Wrong # outputs");
+    return 0;
+}
+
+struct nn_node_ops nn_ops_for_Select_f = {
+        .execute = select_execute,
+        .check = select_check,
+        .ctor = node_alloc_common,
+        .dtor = node_free_common,
 };
-#endif
-
-#define SCALE (4)
-
-#define SCALE_EXP2_8   (4)
-
-#define N_ORDER_EXP2_8  (1)
-
-#define DELTAX_NBITS_EXP2_8  (3) 
-#define DELTAX_LSHIFT_EXP2_8  (0) // = (SCALE) 
-#define DELTAX_MASK_EXP2_8  (0x7) // = ((2^DELTAX_NBITS) - 1) 
-#define RNGIDX_NBITS_EXP2_8  (5) 
-#define RNGIDX_RSHIFT_EXP2_8  (3) // = (DELTAX_NBITS) 
-#define RNGIDX_MASK_EXP2_8  (0xf8) // = (((2^RNGIDX_NBITS) - 1) << RNGIDX_RSHIFT) 
-
-#define MIN_RNG_EXP2_8  (-1)
-#define MAX_RNG_EXP2_8  (0)
-
-#ifdef OUT_Q7_VAL_IS_NEGATIVE_TO_POSITIVE
-#undef OUT_Q7_VAL_IS_NEGATIVE_TO_POSITIVE
-#endif
-#define OUT_Q7_VAL_IS_NEGATIVE_TO_POSITIVE (0)
-
-#endif

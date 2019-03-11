@@ -1,7 +1,5 @@
-
-
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -34,16 +32,24 @@
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
-// NoteA: "nonlin_coef.h" header file used as a medium for passing macros computed by Python to intrinsic/ASM code.
-// - macros consist of parameters like coef_scale, remez_order, sature_max, sature_min, num_bits_lut_integral_part, num_bits_lut_fractional_part, Q format use etc. 
-// - macros also consist of defines to skip parts of code that are unused (for example skipping code based on cases of odd and even symmetry)
-// NoteB: "nonlin_coef.h" header file has two different formats for polynomial-approximation coefficient-containing Look-Up Table (LUT):
-// - lut_non_lin_cn (for use as reference under CNATURAL_NONLIN_DEFS) in "natural-C" format - row of increasing-poly-order-wise coeffs for 1st rng/interval then row for 2nd interval and so on.
-// - lut_non_lin_asm[] (under CINTRINSIC_NONLIN_DEFS) in different format as table is put in "vectorized" format for lookup using HVX vectors in intrinsic/ASM code.
-// NoteC: "nonlin_coef.h" header file has function prototypes (under CINTRINSIC_NONLIN_DEFS) to allow calls to intrinsic/ASM code functions by C test code
-extern const signed char lut_non_lin_sigmoid_8[];
-static inline void non_lin_i_sigmoid_8(signed char *ptr_y, signed char *ptr_x, int numelements)
+
+#include <nn_graph.h>
+#include <string.h>
+
+static int grouped_conv_execute(struct nn_node* self, struct nn_graph* nn)
 {
-	NON_LIN_I_8(ptr_y, ptr_x, lut_non_lin_sigmoid_8, numelements, RNGIDX_MASK_SIGMOID_8, RNGIDX_RSHIFT_SIGMOID_8, RNGIDX_NBITS_SIGMOID_8, DELTAX_MASK_SIGMOID_8, DELTAX_LSHIFT_SIGMOID_8)
-    return;
+    return errlog(nn, "OP_GroupedConv2d8x8p32to8: Should not get to this execute!");
 }
+
+static int grouped_conv_check(struct nn_node* self, struct nn_graph* nn)
+{
+    return errlog(nn, "OP_GroupedConv2d8x8p32to8: Should not get to this check!");
+}
+
+struct nn_node_ops nn_ops_for_QuantizedGroupedConv2d_8x8p32to8 = {
+    .execute = grouped_conv_execute,
+    .check = grouped_conv_check, 
+    .ctor = node_alloc_common, 
+    .dtor = node_free_common,
+    .flags = NN_NODE_FLAG_CLS_GROUPEDCONV
+};

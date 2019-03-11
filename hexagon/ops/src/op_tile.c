@@ -71,10 +71,12 @@ static int tile_execute(struct nn_node *self, struct nn_graph *nn)
 	int dwh = depth*width*height;
 	int dw = depth*width;
 
-	int b_multiple = multiples[0];
-	int h_multiple = multiples[1];
-	int w_multiple = multiples[2];
-	int d_multiple = multiples[3];
+    int multiple_size = multiples_tensor->shape.batches * multiples_tensor->shape.height * multiples_tensor->shape.width * multiples_tensor->shape.depth;
+
+	int b_multiple = multiple_size > 3 ? multiples[0] : 1;
+	int h_multiple = multiple_size > 2 ? multiples[multiple_size-3] : 1;
+	int w_multiple = multiple_size > 1 ? multiples[multiple_size-2] : 1;
+	int d_multiple = multiples[multiple_size-1];
 
 	tensor_out_prepare_normal(out_min_tensor, 1, 1, 1, 1, NN_TYPE_FLOAT);
 	tensor_out_prepare_normal(out_max_tensor, 1, 1, 1, 1, NN_TYPE_FLOAT);

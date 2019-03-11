@@ -1,5 +1,6 @@
+
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -33,16 +34,27 @@
  *
  */
 
-// NoteA: "nonlin_coef.h" header file used as a medium for passing macros computed by Python to intrinsic/ASM code.
-// - macros consist of parameters like coef_scale, remez_order, sature_max, sature_min, num_bits_lut_integral_part, num_bits_lut_fractional_part, Q format use etc. 
-// - macros also consist of defines to skip parts of code that are unused (for example skipping code based on cases of odd and even symmetry)
-// NoteB: "nonlin_coef.h" header file has two different formats for polynomial-approximation coefficient-containing Look-Up Table (LUT):
-// - lut_non_lin_cn (for use as reference under CNATURAL_NONLIN_DEFS) in "natural-C" format - row of increasing-poly-order-wise coeffs for 1st rng/interval then row for 2nd interval and so on.
-// - lut_non_lin_asm[] (under CINTRINSIC_NONLIN_DEFS) in different format as table is put in "vectorized" format for lookup using HVX vectors in intrinsic/ASM code.
-// NoteC: "nonlin_coef.h" header file has function prototypes (under CINTRINSIC_NONLIN_DEFS) to allow calls to intrinsic/ASM code functions by C test code
-extern const signed char lut_non_lin_exp2_8[];
-static inline void non_lin_i_exp2_8(signed char *ptr_y, signed char *ptr_x, int numelements)
+#ifndef TRANSPOSE_CONV_PROCWEIGHTS_H_
+#define TRANSPOSE_CONV_PROCWEIGHTS_H_
+
+#include <stdint.h>
+#include "nn_graph_types.h"
+struct transpose_conv_filter_parms {
+  struct tensor const * filt_tensor;
+  struct tensor const * strides_tensor;
+  uint8_t *out_data;
+  uint32_t zero_offset;      			// byte to fill when padding
+  uint32_t data_size;
+  nn_sem_t done_sem;
+};
+
+static inline uint32_t roundup(uint32_t numToRound, uint32_t multiple)
 {
-    NON_LIN_I_8(ptr_y, ptr_x, lut_non_lin_exp2_8, numelements, RNGIDX_MASK_EXP2_8, RNGIDX_RSHIFT_EXP2_8, RNGIDX_NBITS_EXP2_8, DELTAX_MASK_EXP2_8, DELTAX_LSHIFT_EXP2_8)
-    return;
+    uint32_t remainder = numToRound % multiple;
+    if (remainder == 0)
+        return numToRound;
+    return numToRound + multiple - remainder;
 }
+
+int process_tranpose_conv_filter(struct nn_graph *nn, struct transpose_conv_filter_parms * rtcwparms);
+#endif /* TRANSPOSE_CONV_PROCWEIGHTS_H_ */

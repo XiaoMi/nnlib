@@ -192,45 +192,66 @@ void set_output_range(struct nn_node *self) {
 	tensor_set_single_float(self->outputs[5], out_max);
 }
 
+//
+// SumX is sum of x, SumX2 is sum of square of x.
+// SumX' is sum of x-mx, SumX2' is sum of square of x-mx
+// Input (x) are pivoted close to zero mean (x-mx), and mx = approx(mean(x)).
+// var (x) is the same as var(x-mx)
+// var(x-mx) = (n*SumX2'-SumX'^2)/n^2
+// var(x-mx) is approximate (SumX2 - mx*(2*SumX-n*mx)) / n
+//
 void reduction1_hvx(const uint8_t *in, uint8_t inoff, uint8_t* mout, int32_t *vout, int32_t *rdims) {
 	int n_out = rdims[0];
 	int r_out = rdims[1];
 	int n_in = rdims[2];
 	int r_in = rdims[3];
-	int i_out, i_in, ir_out, cnt0 = 0, cnt1 = 0;
-	int recip_den = min_i32(0x7fffffff, 0x80000000 / (r_out * r_in));
+	int i_out, i_in, ir_out, cnt0 = 0, cnt1 = 0, i;
+	uint32_t reduction = r_out * r_in;
+	uint32_t recip_den = min_u32(0x7fffffff, 0x80000000U / reduction);
+	int32_t stride = r_in * n_in;
 
 	HVX_Vector sZero = Q6_V_vzero();
 	HVX_Vector sRecipDen = Q6_V_vsplat_R(recip_den);
-	HVX_Vector sInOff = Q6_V_vsplat_R(Q6_R_vsplatb_R(inoff));
-	HVX_Vector sInOffw = Q6_V_vsplat_R(inoff);
 	HVX_VectorPred Q0 = q6op_Q_vsetq2_R(r_in);
 	HVX_VectorPred Q1 = Q6_Q_vsetq_R(4);
 	HVX_Vector sMaccInt, sVaccInt, sMFifo, sVFifo;
+
+	// compute ceil(log(reduction))
+	// do we need more than 16b of guard bit in variance acc
+	int32_t clb = Q6_R_clb_R(reduction);
+	clb = Q6_R_clb_R(reduction + (1 << (31 - clb)) - 1);
+	clb = clb > 16 ? 0 : 16 - clb;
+	recip_den <<= clb;
+	HVX_Vector sRecipDenVar = Q6_V_vsplat_R(recip_den);
+	HVX_Vector sReduction = Q6_V_vsplat_R(reduction);
+	HVX_Vector sReductionx64 = Q6_V_vsplat_R(reduction*64);
+	HVX_Vector sC80 = Q6_V_vsplat_R(0x80808080);
+	HVX_Vector sC80last = Q6_V_vmux_QVV(Q0, sC80, sZero);
 
 	sMaccInt = sVaccInt = sMFifo = sVFifo = sZero;
 	for (i_out = 0; i_out < n_out; i_out++) {
 		for (i_in = 0; i_in < n_in; i_in++, cnt0++) {
 			HVX_Vector sMacc = sZero;
-			HVX_VectorPair dVacc = Q6_W_vcombine_VV(sZero, sZero);
+			HVX_Vector sVacc = sZero;
+			const uint8_t* inp = in + i_in * r_in + i_out * (r_in*n_in*r_out);
 			for (ir_out = 0; ir_out < r_out; ir_out++) {
-				const uint8_t* inp = in + i_in * r_in + ir_out * (r_in*n_in) + i_out * (r_in*n_in*r_out);
-
-				HVX_Vector sCurOff = sInOff;
-				for (int i = 0;i < r_in; i+=128) {
+				for (i = 0;i < r_in-127; i += 128) {
 					HVX_Vector sIn = vmemu(&inp[i]);
-					if (i + 128 >= r_in) {
-						sCurOff = Q6_V_vmux_QVV(Q0, sInOff, sZero);
-						sIn = Q6_V_vmux_QVV(Q0, sIn, sZero);
-					}
 					sMacc = Q6_Vuw_vrmpyacc_VuwVubRub(sMacc, sIn, 0x1010101);
-					HVX_Vector sInZeroBean = Q6_Vub_vabsdiff_VubVub(sIn, sCurOff);
-					HVX_VectorPair dInSq = Q6_Wuh_vmpy_VubVub(sInZeroBean, sInZeroBean);
-					dVacc = Q6_Ww_vmpaacc_WwWhRb(dVacc, dInSq, 0x1010101);
+					HVX_Vector sInpi = Q6_V_vxor_VV(sIn, sC80);
+					sVacc = Q6_Vw_vrmpyacc_VwVbVb(sVacc, sInpi, sInpi);
 				}
+				if (i < r_in) {
+					HVX_Vector sIn = vmemu(&inp[i]);
+					sIn = Q6_V_vmux_QVV(Q0, sIn, sZero);
+					sMacc = Q6_Vuw_vrmpyacc_VuwVubRub(sMacc, sIn, 0x1010101);
+					HVX_Vector sInpi = Q6_V_vxor_VV(sIn, sC80last);
+					sVacc = Q6_Vw_vrmpyacc_VwVbVb(sVacc, sInpi, sInpi);
+				}
+				inp += stride;
 			}
-			HVX_Vector sVacc = Q6_Vw_vadd_VwVw(Q6_V_hi_W(dVacc), Q6_V_lo_W(dVacc));
-			HVX_VectorPair dVaccInt = Q6_W_vdeal_VVR(sVacc, sVaccInt, -4);
+			HVX_Vector sVaccComb = Q6_Vuw_vlsr_VuwR(sVacc, clb);
+			HVX_VectorPair dVaccInt = Q6_W_vdeal_VVR(sVaccComb, sVaccInt, -4);
 			sVaccInt = Q6_Vw_vadd_VwVw(Q6_V_hi_W(dVaccInt), Q6_V_lo_W(dVaccInt));
 			HVX_VectorPair dMaccInt = Q6_W_vdeal_VVR(sMacc, sMaccInt, -4);
 			sMaccInt = Q6_Vw_vadd_VwVw(Q6_V_hi_W(dMaccInt), Q6_V_lo_W(dMaccInt));
@@ -243,14 +264,18 @@ void reduction1_hvx(const uint8_t *in, uint8_t inoff, uint8_t* mout, int32_t *vo
 				cnt1++;
 
 				if ((cnt1 & 31) == 0) {
-					HVX_Vector sVar = Q6_Vw_vmpye_VwVuh(sVFifo, sRecipDen);
-					sVar = Q6_Vw_vmpyoacc_VwVwVh_s1_rnd_sat_shift(sVar, sVFifo, sRecipDen);
 					HVX_Vector sMean = Q6_Vw_vmpye_VwVuh(sMFifo, sRecipDen);
 					sMean = Q6_Vw_vmpyoacc_VwVwVh_s1_rnd_sat_shift(sMean, sMFifo, sRecipDen);
 
-					HVX_Vector sZeroMean = Q6_Vub_vabsdiff_VubVub(sMean, sInOffw);
-					HVX_Vector sMSq = Q6_Vh_vmpyi_VhVh(sZeroMean, sZeroMean);
-					sVar = Q6_Vw_vsub_VwVw(sVar, sMSq);
+					HVX_Vector sT0 = Q6_Vw_vadd_VwVw(sMFifo, Q6_Vw_vsub_VwVw(sMFifo, Q6_Vw_vmpyie_VwVuh(sReduction, sMean)));
+					sT0 = Q6_Vuw_vlsr_VuwR(sT0, clb);
+					HVX_Vector sNVacc = Q6_Vw_vsub_VwVw(sVFifo, Q6_Vw_vmpyie_VwVuh(sT0, sMean));
+					//var + (256*(sumX-n*64))>>clb
+					HVX_Vector sAdj = Q6_Vw_vsub_VwVw(sMFifo, sReductionx64);
+					sNVacc = Q6_Vw_vaslacc_VwVwR(sNVacc, sAdj, 8-clb);
+					HVX_Vector sVar = Q6_Vw_vmpye_VwVuh(sNVacc, sRecipDenVar);
+					sVar = Q6_Vw_vmpyoacc_VwVwVh_s1_rnd_sat_shift(sVar, sNVacc, sRecipDenVar);
+
 					vmemu(vout) = sVar;
 					sMean = Q6_Vb_vpacke_VhVh(sZero, sMean);
 					sMean = Q6_Vb_vpacke_VhVh(sZero, sMean);
@@ -279,14 +304,19 @@ void reduction1_hvx(const uint8_t *in, uint8_t inoff, uint8_t* mout, int32_t *vo
 				int cnt = cnt1 & 31;
 				sVFifo = Q6_V_vror_VR(sVFifo, -cnt * 4);
 				sMFifo = Q6_V_vror_VR(sMFifo, -cnt * 4);
-				HVX_Vector sVar = Q6_Vw_vmpye_VwVuh(sVFifo, sRecipDen);
-				sVar = Q6_Vw_vmpyoacc_VwVwVh_s1_rnd_sat_shift(sVar, sVFifo, sRecipDen);
+
 				HVX_Vector sMean = Q6_Vw_vmpye_VwVuh(sMFifo, sRecipDen);
 				sMean = Q6_Vw_vmpyoacc_VwVwVh_s1_rnd_sat_shift(sMean, sMFifo, sRecipDen);
 
-				HVX_Vector sZeroMean = Q6_Vub_vabsdiff_VubVub(sMean, sInOffw);
-				HVX_Vector sMSq = Q6_Vh_vmpyi_VhVh(sZeroMean, sZeroMean);
-				sVar = Q6_Vw_vsub_VwVw(sVar, sMSq);
+				HVX_Vector sT0 = Q6_Vw_vadd_VwVw(sMFifo, Q6_Vw_vsub_VwVw(sMFifo, Q6_Vw_vmpyie_VwVuh(sReduction, sMean)));
+				sT0 = Q6_Vuw_vlsr_VuwR(sT0, clb);
+				HVX_Vector sNVacc = Q6_Vw_vsub_VwVw(sVFifo, Q6_Vw_vmpyie_VwVuh(sT0, sMean));
+				//var + (256*(sumX-n*64))>>clb
+				HVX_Vector sAdj = Q6_Vw_vsub_VwVw(sMFifo, sReductionx64);
+				sNVacc = Q6_Vw_vaslacc_VwVwR(sNVacc, sAdj, 8-clb);
+				HVX_Vector sVar = Q6_Vw_vmpye_VwVuh(sNVacc, sRecipDenVar);
+				sVar = Q6_Vw_vmpyoacc_VwVwVh_s1_rnd_sat_shift(sVar, sNVacc, sRecipDenVar);
+
 				if ((cnt1 & 31) == 0)
 					vmemu(vout) = sVar;
 				else
@@ -308,17 +338,23 @@ void reductionX_hvx(const uint8_t *in, uint8_t inoff, uint8_t* mout, int32_t *vo
 	int r_in = rdims[3];
 	int n_vec = rdims[4];
 	int i_in, ir_out, ivec;
+	uint32_t reduction = r_out * r_in;
 
-	int recip_den = min_i32(0x7fffffff, 0x80000000 / (r_out * r_in));
+	uint32_t recip_den = min_u32(0x7fffffff, 0x80000000U / reduction);
 	HVX_Vector sZero = Q6_V_vzero();
 	HVX_Vector sRecipDen = Q6_V_vsplat_R(recip_den);
-	HVX_Vector sCurOff, sInOff = Q6_V_vsplat_R(Q6_R_vsplatb_R(inoff));
-	HVX_Vector sInOffw = Q6_V_vsplat_R(inoff);
+
+	// compute ceil(log(reduction))
+	// do we need more than 16b of guard bit in variance acc
+	int32_t clb = Q6_R_clb_R(reduction);
+	clb = Q6_R_clb_R(reduction+(1<<(31-clb))-1);
+	clb = clb > 16 ? 0 : 16 - clb;
+	recip_den <<= clb;
+	HVX_Vector sRecipDenVar = Q6_V_vsplat_R(recip_den);
+	HVX_Vector sReduction = Q6_V_vsplat_R(reduction);
 
 	for (i_in = 0; i_in < n_in; i_in++) {
-		for (ivec = 0; ivec < n_vec; ivec+=128) {
-			int32_t macc = 0, vacc = 0;
-
+		for (ivec = 0; ivec < n_vec; ivec += 128) {
 			HVX_VectorPair dVacc20 = Q6_W_vcombine_VV(sZero, sZero);
 			HVX_VectorPair dVacc31 = Q6_W_vcombine_VV(sZero, sZero);
 			HVX_Vector sMacc0, sMacc1, sMacc2, sMacc3;
@@ -326,37 +362,54 @@ void reductionX_hvx(const uint8_t *in, uint8_t inoff, uint8_t* mout, int32_t *vo
 			if (ivec + 128 > n_vec) Q0 = q6op_Q_vsetq2_R(n_vec);
 			sMacc0 = sMacc1 = sMacc2 = sMacc3 = sZero;
 
-			for (ir_out = 0; ir_out < r_out; ir_out++) {
-				const uint8_t* inp = in + ivec + i_in * (r_in*n_vec) + ir_out * (n_in*r_in*n_vec);
-				for (int i = 0;i < r_in; i++) {
-					HVX_Vector sIn = vmemu(&inp[i*n_vec]);
-					sCurOff = Q6_V_vmux_QVV(Q0, sInOff, sZero);
-					sIn = Q6_V_vmux_QVV(Q0, sIn, sZero);
+			if (clb) {
+				for (ir_out = 0; ir_out < r_out; ir_out++) {
+					const uint8_t* inp = in + ivec + i_in * (r_in*n_vec) + ir_out * (n_in*r_in*n_vec);
+					const int32_t blk = 1 << 15;
+					for (int sup_i = 0; sup_i < r_in; sup_i += blk) {
+						HVX_VectorPair dBlkVacc20 = Q6_W_vcombine_VV(sZero, sZero);
+						HVX_VectorPair dBlkVacc31 = Q6_W_vcombine_VV(sZero, sZero);
+						int32_t blklen = min_i32(r_in - sup_i, blk);
+						for (int i = sup_i; i < sup_i+blklen; i++) {
+							HVX_Vector sIn = vmemu(&inp[i*n_vec]);
+							sIn = Q6_V_vmux_QVV(Q0, sIn, sZero);
 
-					sMacc0 = Q6_Vuw_vrmpyacc_VuwVubRub(sMacc0, sIn, 0x00000001);
-					sMacc1 = Q6_Vuw_vrmpyacc_VuwVubRub(sMacc1, sIn, 0x00000100);
-					sMacc2 = Q6_Vuw_vrmpyacc_VuwVubRub(sMacc2, sIn, 0x00010000);
-					sMacc3 = Q6_Vuw_vrmpyacc_VuwVubRub(sMacc3, sIn, 0x01000000);
+							sMacc0 = Q6_Vuw_vrmpyacc_VuwVubRub(sMacc0, sIn, 0x00000001);
+							sMacc1 = Q6_Vuw_vrmpyacc_VuwVubRub(sMacc1, sIn, 0x00000100);
+							sMacc2 = Q6_Vuw_vrmpyacc_VuwVubRub(sMacc2, sIn, 0x00010000);
+							sMacc3 = Q6_Vuw_vrmpyacc_VuwVubRub(sMacc3, sIn, 0x01000000);
 
-					HVX_Vector sInZeroBean = Q6_Vub_vabsdiff_VubVub(sIn, sCurOff);
-					HVX_VectorPair dInSq = Q6_Wuh_vmpy_VubVub(sInZeroBean, sInZeroBean);
-					dVacc20 = Q6_Wuw_vmpyacc_WuwVuhRuh(dVacc20, Q6_V_lo_W(dInSq), 0x10001);
-					dVacc31 = Q6_Wuw_vmpyacc_WuwVuhRuh(dVacc31, Q6_V_hi_W(dInSq), 0x10001);
-
-					int16_t inval = inp[i*n_vec];
-					macc += inval;
-					vacc += abs(inval - inoff)*abs(inval - inoff);
+							HVX_VectorPair dInSq = Q6_Wuh_vmpy_VubVub(sIn, sIn);
+							dBlkVacc20 = Q6_Wuw_vmpyacc_WuwVuhRuh(dBlkVacc20, Q6_V_lo_W(dInSq), 0x10001);
+							dBlkVacc31 = Q6_Wuw_vmpyacc_WuwVuhRuh(dBlkVacc31, Q6_V_hi_W(dInSq), 0x10001);
+						}
+						HVX_Vector sVacc20_L = Q6_Vw_vasracc_VwVwR(Q6_V_lo_W(dVacc20), Q6_V_lo_W(dBlkVacc20), clb);
+						HVX_Vector sVacc20_H = Q6_Vw_vasracc_VwVwR(Q6_V_hi_W(dVacc20), Q6_V_hi_W(dBlkVacc20), clb);
+						HVX_Vector sVacc31_L = Q6_Vw_vasracc_VwVwR(Q6_V_lo_W(dVacc31), Q6_V_lo_W(dBlkVacc31), clb);
+						HVX_Vector sVacc31_H = Q6_Vw_vasracc_VwVwR(Q6_V_hi_W(dVacc31), Q6_V_hi_W(dBlkVacc31), clb);
+						dVacc20 = Q6_W_vcombine_VV(sVacc20_H, sVacc20_L);
+						dVacc31 = Q6_W_vcombine_VV(sVacc31_H, sVacc31_L);
+					}
 				}
 			}
+			else {
+				for (ir_out = 0; ir_out < r_out; ir_out++) {
+					const uint8_t* inp = in + ivec + i_in * (r_in*n_vec) + ir_out * (n_in*r_in*n_vec);
+					for (int i = 0;i < r_in; i++) {
+						HVX_Vector sIn = vmemu(&inp[i*n_vec]);
+						sIn = Q6_V_vmux_QVV(Q0, sIn, sZero);
 
-			HVX_Vector sVar0 = Q6_Vw_vmpye_VwVuh(Q6_V_lo_W(dVacc20), sRecipDen);
-			sVar0 = Q6_Vw_vmpyoacc_VwVwVh_s1_rnd_sat_shift(sVar0, Q6_V_lo_W(dVacc20), sRecipDen);
-			HVX_Vector sVar2 = Q6_Vw_vmpye_VwVuh(Q6_V_hi_W(dVacc20), sRecipDen);
-			sVar2 = Q6_Vw_vmpyoacc_VwVwVh_s1_rnd_sat_shift(sVar2, Q6_V_hi_W(dVacc20), sRecipDen);
-			HVX_Vector sVar1 = Q6_Vw_vmpye_VwVuh(Q6_V_lo_W(dVacc31), sRecipDen);
-			sVar1 = Q6_Vw_vmpyoacc_VwVwVh_s1_rnd_sat_shift(sVar1, Q6_V_lo_W(dVacc31), sRecipDen);
-			HVX_Vector sVar3 = Q6_Vw_vmpye_VwVuh(Q6_V_hi_W(dVacc31), sRecipDen);
-			sVar3 = Q6_Vw_vmpyoacc_VwVwVh_s1_rnd_sat_shift(sVar3, Q6_V_hi_W(dVacc31), sRecipDen);
+						sMacc0 = Q6_Vuw_vrmpyacc_VuwVubRub(sMacc0, sIn, 0x00000001);
+						sMacc1 = Q6_Vuw_vrmpyacc_VuwVubRub(sMacc1, sIn, 0x00000100);
+						sMacc2 = Q6_Vuw_vrmpyacc_VuwVubRub(sMacc2, sIn, 0x00010000);
+						sMacc3 = Q6_Vuw_vrmpyacc_VuwVubRub(sMacc3, sIn, 0x01000000);
+
+						HVX_VectorPair dInSq = Q6_Wuh_vmpy_VubVub(sIn, sIn);
+						dVacc20 = Q6_Wuw_vmpyacc_WuwVuhRuh(dVacc20, Q6_V_lo_W(dInSq), 0x10001);
+						dVacc31 = Q6_Wuw_vmpyacc_WuwVuhRuh(dVacc31, Q6_V_hi_W(dInSq), 0x10001);
+					}
+				}
+			}
 
 			HVX_Vector sMean0 = Q6_Vw_vmpye_VwVuh(sMacc0, sRecipDen);
 			sMean0 = Q6_Vw_vmpyoacc_VwVwVh_s1_rnd_sat_shift(sMean0, sMacc0, sRecipDen);
@@ -367,20 +420,27 @@ void reductionX_hvx(const uint8_t *in, uint8_t inoff, uint8_t* mout, int32_t *vo
 			HVX_Vector sMean3 = Q6_Vw_vmpye_VwVuh(sMacc3, sRecipDen);
 			sMean3 = Q6_Vw_vmpyoacc_VwVwVh_s1_rnd_sat_shift(sMean3, sMacc3, sRecipDen);
 
-			HVX_Vector sZeroMean0 = Q6_Vub_vabsdiff_VubVub(sMean0, sInOffw);
-			HVX_Vector sZeroMean1 = Q6_Vub_vabsdiff_VubVub(sMean1, sInOffw);
-			HVX_Vector sZeroMean2 = Q6_Vub_vabsdiff_VubVub(sMean2, sInOffw);
-			HVX_Vector sZeroMean3 = Q6_Vub_vabsdiff_VubVub(sMean3, sInOffw);
+			HVX_Vector sT0 = Q6_Vw_vadd_VwVw(sMacc0, Q6_Vw_vsub_VwVw(sMacc0, Q6_Vw_vmpyie_VwVuh(sReduction, sMean0)));
+			HVX_Vector sT1 = Q6_Vw_vadd_VwVw(sMacc1, Q6_Vw_vsub_VwVw(sMacc1, Q6_Vw_vmpyie_VwVuh(sReduction, sMean1)));
+			HVX_Vector sT2 = Q6_Vw_vadd_VwVw(sMacc2, Q6_Vw_vsub_VwVw(sMacc2, Q6_Vw_vmpyie_VwVuh(sReduction, sMean2)));
+			HVX_Vector sT3 = Q6_Vw_vadd_VwVw(sMacc3, Q6_Vw_vsub_VwVw(sMacc3, Q6_Vw_vmpyie_VwVuh(sReduction, sMean3)));
+			sT0 = Q6_Vuw_vlsr_VuwR(sT0, clb);
+			sT1 = Q6_Vuw_vlsr_VuwR(sT1, clb);
+			sT2 = Q6_Vuw_vlsr_VuwR(sT2, clb);
+			sT3 = Q6_Vuw_vlsr_VuwR(sT3, clb);
+			HVX_Vector sVacc20_L = Q6_Vw_vsub_VwVw(Q6_V_lo_W(dVacc20), Q6_Vw_vmpyie_VwVuh(sT0, sMean0));
+			HVX_Vector sVacc20_H = Q6_Vw_vsub_VwVw(Q6_V_hi_W(dVacc20), Q6_Vw_vmpyie_VwVuh(sT2, sMean2));
+			HVX_Vector sVacc31_L = Q6_Vw_vsub_VwVw(Q6_V_lo_W(dVacc31), Q6_Vw_vmpyie_VwVuh(sT1, sMean1));
+			HVX_Vector sVacc31_H = Q6_Vw_vsub_VwVw(Q6_V_hi_W(dVacc31), Q6_Vw_vmpyie_VwVuh(sT3, sMean3));
 
-			HVX_Vector sMSq0 = Q6_Vh_vmpyi_VhVh(sZeroMean0, sZeroMean0);
-			HVX_Vector sMSq1 = Q6_Vh_vmpyi_VhVh(sZeroMean1, sZeroMean1);
-			HVX_Vector sMSq2 = Q6_Vh_vmpyi_VhVh(sZeroMean2, sZeroMean2);
-			HVX_Vector sMSq3 = Q6_Vh_vmpyi_VhVh(sZeroMean3, sZeroMean3);
-
-			sVar0 = Q6_Vw_vsub_VwVw(sVar0, sMSq0);
-			sVar1 = Q6_Vw_vsub_VwVw(sVar1, sMSq1);
-			sVar2 = Q6_Vw_vsub_VwVw(sVar2, sMSq2);
-			sVar3 = Q6_Vw_vsub_VwVw(sVar3, sMSq3);
+			HVX_Vector sVar0 = Q6_Vw_vmpye_VwVuh(sVacc20_L, sRecipDenVar);
+			sVar0 = Q6_Vw_vmpyoacc_VwVwVh_s1_rnd_sat_shift(sVar0, sVacc20_L, sRecipDenVar);
+			HVX_Vector sVar2 = Q6_Vw_vmpye_VwVuh(sVacc20_H, sRecipDenVar);
+			sVar2 = Q6_Vw_vmpyoacc_VwVwVh_s1_rnd_sat_shift(sVar2, sVacc20_H, sRecipDenVar);
+			HVX_Vector sVar1 = Q6_Vw_vmpye_VwVuh(sVacc31_L, sRecipDenVar);
+			sVar1 = Q6_Vw_vmpyoacc_VwVwVh_s1_rnd_sat_shift(sVar1, sVacc31_L, sRecipDenVar);
+			HVX_Vector sVar3 = Q6_Vw_vmpye_VwVuh(sVacc31_H, sRecipDenVar);
+			sVar3 = Q6_Vw_vmpyoacc_VwVwVh_s1_rnd_sat_shift(sVar3, sVacc31_H, sRecipDenVar);
 
 			int inc = min_i32(128, n_vec - ivec);
 

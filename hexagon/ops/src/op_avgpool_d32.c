@@ -225,7 +225,7 @@ struct avgpool_asm_parms {
 	int in_width;				// used for LR zap
 };
 
-static void avgpool_earlywork(struct nn_graph *nn, void *vinfo)
+static void avgpool_earlywork_v(struct nn_graph *nn, void *vinfo)
 {
 	struct integral_buffer_plan *plan = vinfo;
 	struct nn_early_work *work = plan->misc;
@@ -236,6 +236,11 @@ static void avgpool_earlywork(struct nn_graph *nn, void *vinfo)
 	if (work->bytes == 0) return;
 	nn_graph_memcpy(nn,work->dst_addr,work->src_addr,work->bytes);
 	work->valid = 1;
+}
+static int avgpool_earlywork(struct nn_graph *nn, void *vinfo)
+{
+	avgpool_earlywork_v(nn,vinfo);
+	return 0;
 }
 
 // set up the 'avgpool_asm_parms'
@@ -525,7 +530,7 @@ printf("left_padding = %d; right = %d; infeas_w = %d\n",ibp->wpad_left, ibp->wpa
 		integ_buf = (void*)( (char*)integ_buf + integ_buf_bytes );
 		nn_os_work_for_vector(nn, avgpool_worker_thread_func , &runstate.thrinfo[i]);
 	}
-	if(!need_post_work) nn_os_work_for_vector(nn,avgpool_earlywork,ibp);
+	if(!need_post_work) nn_os_vector_call(nn,avgpool_earlywork,ibp);
 
 	// wait for those to be done
 	nn_sem_wait_n_times( &runstate.done_sem, n_threads);
@@ -533,7 +538,7 @@ printf("left_padding = %d; right = %d; infeas_w = %d\n",ibp->wpad_left, ibp->wpa
 	// do post-work for 1x1 case
 	if( need_post_work ){
 		nn_os_work_for_vector(nn, avgpool_reduce_to_1x1_post_worker_thread , &runstate);
-		nn_os_work_for_vector(nn,avgpool_earlywork,ibp);
+		nn_os_vector_call(nn,avgpool_earlywork,ibp);
 		nn_sem_wait( &runstate.done_sem);
 	}
 

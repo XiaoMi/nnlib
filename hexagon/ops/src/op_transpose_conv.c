@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -33,49 +33,32 @@
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
+#include <nn_graph.h>
+#include <string.h>
+
 /*
  * 
  * Now that that's out of the way, let's get to the good stuff.
  * 
- * This contains definitions for things used internally.
+ * This contains a stub for tranpose conv 2d node
  */
 
-#if 0
-inline void prelu_1D_alpha(uint8_t *in_data, uint8_t *out_data, float *alpha, uint32_t quantized_zero,size_t bytes , size_t alpha_depth )
+static int transpose_conv_execute(struct nn_node *self, struct nn_graph *nn)
 {
-
-	uint32_t *alpha_frac   = pad_and_align(alpha, sizeof(float)*alpha_depth);
-	uint32_t *alpha_offset = pad_and_align(alpha_frac, NUM_BYT_PERVECTOR);
-	int i, j,idx;
-
-	for (i = 0; i < bytes/alpha_depth; i++) {
-		for (j = 0; j < alpha_depth; j++) {
-			idx = i*alpha_depth +j;
-			out_data[idx] = in_data[idx];
-			if (in_data[idx] < quantized_zero) {
-				alpha_frac[j] = (1<<16) * alpha[j];
-				alpha_offset[j] = quantized_zero - ((quantized_zero * alpha_frac[j] + 0x08000) >> 16);
-				out_data[idx] = ((in_data[idx] * alpha_frac[j]+0x08000) >> 16) + alpha_offset[j];
-			}
-		}
-	}
-
-
-
-
-
+    //proc weights here and tada
+    return 0;
 }
 
-#endif
-	.text
+static int transpose_conv_check(struct nn_node *self, struct nn_graph *nn)
+{
+    logmsg(nn, 2, "Checking transpose conv node %p", self);
+    return 0;
+}
 
-	.global prelu_1d_alpha_hvx
-	.p2align 6
-prelu_1d_alpha_hvx:
-	.falign
-.Loop:
-#if 0   //TBD
-#endif
-	jumpr r31
-
-
+struct nn_node_ops nn_ops_for_QuantizedTransposeConv2d_8x8p32to8 = {
+    .execute = transpose_conv_execute,
+    .check = transpose_conv_check,
+    .ctor = node_alloc_common,
+    .dtor = node_free_common,
+    .flags = NN_NODE_FLAG_CLS_TRANSPOSECONV
+};

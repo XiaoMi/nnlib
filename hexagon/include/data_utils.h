@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -33,18 +33,58 @@
  *
  */
 
+#ifndef NN_DATA_UTILS_H
+#define NN_DATA_UTILS_H 1
 
-// NoteA: "nonlin_coef.h" header file used as a medium for passing macros computed by Python to intrinsic/ASM code.
-// - macros consist of parameters like coef_scale, remez_order, sature_max, sature_min, num_bits_lut_integral_part, num_bits_lut_fractional_part, Q format use etc. 
-// - macros also consist of defines to skip parts of code that are unused (for example skipping code based on cases of odd and even symmetry)
-// NoteB: "nonlin_coef.h" header file has two different formats for polynomial-approximation coefficient-containing Look-Up Table (LUT):
-// - lut_non_lin_cn (for use as reference under CNATURAL_NONLIN_DEFS) in "natural-C" format - row of increasing-poly-order-wise coeffs for 1st rng/interval then row for 2nd interval and so on.
-// - lut_non_lin_asm[] (under CINTRINSIC_NONLIN_DEFS) in different format as table is put in "vectorized" format for lookup using HVX vectors in intrinsic/ASM code.
-// NoteC: "nonlin_coef.h" header file has function prototypes (under CINTRINSIC_NONLIN_DEFS) to allow calls to intrinsic/ASM code functions by C test code
-extern const signed short lut_non_lin_exp2_16[];
-static inline void non_lin_i_exp2_16(signed short *ptr_y, signed short *ptr_x, int numelements)
+/*
+ * 
+ * Now that that's out of the way, let's get to the good stuff.
+ * 
+ * This contains definitions for data manipulation routines 
+ */
+
+#include <stdint.h>
+
+static inline int split_data(uint8_t *data, uint8_t *splits, uint32_t height,
+        uint32_t width, uint32_t depth, uint32_t numOut, uint32_t axis)
 {
-	int	poly_n_order = N_ORDER_EXP2_16;
-	NON_LIN_I_16(ptr_y, ptr_x, lut_non_lin_exp2_16, numelements, poly_n_order, RNGIDX_MASK_EXP2_16, RNGIDX_RSHIFT_EXP2_16, DELTAX_MASK_EXP2_16, DELTAX_LSHIFT_EXP2_16)
-    return;
+    uint32_t in_dims[3] = { height, width, depth };
+    uint32_t out_dims[3] = { height, width, depth };
+    if (out_dims[axis] % numOut != 0)
+        return -1;
+    out_dims[axis] /= numOut;
+
+    uint32_t copy_stride = 1;
+    uint32_t in_start_stride = 1;
+    uint32_t in_copy_stride = 1;
+    uint32_t out_start_stride = 1;
+    uint32_t out_copy_stride = 1;
+
+    uint32_t i;
+    for (i = 0; i < 3; i++) {
+        if (i < axis) {
+            copy_stride *= in_dims[i];
+        } else {
+            in_start_stride *= out_dims[i];
+            in_copy_stride *= in_dims[i];
+            out_copy_stride *= out_dims[i];
+        }
+        out_start_stride *= out_dims[i];
+    }
+
+    uint8_t *in, *out;
+    uint32_t j;
+    for (i = 0; i < numOut; i++) {
+        in = data + i * in_start_stride;
+        out = splits + i * out_start_stride;
+        for (j = 0; j < copy_stride; j++) {
+            memcpy((void*)out, in, out_copy_stride);
+            out += out_copy_stride;
+            in += in_copy_stride;
+        }
+    }
+
+    return 0;
 }
+
+#endif

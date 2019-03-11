@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -145,10 +145,6 @@ static void transpose_thread_deal2( struct nn_graph *nn , void *rstpv );
 
 typedef void (*nn_stride_scalar_copy_fp)(uint8_t * outp, uint8_t const *inp, int h, int w, int hsi, int wsi, int hso, int wso);
 
-static void strided_copy_2d_1b( uint8_t * outp, uint8_t const *inp, int h, int w, int hsi, int wsi, int hso, int wso);
-static void strided_copy_2d_2b( uint8_t * outp, uint8_t const *inp, int h, int w, int hsi, int wsi, int hso, int wso);
-static void strided_copy_2d_4b( uint8_t * outp, uint8_t const *inp, int h, int w, int hsi, int wsi, int hso, int wso);
-static void strided_copy_2d_8b( uint8_t * outp, uint8_t const *inp, int h, int w, int hsi, int wsi, int hso, int wso);
 
 static inline void swap_rows( struct nn_transpose_desc * tdp, int i0, int i1 )
 {
@@ -578,7 +574,7 @@ static int transpose_execute_SCALAR( struct nn_graph *nn, struct nn_transpose_de
 
 // strided 2d scalar copy
 #define STRIDED_COPY_2D( FNAME,TYP)\
-static void FNAME( uint8_t * outp, uint8_t const *inp, int h, int w, int hsi, int wsi, int hso, int wso )\
+void FNAME( uint8_t * outp, uint8_t const *inp, int h, int w, int hsi, int wsi, int hso, int wso )\
 {\
     __builtin_assume(w >= 2);              \
     __builtin_assume(h >= 2);              \

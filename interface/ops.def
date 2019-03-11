@@ -181,6 +181,7 @@ DEF_OP(Sink)
 DEF_OP_WREF(QuantizedPRelu_8_d32)
 DEF_OP_WREF(AutoQuantize)
 DEF_OP_WREF(QuantizedDepthwiseConv2d_8x8to32)
+DEF_OP(QuantizedTransposeConv2d_8x8p32to8)
 DEF_OP_WREF(DepthwiseConv2d_f)
 DEF_OP(DepthwiseSupernode_8x8p8to8)
 DEF_OP(DepthwiseSupernode_8x8p8to8_d32)
@@ -369,11 +370,11 @@ DEF_OP(CastUInt8ToInt32)
 DEF_OP(AxisShuffle_8)
 DEF_OP(ResizeNearestNeighbor_8)
 DEF_OP(QuantizedHeatmapMaxKP_8)
-DEF_OP(HeatmapMaxKPAlt_f)
-DEF_OP(QuantizedHeatmapMaxKPAlt_8)
-
 DEF_OP(Moments_8to32)
-
+DEF_OP(ArgMin_8)
+DEF_OP(Select_f)
+DEF_OP(Select_8)
+DEF_OP(QuantizedGroupedConv2d_8x8p32to8)
 
 // Add new operations above this line
 #ifdef __SELF_DEF_OP_WREF

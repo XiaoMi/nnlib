@@ -529,6 +529,35 @@ static inline uint8_t *tensor_location_d32(
 		+ (d_pos/32)*(w_total*32)
 		+ d_pos%32;
 }
+
+static inline uint8_t *tensor_location_d32_aix(
+	const struct tensor *src,
+	int32_t b,
+	int32_t h,
+	int32_t w,
+	int32_t d,
+	const struct shape *in_shape
+	)
+{
+	uint8_t *base = (uint8_t *)src->data;
+	int32_t height = in_shape->height;
+	int32_t width = in_shape->width;
+	int32_t depth = in_shape->depth;
+	int32_t h_before = 0;
+	int32_t h_after = 0;
+	int32_t w_before = 0;
+	int32_t d_before = 0;
+	int32_t d_after = (-(depth + d_before)) & 31;
+	int32_t w_total = width;
+	int32_t w_after = w_total - (w_before + width);
+	int32_t h_total = h_before + height + h_after;
+	w_total = w_before + width + w_after;
+	int32_t d_total = d_before + depth + d_after;
+	uint32_t d_pos = d + d_before;
+
+	return base + b * h_total * w_total * d_total + (h + h_before) * w_total * d_total + (w + w_before) * 32 + (d_pos / 32) * (w_total * 32) + d_pos % 32;
+}
+
 //
 // this is like tensor_location_d32 except
 // - there is no 'd' (assumed 0)

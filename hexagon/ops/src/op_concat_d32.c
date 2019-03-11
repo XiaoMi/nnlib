@@ -245,7 +245,7 @@ struct concat_run_desc {
 
 };
 
-static void concat_earlywork(struct nn_graph *nn, void *vinfo)
+static void concat_earlywork_v(struct nn_graph *nn, void *vinfo)
 {
 	struct concat_info *info = vinfo;
 	struct nn_early_work *work = info->next_earlywork;
@@ -256,6 +256,11 @@ static void concat_earlywork(struct nn_graph *nn, void *vinfo)
 	if (work->bytes == 0) return;
 	nn_graph_memcpy(nn,work->dst_addr,work->src_addr,work->bytes);
 	work->valid = 1;
+}
+static int concat_earlywork(struct nn_graph *nn, void *vinfo)
+{
+	concat_earlywork_v(nn,vinfo);
+	return 0;
 }
 
 //
@@ -605,7 +610,7 @@ static int concat_execute(struct nn_node *self, struct nn_graph *nn, int with_hv
 		nn_sem_init(&rundesc.thrinfo[i].done_sem, 0);
 		nn_os_work_for_vector(nn,concat_copy_inputs,&rundesc.thrinfo[i]);
 	}
-	nn_os_work_for_vector(nn,concat_earlywork,info);
+	nn_os_vector_call(nn,concat_earlywork,info);
 	for( i = 0; i < num_actual_threads; i++ ){
 		nn_sem_wait(&rundesc.thrinfo[i].done_sem);
 	}

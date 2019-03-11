@@ -425,18 +425,21 @@ void print_graph_checksum(struct nn_graph *nn);
 // some flags on certain ops to put them in 'classes'; if there is no
 // op in a given class in the graph we can skip entire passes in prepare.
 //
-#define NN_NODE_FLAG_CLS_QUANTIZE 		(1u<<31)		// Quantize
-#define NN_NODE_FLAG_CLS_REQUANTRANGE 	(1<<30)	// RequantizationRange_32
+#define NN_NODE_FLAG_CLS_QUANTIZE 		(1u<<31) // Quantize
+#define NN_NODE_FLAG_CLS_REQUANTRANGE 	(1<<30)	 // RequantizationRange_32
 #define NN_NODE_FLAG_CLS_QUANTMUL8TO32  (1<<29)  // QuantizeMul_8x8to32
 #define NN_NODE_FLAG_CLS_DWCONVF        (1<<28)  // DepthwiseConv2d_f
-#define NN_NODE_FLAG_CLS_CHANSHUFFLE  	(1<<27)	// QuantizedChannelShuffle_8
+#define NN_NODE_FLAG_CLS_CHANSHUFFLE  	(1<<27)	 // QuantizedChannelShuffle_8
 #define NN_NODE_FLAG_CLS_OEMNODE        (1<<26)  // OemNode
-#define NN_NODE_FLAG_CLS_SUPPORTS_ALIAS (1<<25)		// Supports output 0 stored at same address as input 0 (e.g. reshape)
+#define NN_NODE_FLAG_CLS_SUPPORTS_ALIAS (1<<25)	 // Supports output 0 stored at same address as input 0 (e.g. reshape)
+#define NN_NODE_FLAG_CLS_TRANSPOSECONV  (1<<24)  //TransposeConv
+#define NN_NODE_FLAG_CLS_GROUPEDCONV    (1<<23)  //QuantizedGroupedConv2d_8x8p32to8
 
 // set of all 'classes' flags
 #define NN_NODE_FLAGS_SET\
-	(NN_NODE_FLAG_CLS_QUANTIZE|NN_NODE_FLAG_CLS_REQUANTRANGE|NN_NODE_FLAG_CLS_QUANTMUL8TO32\
-	|NN_NODE_FLAG_CLS_DWCONVF|NN_NODE_FLAG_CLS_CHANSHUFFLE|NN_NODE_FLAG_CLS_OEMNODE|NN_NODE_FLAG_CLS_SUPPORTS_ALIAS)
+    (NN_NODE_FLAG_CLS_QUANTIZE|NN_NODE_FLAG_CLS_REQUANTRANGE|NN_NODE_FLAG_CLS_QUANTMUL8TO32\
+    |NN_NODE_FLAG_CLS_DWCONVF|NN_NODE_FLAG_CLS_CHANSHUFFLE|NN_NODE_FLAG_CLS_OEMNODE|NN_NODE_FLAG_CLS_SUPPORTS_ALIAS\
+    |NN_NODE_FLAG_CLS_TRANSPOSECONV|NN_NODE_FLAG_CLS_GROUPEDCONV)
 
 struct nn_node_ops {
 	int (*execute)(struct nn_node *self, struct nn_graph *nn);

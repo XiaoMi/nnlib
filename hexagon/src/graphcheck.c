@@ -186,13 +186,15 @@ check_graph( struct nn_graph *nn, int options)
 			}
 		}
 	}
-	// look for dead nodes (>=1 output and 0 references). Not considered an error.
+	// look for dead nodes ( no NN_NODE_FLAG_RETAIN flag, and 0 references). Not considered an error.
+	// The NN_NODE_FLAG_RETAIN is set for nodes which have 0 outputs (Sink, Check, OUTPUT) and for a few
+	// special cases like Assign and Variable which should be kept even if their consumers are removed.
 	//
 	if( options & GRAPHCHECK_DEADNODES){
 		for( int i = 0; i < ctx.index_size; i++ ){
 			struct gcheck_entry  const * idxp = &ctx.index[i];
 			struct nn_node const * np = idxp->nodep;
-			if( idxp->refcount == 0 && np->n_outputs > 0){
+			if( idxp->refcount == 0 && (np->flags&NN_NODE_FLAG_RETAIN)==0){
 				logmsg(nn,0,"node %X (%s) with %d outputs has no references",
 					(unsigned)np->node_id, op_type_to_string(np->node_type), (int)np->n_outputs );
 			}
@@ -204,7 +206,7 @@ check_graph( struct nn_graph *nn, int options)
 		traverse_hash_for_check(nn, hash_check_callback, (void*)&ctx);
 		if(ctx.hash_errs ){
 			numerr += ctx.hash_errs;
-			logmsg(nn,0,"%d bad entiries in hash; %d ok out of %d", ctx.hash_errs, ctx.hash_count, ctx.index_size );
+			logmsg(nn,0,"%d bad entries in hash; %d ok out of %d", ctx.hash_errs, ctx.hash_count, ctx.index_size );
 		}else{
 			logmsg(nn,2,"hash ok; %d of %d nodes are in hash", ctx.hash_count, ctx.index_size );
 		}
@@ -214,6 +216,8 @@ check_graph( struct nn_graph *nn, int options)
 	return (numerr ==0)? 0:-1;
 }
 
+// the call to traverse_hash_for_check results in this being called for each entry (nid, nodep) in the hash.
+//
 
 static void
 hash_check_callback( struct nn_graph *nn,uint32_t nid, struct nn_node *nodep, void * vctxp )
@@ -224,7 +228,7 @@ hash_check_callback( struct nn_graph *nn,uint32_t nid, struct nn_node *nodep, vo
 		logmsg(nn,0,"hash has node %X(%s) @%p which is not on linked-list!", (unsigned)nid, op_type_to_string(nodep->node_type), nodep );
 		ctxp->hash_errs++;
 	}else if( idxp->nodep != nodep){
-		logmsg(nn,0,"hash has node %X(%s) @%p, linked list has it (%s) @p !",
+		logmsg(nn,0,"hash has node %X(%s) @%p, linked list has it (%s) @%p !",
 				(unsigned)nid,op_type_to_string(nodep->node_type),  nodep,
 				op_type_to_string(idxp->nodep->node_type), idxp->nodep );
 		ctxp->hash_errs++;
@@ -243,7 +247,7 @@ gindex_compare_func( void const *pva, void const *pvb)
 	return pa->node_id > pb->node_id;
 }
 
-// allocated and build index.
+// allocate and build index.
 // Also, sets tail_posn and nonconst_head_posn
 static
 int build_index( struct nn_graph *nn, struct gchk_context* ctxp )

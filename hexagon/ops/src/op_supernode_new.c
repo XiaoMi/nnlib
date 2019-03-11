@@ -2358,8 +2358,9 @@ static void note_alldone_checkpoint_arrival(struct nn_graph *nn, struct nn_node 
 	logmsg(nn,2,"Saw all done checkpoint complete @ node %p work item %p",self,work);
 	if (work->next_startup_offset == 0) {
 		logmsg(nn,2,"Last batch, should return info=%p",info);
-		nn_sem_post(&info->alldone_sem);
+		// Move early work before the alldone sem post
 		supernode_handle_earlywork(nn,self,info);
+		nn_sem_post(&info->alldone_sem);
 	} else {
 		logmsg(nn,4,"Enqueue next batch startup distance %d",work->next_startup_offset);
 		supernode_execute_some_strategy(self,nn,info->batch_start_idx + work->next_startup_offset,1);

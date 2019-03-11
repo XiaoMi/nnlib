@@ -1581,23 +1581,6 @@ struct tdata_copytensor {
 	struct tensor *out_max_tensor;
 };
 
-static int autoq_execute_copy_tensor_work(struct nn_graph *nn, void *info)
-{
-	struct tdata_copytensor *work = info;
-
-	const struct tensor *in_tensor = work->in_tensor;
-	const struct tensor *in_min_tensor = work->in_min_tensor;
-	const struct tensor *in_max_tensor = work->in_max_tensor;
-	struct tensor *out_tensor = work->out_tensor;
-	struct tensor *out_min_tensor = work->out_min_tensor;
-	struct tensor *out_max_tensor = work->out_max_tensor;
-
-	vmemcpy_asm(out_tensor->data,in_tensor->data,in_tensor->max_size);
-	vmemcpy_asm(out_min_tensor->data,in_min_tensor->data,in_min_tensor->max_size);
-	vmemcpy_asm(out_max_tensor->data,in_max_tensor->data,in_max_tensor->max_size);
-    return 0;
-}
-
 static void input_copy_work(
 	struct nn_graph *nn,
 	const struct tensor *in_tensor,
@@ -1607,14 +1590,12 @@ static void input_copy_work(
 	struct tensor *out_min_tensor,
 	struct tensor *out_max_tensor)
 {
-	struct tdata_copytensor work;
-	work.in_tensor = in_tensor;
-	work.in_min_tensor = in_min_tensor;
-	work.in_max_tensor = in_max_tensor;
-	work.out_tensor = out_tensor;
-	work.out_min_tensor = out_min_tensor;
-	work.out_max_tensor = out_max_tensor;
-	nn_os_vector_call(nn, autoq_execute_copy_tensor_work, &work);
+	struct nn_memcpy_manager  mcman;
+	nn_mcmanager_init(nn, &mcman );
+	nn_mcmanager_vmemcpy(nn, &mcman, out_tensor->data,in_tensor->data, in_tensor->max_size);
+	nn_mcmanager_wait( nn, &mcman );
+	memcpy(out_min_tensor->data,in_min_tensor->data, in_min_tensor->max_size);
+	memcpy(out_max_tensor->data,in_max_tensor->data, in_max_tensor->max_size);
     return;
 }
 
@@ -1729,58 +1710,6 @@ struct nn_node_ops nn_ops_for_QuantizeINPUT_f_to_8 = {
 #define NUM_THREADS 2
 #endif
 
-struct tdata_autodeq {
-    struct nn_node  *self;
-    nn_sem_t        *donesem;
-    const uint8_t   *in;
-    uint8_t         *out;
-    uint32_t        elements;
-    float           stepsize;
-    float           offset;
-    uint32_t        copy_size;
-};
-
-static void update_dequantize_encoding(float * min, float * max, float * stepsize, float * offset) {
-    float new_min = fminf(0.0f, *min);
-    float new_max = fmaxf(0.0f, *max);
-    float new_stepsize;
-    float new_offset;
-    float b_zero;
-    new_max = fmaxf(new_max, new_min + 0.0001f);
-    new_stepsize = (new_max - new_min) / 255.0f;
-    if (new_min < 0 && new_max > 0) {
-        b_zero = roundf(-new_min/new_stepsize);
-        b_zero = fminf(255.0f, fmaxf(0.0f, b_zero));
-        new_offset = -b_zero;
-    } else {
-        new_offset = roundf(new_min/new_stepsize);
-    }
-
-    *min = new_stepsize * new_offset;
-    *max = new_max - new_min + (*min);
-    *stepsize = new_stepsize;
-    *offset = new_offset;
-}
-
-static void output_copy_hvx(struct nn_graph *nn, void *info) {
-    struct tdata_autodeq *work = info;
-    vmemcpy_asm(work->out,work->in,work->copy_size);
-    nn_sem_post(work->donesem);
-}
-
-static inline void dequantize_with_encoding(const uint8_t * in, float * out, uint32_t len, float stepsize, float offset) {
-    int i;
-    for (i = 0; i < len; i++) {
-        out[i] = (((float)in[i]) + offset) * stepsize;
-    }
-}
-
-static void output_dequantize_ref(struct nn_graph *nn, void *info) {
-    struct tdata_autodeq *work = info;
-    dequantize_with_encoding(work->in, (float *) work->out, work->elements, work->stepsize, work->offset);
-    nn_sem_post(work->donesem);
-}
-
 static int output_dequantize_execute_opt(struct nn_node *self, struct nn_graph *nn) {
     if (nn->n_outputs % NUM_METADATA_PER_OUTPUT_TENSOR) {
         return errlog(nn,"oops, output # does not have enough metadata %d",nn->n_outputs);
@@ -1801,16 +1730,14 @@ static int output_dequantize_execute_opt(struct nn_node *self, struct nn_graph *
     struct tensor *out_min_tensor;
     struct tensor *out_max_tensor;
     // tensors
+	int in_element_size, out_element_size;
     int i,input_offset,output_offset;
     int batches,height,width,depth,elements;
     int32_t needs_dequantization;
     int32_t input_tensor_type;
     int32_t output_tensor_type;
-    float minval, maxval, stepsize, offset;
-    // threads
-    int k,start,t_elements,in_element_size,out_element_size,n_threads;
-    nn_sem_t sem[NUM_THREADS];
-    struct tdata_autodeq work[NUM_THREADS];
+    float minval, maxval;
+
     for(i = 0; i < num_data_tensors_input; i++){
         input_offset = i*NUM_METADATA_PER_QUANTIZED_TENSOR;
         output_offset = i*NUM_METADATA_PER_OUTPUT_TENSOR;
@@ -1867,47 +1794,58 @@ static int output_dequantize_execute_opt(struct nn_node *self, struct nn_graph *
         // set min/maxes
         minval = tensor_get_float(in_min_tensor, 0);
         maxval = tensor_get_float(in_max_tensor, 0);
-
-        update_dequantize_encoding(&minval, &maxval, &stepsize, &offset);
+		float range = fmaxf(0.0001f,maxval-minval);
+		float stepsize = flt_div_255(range);
+		// the hvx code will quietly generate nonsense if stepsize is infeasible...
+		// it must be in range 2**-126 <= step < 2**120 to ensure results are
+		// all in 'normal' range.
+		if(stepsize <0.f || stepsize >=0x2.0p120 ){
+			return errlog(nn,"infeasible quantization step: %.6g",stepsize);
+		}
+		if( stepsize < 0x1.0p-126 ){
+			logmsg(nn,0,"dequant with stepsize = %.6g: filling with zero", stepsize);
+			memset(out_tensor->data, 0, elements*sizeof(float));
+			return 0;
+		}
 
         tensor_set_float(out_min_tensor, 0, minval);
         tensor_set_float(out_max_tensor, 0, maxval);
 
-        // TODO determine what is a good "small" size for local handling
-        // small tensor - handle locally
-        if (elements < 128) {
-            if (needs_dequantization) {
-                dequantize_with_encoding(in_tensor->data, (float *) out_tensor->data, elements, stepsize, offset);
-            } else {
-                memcpy(out_tensor->data, in_tensor->data, elements*out_element_size);
-            }
-            continue;
-        }
-        // else - run threads to work on data
-        t_elements = ((elements + NUM_THREADS-1)/NUM_THREADS + 127)&~127;
-        n_threads = (elements + t_elements -1)/t_elements;
+		if (needs_dequantization)
+		{
+			struct dequant_runstate rstate;
+			rstate.inp = in_tensor->data;
+			rstate.outp = out_tensor->data;
+			rstate.numel = elements;
+			rstate.qstep = stepsize;
+			rstate.qzero = saturate_u8(roundf_i32(-minval/stepsize));
+			nn_sem_init( &rstate.done_sem,0);
 
-        for (k = 0; k < n_threads; k++) {
-            nn_sem_init(&sem[k],0);
-            start = k * t_elements;
-            work[k].self = self;
-            work[k].donesem = &sem[k];
-            work[k].in  = ((uint8_t *) in_tensor->data) + start * in_element_size;
-            work[k].out = ((uint8_t *) out_tensor->data) + start * out_element_size;
-            work[k].elements = Q6_R_min_RR(elements-start, t_elements);
-
-            if (needs_dequantization) {
-                work[k].stepsize = stepsize;
-                work[k].offset = offset;
-                nn_os_work_for_vector(nn,output_dequantize_ref,&work[k]);
-            } else {
-                work[k].copy_size = work[k].elements * out_element_size;
-                nn_os_work_for_vector(nn,output_copy_hvx,&work[k]);
-            }
-        }
-
-        // wait for threads
-        for (k = 0; k < n_threads; k++) nn_sem_wait(&sem[k]);
+			// figure out the chunking...
+			unsigned nvec = (elements+127)/128u;	// number of vectors in all
+			// each 256 vectors converted means 128Kb of stores; we don't want to be
+			// larger that that, otherwise the stores to L2 cache could evict the ongoing
+			// prefetch.
+			unsigned chunk = 256;
+			if( nvec < 512){		// split to two
+				chunk = (nvec < 32)?nvec : ((nvec+1)>>1);
+			}
+			rstate.chunk = 128*chunk;		// in bytes
+			rstate.current_pos = 0;
+			int nthreads =  (nvec >(NUM_THREADS-1)*chunk)?NUM_THREADS: (nvec + (chunk-1))/chunk;
+			for( int i =0; i < nthreads;i++)
+				nn_os_work_for_vector( nn, dequantize_hvx_work_func, &rstate);
+			nn_sem_wait_n_times( &rstate.done_sem, nthreads);
+		}
+		else
+		{
+			struct nn_memcpy_manager mcman;
+			nn_mcmanager_init(nn, &mcman );
+			if( in_tensor->data_size > 0){
+				nn_mcmanager_vmemcpy( nn, &mcman, (uint8_t *) out_tensor->data, (uint8_t *)in_tensor->data, in_tensor->data_size);
+			}
+			nn_mcmanager_wait( nn, &mcman);
+		}
     }
     return 0;
 }

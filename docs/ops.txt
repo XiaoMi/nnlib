@@ -23,6 +23,18 @@ OUTPUT:
 	No outputs
 	output data for hexagon_nn_execute()
 
+Convert_to_aix_d32:
+	4 inputs:
+        0: Input data
+        1: Input min
+        2: Input max
+        3: Flag indicating if input needs to be converted from aix d32
+    	* Assumes that aix output format is aix d32
+	3 outputs
+        0: Input data
+        1: Input min
+        2: Input max
+
 Nop:
 	N inputs
 	N outputs
@@ -204,10 +216,56 @@ QuantizedConv2d_8x8to32:
 		6: Stride shape
 	3 outputs:
 		0: Output data (qint32)
+		1: Output min
+		2: Output max
+	Also requires SAME or VALID padding
+	Quantized Convolution
+
+QuantizedTransposeConv2d_8x8p32to8:
+	12 inputs:
+		0: Input data (quint8)
+		1: Filter data (quint8)
+		2: Input min (float)
+		3: Input max (float)
+		4: Filter min (float)
+		5: Filter max (float)
+		6: Stride shape (4d tensor, use height and width to determine stride)
+		7: Bias data (int32)
+		8: Bias min (float)
+		9: Bias max (float)
+		10: Out min (float)
+		11: Out max (float)
+	3 outputs:
+		0: Output data (quint8)
 		1: Output max
 		2: Output min
 	Also requires SAME or VALID padding
-	Quantized Convolution
+	*Weights are assumed to come in as output channels, height, width, input channels
+	*For out min and out max, specify -inf and inf respectively if you don't need output clipping
+	Quantized Transposed Convolution
+
+    No dilation
+    No groups (by extension, no depthwise)
+
+QuantizedGroupedConv2d_8x8p32to8:
+	11 inputs:
+		0: Input data (quint8)
+		1: Filter data (quint8)
+        	2: Bias data (qint32)
+		3: Input min
+		4: Input max
+		5: Filter min
+		6: Filter max
+        	7: Bias min
+        	8: Bias max
+		9: Stride shape
+        	10: Number of groups
+	3 outputs:
+		0: Output data (quint8)
+		1: Output min
+		2: Output max
+	Also requires SAME or VALID padding
+	Quantized Grouped Convolution
 
 QuantizedMatMul_8x8to32:
 	6 inputs:
@@ -930,54 +988,43 @@ L2Pool_f:
 
 
 HeatmapMaxKP_f:
-    2 inputs:
-        0 : tensor of heatmaps (float) [batches, hm_ht, hm_wid, hmaps ]
+    3 inputs:
+        0 : tensor of heatmaps (float) [batches, hm_ht, hm_wid, hmaps ]   or [ batches, hmaps, hm_ht, hm_wid ]
         1 : tensor of rectangles (float)  [ 1, 1, batches,4 ]    each is {xlo, ylo, xhi, yhi }
-    1 output:
-        0 : tensor of results          [ 1, batches,3, hmaps ]
+        2 : scalar int : is_NCHW, which selects the shape of input #0
+    2 outputs:
+        0 : tensor of peak results          [ 1, 1, batches, hmaps ]
+        1 : tensor of x,y results           [ 1, batches, hmaps, 2 ]  each is {x,y}
 
-        (NHWC variant)
-         Within each heatmap, find the peaks value; estimate a subpixel position for the true peak, correct it for
-         the heatmap rectangle. The '3' dimension in the results is { xpos, ypos, estimated_peak}
+        input #0 shape is [batches, hm_ht, hm_wid, hmaps ] if is_NCHW=0, and [ batches, hmaps, hm_ht, hm_wid ] if is_NCHW!=0
+        Within each heatmap, find the peaks value; estimate a subpixel position for the true peak, correct it for
         hm_ht,hm_wid must each be >=2
-        NOTE: the rectangle input shape may also be [batches,1,1,4], in which case the result shape is [batches,1,3,hmaps]
+        NOTE: the rectangle input shape may also be [batches,1,1,4], in which case the result shapes are
+        [batches,1,1,hmaps] and [batches, 1, hmaps,2 ]
 
-HeatmapMaxKPAlt_f:
-    2 inputs:
-        0 : tensor of heatmaps (float)   [batches,  hmaps, hm_ht, hm_wid ]
-        1 : tensor of rectangles (float) [  1, 1, batches,4 ]    each is {xlo, ylo, xhi, yhi }
-    1 output:
-        0 : tensor of results          [  1, batches, hmaps,3 ]
-
-        (NCHW variant)
-         Within each heatmap, find the peaks value; estimate a subpixel position for the true peak, correct it for
-         the heatmap rectangle. The '3' dimension in the results is { xpos, ypos, estimated_peak}
-        hm_ht,hm_wid must each be >=2
-        NOTE: the rectangle input shape may also be [batches,1,1,4], in which case the result shape is [batches,1,hmaps,3]
 
 QuantizedHeatmapMaxKP_8:
-    4 inputs:
-        0 : tensor of heatmaps (qu8) [batches, hm_ht, hm_wid, hmaps ]
+    5 inputs:
+        0 : tensor of heatmaps (qu8) [batches, hm_ht, hm_wid, hmaps ]   or [ batches, hmaps, hm_ht, hm_wid ]
         1 : scalar float: min for heatmaps
         2 : scalar float: max for heatmaps
-        3 : tensor of rectangles (float)  [  1, 1, batches,4 ]    each is {xlo, ylo, xhi, yhi }
-    1 output:
-        0 : tensor of results          [  1, batches,3, hmaps ]
+        3 : tensor of rectangles (uint16)  [ 1, 1, batches,4 ]    each is {xlo, ylo, xhi, yhi }
+        4 : scalar int : is_NCHW, which selects the shape of input #0
 
-        Same as HeatmapMaxKP_f except that input is qu8 format
-        NOTE: the rectangle input shape may also be [batches,1,1,4], in which case the result shape is [batches,1,3,hmaps]
+    4 outputs:
+        0 : tensor of peak results (qu8)    [ 1, 1, batches, hmaps ]
+        1 : scalar float: min for peak
+        2 : scalar float: max for peak
+        3 : tensor of x,y results  (uint16) [ 1, batches, hmaps, 2 ]  each is {x,y}
 
-QuantizedHeatmapMaxKPAlt_8:
-    4 inputs:
-        0 : tensor of heatmaps (qu8) [batches, hmaps, hm_ht, hm_wid ]
-        1 : scalar float: min for heatmaps
-        2 : scalar float: max for heatmaps
-        3 : tensor of rectangles (float)  [  1, 1, batches,4 ]    each is {xlo, ylo, xhi, yhi }
-    1 output:
-        0 : tensor of results          [  1, batches,hmaps,3 ]
+        input #0 shape is [batches, hm_ht, hm_wid, hmaps ] if is_NCHW=0, and [ batches, hmaps, hm_ht, hm_wid ] if is_NCHW!=0
+        Within each heatmap, find the peaks value; estimate a subpixel position for the true peak, correct it for
+        hm_ht,hm_wid must each be >=2
+        NOTE: the rectangle input shape may also be [batches,1,1,4], in which case the result shapes are
+        [batches,1,1,hmaps] and [batches, 1, hmaps,2 ]
 
-        Same as HeatmapMaxKPAlt_f except that input is qu8 format
-        NOTE: the rectangle input shape may also be [batches,1,1,4], in which case the result shape is [batches,1,hmaps,3]
+        The quantization for input #3 and output #3 are nominally: zero = 0, step = 0.125; but the two are on the same scale,
+        so in effect the output is quantized in the same way as in the input.
 
 Pack_f:
 Pack_int32:
@@ -1151,19 +1198,37 @@ QuantizedSlice_8:
 	The same as Slice_8; but also copies min and max from input to output.
 
 StridedSlice_f:
+StridedSlice_int32:
+StridedSlice_uint8:
 	4 or 7 inputs (last 3 optional)
-		0: input tensor, float
-		1: 'begin' tensor, ints, for input ith input dimension of n, begin index can be 0...n-1
-		2: 'end' tensor, ints, for input ith input dimension of n, end index can be -1...n (index not included in slice)
-		3: 'strides' tensor, ints, cannot be 0, negative for reverse slice
-		4: 'begin_mask' mask, int, override begin to largest range
-		5: 'end_mask' mask, int, override end to largest range
-		6: 'shrink_mask' mask, int, override to slice of 1 from begin
+		0: input tensor, float (or int32, or uint8)
+		1: 'begin' tensor, ints [1,1,1,k] where k = 1...4; start index for slicing
+		2: 'end' tensor, same shape as begin
+        3: 'step' tensor; same shape as begin
+		4: 'begin_mask'  scalar int, see below
+		5: 'end_mask', scalar int, see below
+		6: 'shrink_mask', scalar int, see below
 	1 output:
-		0: sliced output, float
+		0: sliced output, float  (or int32, or uint8)
 
-	For reverse slice, start index should be larger than end index.
-	If no masks are set, the ith output dimension should be (end-begin)/stride or (begin-end)/(-stride) for reverse slice.
+    Each dimension's slicing is defined by begin, end, step values. step cannot be 0.
+    If step >=1, end must be > begin and the size of the output dim is (end-begin)/step, rounded up;
+      for reverse slicing: step <= -1, end must be < begin, and the size of the output is (begin-end)/(-step), rounded up.
+     when k <4, the begin/end/step are applied to the *last* dims, (e.g. when k=2, applied to width and depth) and
+      the other dims have begin=0,end=(indimsize), step=1 to preserve the whole input.
+    The input is sampled at 'begin', 'begin+step', 'begin+2*step' ... and all of these must be in range for the input
+    tensor. Following is a sufficient (but not quite necessary) condition for that: 0 <= begin < end <= indimsize (when step>=1)
+    and -1 <= end < begin <= indimsize-1 (when step <=-1).
+
+    The 3 mask inputs must be either all present, or all absent; default is 0 if absent.
+    The 'masks' modify the slices as follows. Note that bit 0,1,2,3 in the masks apply to B,H,W,D regardless of k.
+     if '1' in shrink_mask: 'step' is forced to 1, and 'end' to begin+1, so the output dim=1. ALSO: the dimension is
+       'squeezed out' of the output shape, e.g (b,h,w,d) -> (1,b',h',d') if 'shrink_mask' = 4
+      When there is a '1' in shrink_mask, the begin_mask and end_mask are ignored for that dim.
+     if '1' in begin_mask: the 'begin' value is forced to 0 (if step> 0) and insize-1 (if step < 0)
+     if '1' in end_mask: the 'end' value is forced to insize (if step> 0) and -1 (if step < 0)
+    
+
 
 QuantizedStridedSlice_8:
 	9 inputs
@@ -1513,7 +1578,7 @@ ResizeNearestNeighbor_8:
 QuantizedTile_8:
     4 inputs:
         0   input tensor of quint8
-        1   multiples - an array of 4 elements containing the replication factors for batches, height, width and depth
+        1   multiples - an array of at most 4 elements containing the replication factors for batches, height, width and depth respectively. If the array size is shorter the 4 it is left-filled with 1s.
         2   input min
         3   input max
     3 outputs:
@@ -1525,16 +1590,53 @@ QuantizedTile_8:
 
 Moments_8to32:
     4 inputs:
-       0   input data      (uint8_t)
-       1   axis            (int32_t)
-       2   input min val   (scalar float)
-       3   input max val   (scalar float)
+       0   input data       (uint8_t)
+       1   axis             (int32_t)
+       2   input min val    (scalar float)
+       3   input max val    (scalar float)
     6 output:
-        0   mean data      (uint8_t)
-        1   mean min val   (scalar float)
-        2   mean max val   (scalar float)
-        3   variance data  (int32_t)
-        4   mean min val   (scalar float)
-        5   mean max val   (scalar float)
+       0   mean data        (uint8_t)
+       1   mean min val     (scalar float)
+       2   mean max val     (scalar float)
+       3   variance data    (int32_t)
+       4   variance min val (scalar float)
+       5   variance max val (scalar float)
     Compute the mean and variance of the input along the axis.
     Implements tf.nn.moments.
+
+ArgMin_8:
+    4 inputs:
+       0   input data       (uint8_t)
+       1   axis             (int32_t)
+       2   input min val    (scalar float)
+       3   input max val    (scalar float)
+    1 output:
+       0   output data      (int32_t)
+    Returns the indices of the minimum values along an axis.
+
+Select_f:
+     3 inputs:
+        0   condition tensor [b h w d]
+        1   input tensor x [b h w d]
+        2   input tensor y [b h w d]
+     1 output:
+        0   output tensor [b h w d]
+     Selects value of x (if true) or value of y (if false) for each corresponding position based on the condition tensor.
+     All input tensors must have the same shape.
+
+Select_8:
+     7 inputs:
+        0   condition tensor [b h w d]  (quint8)
+        1   input tensor x [b h w d]    (quint8)
+        2   x min val                   (float)
+        3   x max val                   (float)
+        4   input tensor y [b h w d]    (quint8)
+        5   y min val                   (float)
+        6   y max val                   (float)
+     3 outputs:
+        0   output tensor [b h w d]     (quint8)
+        1   output min                  (float)
+        2   output max                  (float)
+     Selects value of x (if true) or value of y (if false) for each corresponding position based on the condition tensor.
+     All input tensors must have the same shape.
+     Partially implements tf.where .

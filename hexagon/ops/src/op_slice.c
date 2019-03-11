@@ -352,6 +352,18 @@ static int slice_run(struct nn_node *self, struct nn_graph *nn) {
 		tensor_copy(self->outputs[2],self->inputs[4]);
 	}
 	slice_thread_info* thrinfo = (slice_thread_info*)self->opaque;
+	if( thrinfo == NULL){
+		int elbytes, typecode;
+		if( self->node_type == OP_QuantizedSlice_16 ){
+			typecode = NN_TYPE_QINT8;
+			elbytes = sizeof(int16_t);
+		}else{
+			typecode = NN_TYPE_QUINT8;
+			elbytes = sizeof(uint8_t);
+		}
+		if( slice_prepare(self,nn,elbytes, typecode)!=0) return -1;
+		thrinfo = (slice_thread_info*)self->opaque;
+	}
 	int num_threads = thrinfo[0].num_threads;
 	uint8_t const * in = self->inputs[0]->data;
 	for(int i = 0; i < num_threads; i++) {
@@ -368,6 +380,18 @@ static int slice_run(struct nn_node *self, struct nn_graph *nn) {
 
 static int slice_run_f(struct nn_node *self, struct nn_graph *nn) {
 	slice_thread_info* thrinfo = (slice_thread_info*)self->opaque;
+	if( thrinfo == NULL){
+		int elbytes, typecode;
+		if( self->node_type == OP_Slice_8 ){
+			typecode = NN_TYPE_UINT8;
+			elbytes = sizeof(uint8_t);
+		}else{
+			typecode = (self->node_type == OP_Slice_f)? NN_TYPE_FLOAT: NN_TYPE_INT32;
+			elbytes = (self->node_type == OP_Slice_f)? sizeof(float): sizeof(int32_t);
+		}
+		if( slice_prepare(self,nn,elbytes, typecode)!=0) return -1;
+		thrinfo = (slice_thread_info*)self->opaque;
+	}
 	int num_threads = thrinfo[0].num_threads;
 	uint8_t const * in = self->inputs[0]->data;
 	for(int i = 0; i < num_threads; i++) {

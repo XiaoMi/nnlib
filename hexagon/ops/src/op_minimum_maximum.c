@@ -87,45 +87,6 @@ enum MinMaxOp
     MAXIMUM
 };
 
-/*
-    We have two independently quantized arrays. We need to compute
-    joint_a = (((a - a_offset) * a_mult) >> shift) + qzero
-    joint_b = (((b - b_offset) * b_mult) >> shift) + qzero
-    to yield both values quantized in the same range so we can compare values
-    max(joint_a, joint_b)
-*/
-static inline HVX_Vector jointly_quantize(HVX_Vector ind_a, HVX_Vector va_offset, HVX_Vector va_mult, HVX_Vector vqzero, int shift)
-{
-    // (a - a_offset), (b - offset) ~ ub*ub->2h
-    HVX_VectorPair a_sub = Q6_Wh_vsub_VubVub(ind_a, va_offset);
-
-    // ((a - offset) * a_mult) ~ h*h->w
-    HVX_VectorPair a_mult_res_lo = Q6_Ww_vmpy_VhVh(Q6_V_lo_W(a_sub), va_mult);
-    HVX_VectorPair a_mult_res_hi = Q6_Ww_vmpy_VhVh(Q6_V_hi_W(a_sub), va_mult);
-
-    // (((a - offset) * a_mult)) >> shift) ~ w*w->h
-    HVX_Vector shift_a_lo = Q6_Vh_vasr_VwVwR(Q6_V_hi_W(a_mult_res_lo), Q6_V_lo_W(a_mult_res_lo), shift);
-    HVX_Vector shift_a_hi = Q6_Vh_vasr_VwVwR(Q6_V_hi_W(a_mult_res_hi), Q6_V_lo_W(a_mult_res_hi), shift);
-
-    // shuffle high and low to convert from words to half words
-    // uint8 [x,0,y,0,z,0,...], [] -> shuffle -> [a,b,c,....0,0,0...]
-    HVX_VectorPair ashuff = Q6_W_vshuff_VVR(shift_a_hi, shift_a_lo, -2);
-
-    // (((a - offset) * a_mult)) >> shift) + qzero ~ h*h->h
-    HVX_Vector joint_a_even = Q6_Vh_vadd_VhVh_sat(Q6_V_lo_W(ashuff), vqzero); // (((a - a_offset) * a_mult) >> shift) + qzero
-    HVX_Vector joint_a_odd = Q6_Vh_vadd_VhVh_sat(Q6_V_hi_W(ashuff), vqzero);  // (((a - a_offset) * a_mult) >> shift) + qzero
-
-    // deal high and low to restore element order
-    HVX_Vector joint_a_lo = Q6_Vb_vdeal_Vb(joint_a_even);
-    HVX_Vector joint_a_hi = Q6_Vb_vdeal_Vb(joint_a_odd);
-
-    // Each vector now has 64 elements.
-    // rotate high to the last 64 bits and mux together
-    // HVX_Vector rotated_a = Q6_V_vror_VR(joint_a_hi, 64);
-    HVX_Vector va = Q6_V_vmux_QVV(Q6_Q_vsetq_R(64), joint_a_lo, Q6_V_vror_VR(joint_a_hi, 64));
-    return va;
-}
-
 static inline void qminmax_hvx(
     uint8_t *a,
     uint8_t *b,
@@ -147,7 +108,7 @@ static inline void qminmax_hvx(
     int b_mult = info->b_mult;
     int shift = info->shift;
     int qzero = info->qzero;
-    int loopcount = elem >> 7; /* 7 - log2(ALIGN_SIZE) */
+    int loopcount = elem / ALIGN_SIZE;
     int leftovers = elem % ALIGN_SIZE;
 
     // splat all constant values to vectors
@@ -181,7 +142,7 @@ static inline void qminmax_hvx(
         HVX_Vector va = jointly_quantize(ind_a, va_offset, va_mult, vqzero, shift);
         HVX_Vector vb = jointly_quantize(ind_b, vb_offset, vb_mult, vqzero, shift);
         HVX_Vector res = op == MINIMUM ? Q6_Vub_vmin_VubVub(va, vb) : Q6_Vub_vmax_VubVub(va, vb);
-        vmemu(&out[i * 128]) = res;
+        *((HVX_Vector *)(&out[i * sizeof(HVX_Vector)])) = res;
     }
     if (leftovers)
     {
@@ -192,7 +153,7 @@ static inline void qminmax_hvx(
         HVX_Vector vb = jointly_quantize(ind_b, vb_offset, vb_mult, vqzero, shift);
 
         HVX_Vector res = op == MINIMUM ? Q6_Vub_vmin_VubVub(va, vb) : Q6_Vub_vmax_VubVub(va, vb);
-        q6op_vstu_variable_ARV(&out[i * 128], leftovers, res);
+        q6op_vstu_variable_ARV(&out[i * sizeof(HVX_Vector)], leftovers, res);
     }
 }
 
@@ -292,9 +253,9 @@ static int minmax_execute(struct nn_node *self, struct nn_graph *nn, int op)
     info.a_offset = quantize_uint8(0.0f, a_min_float, a_max_float);
     info.b_offset = quantize_uint8(0.0f, b_min_float, b_max_float);
     info.shift = 12;
-    info.a_mult = ((float)(1 << info.shift)) * (a_level_size / out_level_size) + 0.5f;
-    info.b_mult = ((float)(1 << info.shift)) * (b_level_size / out_level_size) + 0.5f;
-    info.qzero = -out_min * (255 / (out_max - out_min)) + 0.5f;
+    info.a_mult = ((float)(1 << info.shift)) * (a_level_size / out_level_size);
+    info.b_mult = ((float)(1 << info.shift)) * (b_level_size / out_level_size);
+    info.qzero = quantize_uint8(0.0f, out_min, out_max);
     struct minmax_tdata td = {
         .self = self,
         .a_tensor = a_tensor,

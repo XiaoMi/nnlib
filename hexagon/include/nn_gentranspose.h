@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -189,5 +189,17 @@ static inline int nn_transpose_execute( struct nn_graph *nn, struct nn_transpose
 	return (*td->execute_fp)( nn,td,buffer, output, input );
 }
 
+//
+// These are exported symbols in case they are useful elsewhere
+// (lookin' at you, StridedSlice...)
+// These just copy over h & width dims, with arbitrary input & output strides (in bytes) on each;
+//   - elementsize is 1,2,4,or 8;
+//   - the pointers and all 4 strides must be multiples of the elementsize.
+// IMPORTANT: these assume h and w are both >= 2.
+//
+void strided_copy_2d_1b( uint8_t * outp, uint8_t const *inp, int h, int w, int hsi, int wsi, int hso, int wso);
+void strided_copy_2d_2b( uint8_t * outp, uint8_t const *inp, int h, int w, int hsi, int wsi, int hso, int wso);
+void strided_copy_2d_4b( uint8_t * outp, uint8_t const *inp, int h, int w, int hsi, int wsi, int hso, int wso);
+void strided_copy_2d_8b( uint8_t * outp, uint8_t const *inp, int h, int w, int hsi, int wsi, int hso, int wso);
 
 #endif // NN_GENTRANSPOSE_H

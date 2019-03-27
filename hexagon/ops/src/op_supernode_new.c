@@ -40,6 +40,7 @@
  * This contains the code for convolution
  */
 #define ENABLE_VECTOR_WEIGHT_ARRANGE
+//#undef ENABLE_VECTOR_WEIGHT_ARRANGE
 /*
  * FIXME: temporary minmax buf should be on stack
  */
@@ -49,17 +50,17 @@
 #include <quantize.h>
 #include <stdlib.h>
 #include <stdio.h>
-#ifndef __hexagon__
+#ifdef __hexagon__
+#include "hexagon_types.h"
+#else
 #include <malloc.h>
 #endif
-#include "hexagon_types.h"
 #include "hvx_hexagon_protos.h"
 
 #include "nn_bufferpool.h"
 
 #ifdef HEXAGON_V66
 #define NUM_THREADS 4
-#define V66 1
 #else
 #define NUM_THREADS 2
 #endif
@@ -68,7 +69,7 @@
 #include "op_supernode_procweights.h"
 #endif
 
-#define ENABLE_FASTSUMA_1x1 1
+#define ENABLE_FASTSUMA_1x1 0
 
 /* 
  * Size of VTCM to reserve for circular buffer
@@ -106,19 +107,23 @@ void incopy_expand_4to4 (uint8_t * out, uint8_t const * in, int width, int in_of
 
 struct workitem {
 	int (*execute)(struct workitem *, struct nn_node *node, struct nn_graph *nn);	// exec function
+	void (*new_execute)(struct nn_graph *nn, void *opaque); // work_for_vector-compatible exec function, passed work item
 	struct nn_node *self;		// This node
-	struct supernode_info *info;	// same as self->opaque
+	struct supernode_info_new *info;	// same as self->opaque
 	nn_sem_t *donesem;	// semaphore to post completion
 	nn_sem_t *do_conv;      // semaphore to trigger convolution
-	nn_sem_t *copy_done;    // semaphore to wait on completion of weights copy
+	// nn_sem_t *copy_done;    // semaphore to wait on completion of weights copy
 	nn_sem_t *conv_done;    // semaphore to wait on completion of convolution
+	int32_t  wait_before;   // wait on the semphores or not
 	int32_t  threads;       // how many threads will work on this.
-
 	int32_t batch_index;	// current batch index (input supernode)
 	/* Main convolutional work items */
 	const uint8_t *input;	// Input data.  Could be from input tensor or temp buf
 	const uint8_t *weights;	// Filter data.  Could be from input tensor or temp buf
 	const int32_t *biases;	// Bias data, in product space (added to in * filt products)
+        const uint32_t *recip;  // Vector per channel reciprocal quantization
+        const int32_t *recip_sh;// Vector per channel reciprocal quantization shift, not used in v66
+        const int32_t *equalize;  // Vector per channel max/min rescale back to original unscaled weights
 	uint8_t *output;	// Output data.  Could be output tensor or temp buf
 	int32_t *suma_buf;	// Output data.  Could be output tensor or temp buf
 	int32_t start_line;	// Row to start working on
@@ -128,9 +133,11 @@ struct workitem {
 	int32_t *minmax_buf;	// min/max values
 	uint8_t *circ_buf;      // temp buf used by v65 code
 	int32_t weight_chunks;	// How many d32 chunks of weights to do
-	int32_t weight_batch_size;	// How many d32 chunks of weights to do
+	int32_t weight_batch_size; // size of each weight chunk
+        int32_t start_chunk;    // the first absolute poisiton of the weight chunks to use
 	int32_t last_chunk;     // is this the last weight chunk in entire operation (v65 only)
-
+        int32_t vtcm_chunks;    // num weight chunks in vtcm
+        int32_t fix_overcompute;// deal with oadding soecifically for tuples of 4
 	/* Information about input pad zapping */
 	uint8_t *zap_top;	// pointer to top zap
 	uint8_t *zap_bot;	// pointer to bottom zap
@@ -141,44 +148,59 @@ struct workitem {
 	int32_t zap_rl_depths;	// number of right/left zaps per row
 	int32_t zap_left_size;	// width to zap on the left
 	int32_t zap_right_size;	// width to zap on the right
+	int32_t zap_batches;	// batches to zap
 	int32_t nonzap_width;	// width to copy into
 	int32_t zap_height;	// height to zap
 	uint8_t zap_value;	// value to zap with
-
+	int32_t zap_jobs;
 	/* Information for prefetching */
 	const uint8_t *pf_inp;	// where to start prefetch, NULL if no pf needed
 	uint32_t pf_width;	// width to fetch
 	uint32_t pf_stride;	// Distance between rows
 	uint32_t pf_height;	// number of rows;
-
 	/* Information for GEMSUMA / integral image calculations */
-	int32_t need_initialize_suma;
+	uint8_t need_initialize_suma;
+	int16_t suma_progress_index;	// selects progress variable for suma.
+	int32_t suma_progress_need;		// v60 convolution needs this suma progress.
 //	const uint8_t *suma_in;	// input data, NULL if no suma needed
 //	int32_t *suma_int_tmp;	// Temporary storage for output of integral --> suma
 //	int32_t *suma_output;	// output data
 //	int32_t *suma_scratch;	// scratch storage
 //	int32_t suma_num_lines;	// Number of final output lines
-
 	/* Memcpy work items */
 	const uint8_t *copy_in;	// copy in location, NULL if no copy in needed
 	uint8_t *copy_out;	// copy out location
 	uint32_t copy_size;	// amount to copy
-
 	int32_t join_iters;	// how many times to decrement done semaphore
+	int32_t my_idx;		// sometimes we want to know our index.
+	nn_checkpoint_t *zap_checkpoint;
+	int32_t next_startup_offset;
 };
 
+struct weight_slice_info {
+	nn_checkpoint_t checkpoint;
+	const uint8_t *copy_in;
+	uint8_t *copy_out;
+	uint32_t copy_size;
+	int batch_start_offset;
+	uint32_t wakeup_items;
+};
 
 /*
  * Pointers and values that are common to everything in the node
  * Also values that are constant across all work items
  */
-struct supernode_info {
+struct supernode_info_new {
 	uint8_t *weights;	// weights, padded and adjusted as necessary
 	int32_t *biasbuf;	// int32 bias buffer, including min offsets and gemsumb
 	int32_t *minmax_buf;	// pointer to min/max values, enough storage per thread...
+        uint32_t *recip;        //local quantization per channel
+        int32_t *recip_sh;     //local quantization shift per channel
 	nn_sem_t *semaphores;	// pointer to preallocated array of semaphores
 	struct workitem *work_items;	// All the work items to execute at execute time
+	nn_os_workitem_t *work_list;	// compiled work list
 	int n_work_items;		// how many work items?
+	int batch_start_idx;		// pointer during more-distributed execution
 	int workitems_alloc;	//	bytes allocated for work items
 	float out_minval;	// Minimum output value, either specified or guessed
 	float out_maxval;	// maximum output value, either specified or guessed
@@ -189,25 +211,33 @@ struct supernode_info {
 	int32_t minval;			// Minimum value (in prod space) actually observed
 	int32_t maxval;			// Maximum value (in prod space) actually observed
 	int32_t weight_batch_size;	// How big is a weight batch (32 filters)
-	int32_t n_weight_batches;	// Number of weight batches we can try and fit at once
+	int32_t n_weight_batches;	// Number of weight batches we can try and fit at once into vtcm
 	int32_t needs_retry;		// Do we need to try this op over again?
 	int32_t strategy_valid;		// Do we believe the strategy is currently valid?
 	int32_t weights_arranged;	// Have the weights been rearranged yet?
 	float in_max_float;	// maximum input float value
 	float in_min_float;	// minimum input float value
+        float  weight_scale_factor;
+        int32_t * weight_scale;           // per channel scale applied
 	float weights_level_size;	// how large in float is one increment in the weights?
+        float * weights_level;          // how large in float is one increment in the weights in each channel?
 	int weights_offset;	// where is 0 in weight number space?
+	struct shape in_shape;		// previous actual shape
 	int32_t in_height;	// height of the input
 	int32_t in_width;	// input width to compute
 	int32_t in_next_row;	// distance from one row to the next
 	int32_t in_depth;	// input depth to compute
+        int32_t in_depth_after; // amount of depth padding in total in depth
 	int32_t in_next_d32;	// distance from one depth32 slice to the next on the same row
 	int32_t in_left_skip; 	// number of width elements to throw away on the left side output
 	int32_t in_right_padpad;// number of width elements to add onto the padded data in circ buffer
-	int32_t out_width;	// output depth to compute, should be width/stride
+	int32_t in_next_batch;	// stride from one batch to the next
+	int32_t out_width;		// output width to compute, should be width/stride
+	int32_t out_width_processed;		// output width, incl any left_pad %4, but no right pad
 	int32_t out_next_row;	// distance from one row to the next 
 	int32_t out_next_batch; // distance from one batch to the next
-	int32_t out_depth;	// total depth to compute
+	int32_t out_depth_total;	// total depth of output
+	int32_t out_depth_valid;	// total depth to compute
 	int32_t out_next_d32;	// distance from one depth32 slice to the next on the same row
 	int32_t out_height;	// number of output lines to compute
 	int32_t out_left_junk; 	// number of width elements to throw away on the left side output
@@ -224,12 +254,14 @@ struct supernode_info {
 	int32_t integral_off;   //index into integral buffer used by gvsuma
 	int32_t recip_val;	// reciprocal for product space --> output space
 	int32_t recip_shamt;	// amount to shift before recip mpy
+	int recip_shamt_must_be_zero;	// set in nodes which don't support recip_shamt (shortinconv)
 	int32_t circ_buf_size;  //size pf the circular buffer used in v65 conv
 	int32_t num_accs;       // number of accumulators used in main computation
 	int in_offset;		// amount to normalize inputs by.  Needed?
 	int filt_offset;	// amount to normalize filter values by. Needed?
 	int32_t recursion_depth;// how far have we recursed?
-	const uint8_t *input_base;
+	const uint8_t *input_base0;	// first row (including all left padding, in-use top padding)
+	const uint8_t *input_base;	// first row (including in-use left padding, in-use top padding).
 	const uint8_t *weights_base;
 	const uint8_t * raw_input; //ptr to the input tensor for use when copied into temp
 	int32_t max_valid_val;	// maximum value that results in a value not above max_out
@@ -237,23 +269,53 @@ struct supernode_info {
 	float prod_level_size;	// in_level_size * filt_level_size
 	int32_t *gemsumb;	// GEMSUMB value, if we want to calculate it at preparation time
 	int32_t use_v65;	// Should we use V65 mode?
+	int32_t use_v66;	// Should we use V66 mode?
 	int32_t use_vtcm;       //flag to use vtcm or not for weights
 	uint64_t cycles;	// Cycle accumulator for children
 	struct nn_os_bufstack_t bufstack;	// stack of temporary buffers
-	struct buffer_pool bufpool_suma_scratch;		// pool of 'suma_scratch' buffers
+	struct buffer_pool bufpool_suma_scratch;// pool of 'suma_scratch' buffers
+	struct weight_slice_info *conv_slices;	// checkpoints and info for when conv is complete
+	struct weight_slice_info startup_info;
+	int errors;
+	nn_checkpoint_t alldone_checkpoint;	// checkpoint for all convs completing
+	nn_sem_t alldone_sem;
+	void *prepared_vtcm_addr;
+	const struct nn_node *earlywork_pred;	// A node before this one that might be able to take early work
+	struct nn_early_work my_earlywork;	// Information about early work
+	struct nn_early_work *next_earlywork;	// Work requested by future node
 };
 
 
-static void setup_initial_output_range( struct supernode_info *info, float,float,float,float);
+static void setup_initial_output_range( struct supernode_info_new *info, float,float,float,float);
+
+static inline int supernode_execute_some_strategy(struct nn_node *self, struct nn_graph *nn, int start, int n_work_items)
+{
+	struct supernode_info_new *info = self->opaque;
+	int err = 0;
+#if 0
+	int i;
+	for (i = start; i < (start+n_work_items); i++) {
+		//struct workitem *p = &info->work_items[i];
+		//err |= p->execute(p,self,nn);
+		//p->new_execute(nn,p);
+		logmsg(nn,3,"adding f=%p p=%p",info->work_list[i].f,info->work_list[i].arg);
+		nn_os_work_for_vector(nn,info->work_list[i].f,info->work_list[i].arg);
+	};
+#else
+	logmsg(nn,3,"adding %d items @ %d",n_work_items,start);
+	nn_os_worklist_for_vector(nn,&info->work_list[start],n_work_items);
+#endif
+	return err;
+}
 
 
 #define roundup(a, p2)       (((a)+(p2)-1)&~((p2)-1))
 static inline int  __attribute__((unused))
-supernode_signed_weight_divisor(struct supernode_info *info, int weight_offset)
+supernode_signed_weight_divisor(struct supernode_info_new *info, int weight_offset)
 {       //return ((weight_offset > (128-8)) && (weight_offset < (128+8))) ? 1 : 2; //EEK!
         int d ;
 	d = (weight_offset > (128-8)) && (weight_offset < (128+8)) ? 1 : 2;
-	if (info->use_v65 == 0) d = 1;	// don't use V65 signed stuff
+	if (info->use_v65 == 0 && info->use_v66 == 0) d = 1;	// don't use V65/6 signed stuff
 	return d;
 }
 
@@ -262,15 +324,19 @@ static inline int supernode_unsigned_weight_divisor(int weight_offset)
 	return 1;
 }
 
-static inline int supernode_n_weight_batches(int batch_size)
+static inline int supernode_n_weight_batches(int batch_size, int vtcm_size)
 {
-	int slices_per_256 = (256*1024/batch_size);
-	if (slices_per_256 > 0) return slices_per_256;
+	int slices_per_vtcm = (vtcm_size/batch_size);
+	if (slices_per_vtcm > 0) return slices_per_vtcm;
 	else return 1;
 }
 
+static inline void supernode_do_memcpy(struct nn_graph *nn, uint8_t *dst, const uint8_t *src, uint32_t size)
+{
+	return nn_graph_memcpy(nn,dst,src,size);
+}
 
-static void supernode_statistics(struct nn_graph *nn, struct supernode_info *node, struct nn_node *self)
+static void supernode_statistics(struct nn_graph *nn, struct supernode_info_new *node, struct nn_node *self)
 {
 	int h,w,d,dd;
 	const uint8_t *in_h;
@@ -380,7 +446,9 @@ static int __attribute__((unused)) supernode_execute_ref(struct nn_node *self, s
 	 * Multiply the grade sizes for the output grade size.
 	 * output min/max == INT_MIN / INT_MAX * output grade size
 	 */
-
+	if( !flt_isfinite(in_max_float) || !flt_isfinite(in_min_float)){
+		return errlog(nn,"input range to shortin supernode contains NaN or Inf");
+	}
 	float in_level_size = (in_max_float - in_min_float) / 255;
 	float filt_level_size = (filt_max_float - filt_min_float) / 255;
 	float bias_level_size = (bias_max_float - bias_min_float) / 255;
@@ -697,7 +765,7 @@ static void __attribute__((unused)) convsum_ref(
  */
 
 #if 0
-void debug_pprint_vector(const struct supernode_info *ndata)
+void debug_pprint_vector(const struct supernode_info_new *ndata)
 {
 	int next_d32 = ndata->in_next_d32;
 	int next_row = ndata->in_next_row;
@@ -725,31 +793,30 @@ void debug_pprint_vector(const struct supernode_info *ndata)
 	}
 }
 #else
-static inline void debug_pprint_vector(const struct supernode_info *ndata) {}
+static inline void debug_pprint_vector(const struct supernode_info_new *ndata) {}
 #endif
 
 /* Choose VTCM address or in-place */
 static inline uint8_t *supernode_filtbuf_location(
 	struct nn_graph *nn,
-	struct supernode_info *info,
+	struct supernode_info_new *info,
 	int pingpong,
 	const uint8_t *weights_in,
 	const uint32_t inner_weight_size)
 {
-#ifdef V65
-	if (inner_weight_size <= (nn->vtcm_size-VTCM_CIRCBUF_SIZE)) {
-		return nn->vtcm_ptr;
+#if defined(V65) || defined(V66)
+	if (info->use_v65 || info->use_v66) {
+		if (/* nn->vtcm_ptr && */ (inner_weight_size <= (nn->vtcm_size-VTCM_CIRCBUF_SIZE))) {
+			return nn->vtcm_ptr;
+		} else {
+			logmsg(nn,1,"weights %ld dont fit @ %p",inner_weight_size,nn->vtcm_ptr);
+		} 
+	} else {
+		logmsg(nn,1,"V65/V66 compilation, but not using v65 or v66, do not copy to vtcm");
 	}
-	logmsg(nn,1,"weights %ld dont fit @ %p",inner_weight_size,nn->vtcm_ptr);
 #endif
-
-#ifndef V66
 	/* For now, just in-place */
 	return (uint8_t *)weights_in;
-#else
-	FIXME
-	return ((uint8_t *)nn_os_get_vtcm()) + info->weight_batch_size*pingpong;
-#endif
 }
 
 
@@ -788,7 +855,7 @@ static void __attribute__((unused)) debug_value_range(
 void supernode_zapslice(struct nn_graph *nn, void * vinfo)
 {
   struct workitem *work = vinfo;
-  struct supernode_info *info = work->info;
+  struct supernode_info_new *info = work->info;
 
   int rl_depths = work->zap_rl_depths;
   int pad_left  = work->zap_left_size;
@@ -859,7 +926,7 @@ static void supernode_execute_hvx_conv_work(struct nn_graph *nn, void * vinfo)
 {
 	struct workitem *work = vinfo;
 	struct nn_node *self = work->self;
-	struct supernode_info *info = self->opaque;
+	struct supernode_info_new *info = self->opaque;
 
 	int32_t start_line = work->start_line;
 	int32_t stop_line = work->stop_line;
@@ -867,7 +934,7 @@ static void supernode_execute_hvx_conv_work(struct nn_graph *nn, void * vinfo)
 	int32_t in_next_row = info->in_next_row;
 	int32_t in_depth = info->in_depth;
 	int32_t in_next_d32 = info->in_next_d32;
-	int32_t out_width = info->out_width;
+	int32_t out_width = info->out_width_processed;
 	int32_t out_next_row = info->out_next_row;
 	int32_t filt_width = info->filt_width;
 	int32_t filt_height = info->filt_height;
@@ -900,7 +967,7 @@ static void supernode_execute_hvx_conv_work(struct nn_graph *nn, void * vinfo)
 		int32_t words[64];
 	} minmax;
 
-	int w, out_row, cbuf_row; 
+	int w, out_row; 
 
 	//logmsg(nn,2,"min: %d max: %d",info->minval,info->maxval);
 
@@ -950,7 +1017,9 @@ static void supernode_execute_hvx_conv_work(struct nn_graph *nn, void * vinfo)
 	/*-------------------------------------------------------------*/
 	/*              V65 Implementations                            */
 	/*-------------------------------------------------------------*/
+#ifdef V65
 	if (use_v65) {
+        int cbuf_row;
 		//int early1 = work->weight_chunks > 1 && work->weight_chunks & 1;
 		//int early2 = work->weight_chunks > 2 && !(work->weight_chunks & 1) ;
 
@@ -977,7 +1046,8 @@ static void supernode_execute_hvx_conv_work(struct nn_graph *nn, void * vinfo)
 		} else {
 			errlog(nn,"%ld accumulators not supported",info->num_accs);
 		}
-           
+		logmsg(nn,2,"repstream %p input %p to circ buf %p",repstream,input,work->circ_buf);
+		if (work->circ_buf == 0) logmsg(nn,0,"oops: circ buff NULL");
 		(*repstream)(
 			input,
 			work->circ_buf,
@@ -989,7 +1059,7 @@ static void supernode_execute_hvx_conv_work(struct nn_graph *nn, void * vinfo)
 			buf_height,
 			info->in_offset, info->num_accs);
 
-		nn_sem_wait(work->do_conv);
+		if (work->do_conv) nn_sem_wait(work->do_conv);
 
 		int32_t n_in_rows = Q6_R_min_RR(filt_height, stride_height); 
 
@@ -1001,6 +1071,7 @@ static void supernode_execute_hvx_conv_work(struct nn_graph *nn, void * vinfo)
 
 			//if(early1 && cbuf_row == 0) nn_sem_wait(work->copy_done);
 			w = 0; 
+			//logmsg(nn,0,"v65 w=%d weight_chunks=%d conv input=%p",w,weight_chunks,work->circ_buf + cbuf_row*buf_width);
 			if(weight_chunks & 1) {  //1st time round and weight chunks odd
 
 				(*func32) ( //gvconv2dbbb_circ_d32_v65_asm
@@ -1069,36 +1140,13 @@ static void supernode_execute_hvx_conv_work(struct nn_graph *nn, void * vinfo)
 			cbuf_row += stride_height;
 			if (cbuf_row >= buf_height) cbuf_row -= buf_height;
 		}//end acts
+		//nn_checkpoint_arrival(nn,self,&info->conv_slices[work->start_chunk].checkpoint);
 		if(!work->last_chunk){
-			nn_sem_post(work->conv_done);	// post this
-			done_sem = NULL;				// and not that
+			if (work->conv_done) nn_sem_post(work->conv_done);	// post this
 		}
-	} else { 
-#ifdef V66
-		for (w = 0; w < weight_chunks; w++) {
-			gvconv2dbbb_v66_asm(
-				input,
-				weights + w*weight_batch_size,
-				output + w*out_next_d32,
-				in_next_d32>>5,
-				out_next_row*skip_lines,
-				out_width-4*skip_col,
-				Q6_R_combine_RlRl(stride_height*skip_lines,stride_width),
-				in_depth,
-				filt_width,
-				filt_height,
-				n_lines,
-				biasbuf+w*32,
-				suma_buf+start_line*next_suma_row/sizeof(suma_buf[0]),	// doesn't work with skip lines?
-				next_suma_row*skip_lines,	// doesn't work with skip lines?
-				minmax.words,
-				recip_val,
-				32*((4-out_left_junk)&3),
-				skip_col);
-			nn_atomic_min(&info->minval,minmax.words[32]);
-			nn_atomic_max(&info->maxval,minmax.words[0]);
-		}
-#else
+	} else 
+#endif //#ifdef V65
+    { 
     /*-------------------------------------------------------------*/
     /*              V60 Implementations                            */
     /*-------------------------------------------------------------*/
@@ -1108,7 +1156,6 @@ static void supernode_execute_hvx_conv_work(struct nn_graph *nn, void * vinfo)
 		int32_t * suma_scratch = NULL;
 		// actual suma goes here. Current vertical extent of current batch.
 		int32_t *suma = work->suma_buf + start_line*next_suma_row/sizeof(int32_t);
-
 
 
 		int32_t  proc_rows = work->num_lines;
@@ -1124,17 +1171,17 @@ static void supernode_execute_hvx_conv_work(struct nn_graph *nn, void * vinfo)
 			int32_t next_n_lines = Q6_R_min_RR(stop_line-out_row-proc_rows, proc_rows);
 			int32_t next_n_in_rows = (next_n_lines-1)*stride_height + filt_height; 
 
-			// compute SUMA
-			if (work->need_initialize_suma) {
-
+			if( work->need_initialize_suma ){
+				/* OK do sumabuf.
+				 */
 				if(filt_width == 1 && filt_height == 1 && ENABLE_FASTSUMA_1x1) {
 					gsum_asm(
 						input,
 						suma,
-						in_next_d32>>5, 
-						in_depth, 
-						n_lines, 
-						stride_height, 
+						in_next_d32>>5,
+						in_depth,
+						n_lines,
+						stride_height,
 						info->filt_offset);
 				} else {
 					if( suma_scratch == NULL){
@@ -1147,25 +1194,25 @@ static void supernode_execute_hvx_conv_work(struct nn_graph *nn, void * vinfo)
 					// four lines of "scratch128xW; the rest is for integral
 					int32_t *scratch_128xW = suma_scratch;
 					int32_t *integral_tmp = scratch_128xW + info->suma_width*4;
-
+					// zero the first row of integral_tmp
 					vmemset_asm(integral_tmp, 0, info->suma_width*sizeof(int32_t));
 
 					gvint_asm(
 						input,
-						integral_tmp + info->suma_width, 
+						integral_tmp + info->suma_width, 	// second row of integral_tmp
 						in_next_d32,
 						in_next_row,
-						info->suma_width,    
+						info->suma_width,
 						in_depth,
 						n_in_rows,
-						scratch_128xW,             // extra scratch buffer
+						scratch_128xW,             // extra scratch buffer (4 rows)
 						info->filt_offset);
 
 					gvsuma_asm(
-						integral_tmp, 
+						integral_tmp,
 						suma,
-						info->suma_width,    
-						next_suma_row,  
+						info->suma_width,
+						next_suma_row,
 						stride_height,
 						filt_width,
 						filt_height,
@@ -1173,9 +1220,13 @@ static void supernode_execute_hvx_conv_work(struct nn_graph *nn, void * vinfo)
 						filt_height*filt_width*in_depth*info->filt_offset*info->in_offset);
 				}
 			} else {
+				//logmsg(nn,2,"waiting for progress...");
+				//nn_progress_waitfor(suma_progress,suma_progress_need);
+				// prefetch, if it was already done.
+				// likely just been found.
 				l2fetch(suma+info->suma_start, next_suma_row, info->in_width*sizeof(int32_t), n_lines);
+				//logmsg(nn,2,"progress complete...");
 			}
-
 			// convolution
 			for (w = 0; w < weight_chunks; w++) {
 
@@ -1191,7 +1242,6 @@ static void supernode_execute_hvx_conv_work(struct nn_graph *nn, void * vinfo)
 						if (next_n_lines > 0)
 							l2fetch(input+(proc_rows*stride_height+pf_offset)*in_next_row, in_next_row, in_next_row, next_n_in_rows-pf_offset);
 				}
-
 				gvconv2dbbb_v60_asm(
 					input,
 					weights + w*weight_batch_size,
@@ -1219,13 +1269,10 @@ static void supernode_execute_hvx_conv_work(struct nn_graph *nn, void * vinfo)
 		// release suma_scratch, if needed.
 		if( suma_scratch != NULL)
 			bufpool_release( &info->bufpool_suma_scratch, suma_scratch_index);
-#endif
 	}
-#ifndef V66
 	gvrmaxmin(minmax.words);
 	nn_atomic_min(&info->minval,minmax.words[32]);
 	nn_atomic_max(&info->maxval,minmax.words[ 0]);
-#endif
 
 	my_cycles = nn_os_get_cycles(nn) - start_cycles;
 	nn_atomic_add64(&info->cycles,my_cycles);
@@ -1237,15 +1284,294 @@ done:
 	if (use_v65) {
 		if (work->circ_buf) nn_os_bufstack_push(&info->bufstack,work->circ_buf);
 	}
-	if( done_sem != NULL)
-		nn_sem_post(done_sem);
+	nn_checkpoint_arrival(nn,self,&info->conv_slices[work->start_chunk].checkpoint);
+	if (done_sem != NULL) nn_sem_post(done_sem);
+}
+
+
+/*
+    The v66 - Hana - convolution code
+ */
+
+
+static void supernode_execute_hvx_conv_work_v66(struct nn_graph *nn, void * vinfo)
+{
+#ifdef V66
+	struct workitem *work = vinfo;
+	struct nn_node *self = work->self;
+	struct supernode_info_new *info = self->opaque;
+	//int whoami = info->whoami;
+	int32_t start_line = work->start_line;
+	int32_t stop_line = work->stop_line;
+	int32_t skip_lines = work->skip_lines;
+	int32_t in_next_row = info->in_next_row;
+	int32_t in_depth = info->in_depth;
+	int32_t in_next_d32 = info->in_next_d32;
+	//int32_t in_left_skip = info->in_left_skip;
+	int32_t out_width = info->out_width;
+	int32_t out_next_row = info->out_next_row;
+	//int32_t out_depth = info->out_depth;
+	//int32_t out_next_d32 = info->out_next_d32;
+	//int32_t out_height = info->out_height;
+	int32_t filt_width = info->filt_width;
+	int32_t filt_height = info->filt_height;
+	int32_t stride_width = info->stride_width;
+	int32_t stride_height = info->stride_height;
+
+	const uint8_t *input = work->input + start_line*in_next_row*stride_height;
+	const uint8_t *weights = work->weights;
+	const int32_t *biasbuf = work->biases;
+	uint8_t *output = work->output + start_line * out_next_row;
+
+	int32_t recip_val = info->recip_val;
+	//int32_t recip_shamt = info->recip_shamt;
+	int32_t out_left_junk = info->out_left_junk;
+	int32_t skip_col = info->skip_col;
+	int32_t weight_chunks = work->weight_chunks;
+				
+	int out_row, w;
+	int32_t out_next_d32 = info->out_next_d32;
+//	int32_t weight_batch_size = info->weight_batch_size;
+	//uint64_t start_cycles;
+	//uint64_t my_cycles;
+	union {
+		HVX_Vector vec[2];
+		int32_t words[64];
+	} minmax;
+
+	if (unlikely(info->use_v66 != 1)) {
+		errlog(nn,"trying to use v66 convolution but not in v66 mode!!");
+		return;
+	}
+	/* EJP: I think this works, total lines - start line / stride, but round up */
+	/* We may need to factor in stride in addition to this */
+	//logmsg(nn,2,"min: %d max: %d",info->minval,info->maxval);
+	//start_cycles = nn_os_get_cycles(nn);
+
+	minmax.vec[1] = Q6_V_vsplat_R(0x7FFFFFFF);
+	minmax.vec[0] = Q6_V_vnot_V(minmax.vec[1]);
+
+
+
+	if (start_line >= stop_line) return; 
+	/* Prefetch activation chunk */
+	if (0) logmsg(nn,0,"l2fetch %p and %d %d",
+		input+start_line*in_next_row*stride_height,
+		in_next_row,
+		(stop_line - start_line + (skip_lines-1)) / skip_lines);
+#if 1
+	logmsg(nn,1,"start/stop/skip_lines: %d/%d/%d output %p input %p filt %p bias %p in_depth %d in_next_row %d in_next_d32 %d out_width %d out_next_row %d out_next_d32 %d filt_width %d filt_height %d stride_width %d stride_height %d recip_shamt %d recip_val 0x%08x minmax_buf %p out_left_junk=%d in_left_skip=%d dummy_zeros=%p n_lines=%d skip_col=%d weight_chunks=%d",
+			start_line,
+			stop_line,
+			skip_lines,
+			output,
+			input,
+			weights,
+			biasbuf,
+			in_depth,
+			in_next_row,
+			in_next_d32,
+			out_width,
+			out_next_row,
+			out_next_d32,
+			filt_width,
+			filt_height,
+			stride_width,
+			stride_height,
+			0,
+			recip_val,
+			minmax.words,
+			out_left_junk,
+			info->in_left_skip,
+			NULL,
+			(stop_line - start_line + (skip_lines-1)) / skip_lines,
+                        skip_col,
+			weight_chunks);
+#endif
+    /*-------------------------------------------------------------*/
+    /*              V66 Implementation                             */
+    /*-------------------------------------------------------------*/
+	int proc_rows = 2;
+	int next_proc_rows = work->num_lines;
+	int pf_offset = Q6_R_max_RR(filt_height-stride_height, 0);
+	int n_lines = Q6_R_min_RR(stop_line-start_line, proc_rows); 
+	int n_in_rows = (n_lines-1)*stride_height + filt_height;
+
+	//logmsg(nn, 2, "convolving chunk # ptr %08x", (int) (weights+0*weight_batch_size));
+	l2fetch(input, in_next_row, in_next_row, n_in_rows);
+
+	if(stride_width == 2) {
+		for(out_row = start_line; out_row < stop_line; ) {
+			int next_n_lines = Q6_R_min_RR(stop_line-out_row-proc_rows, next_proc_rows);
+			//wait_for_l2fetch();
+			if(next_n_lines > 0) {
+				int next_n_in_rows = (next_n_lines-1)*stride_height + filt_height;
+				l2fetch(input+(proc_rows*stride_height+pf_offset)*in_next_row, in_next_row, in_next_row, next_n_in_rows-pf_offset);
+			}
+			gvconv2dbbb_v66_asm(
+				input,
+				(int8_t *)weights,
+				output,
+				in_next_d32>>5,
+				out_next_row,
+				out_width - 0*skip_col,
+				Q6_R_combine_RlRl(stride_height*skip_lines,stride_width),
+				in_depth,
+				filt_width,
+				filt_height,
+				n_lines,
+				biasbuf,
+				minmax.words,
+				work->recip, //recip_val,
+				32*((4-out_left_junk)&3),
+				32*info->in_left_skip+(stride_width == 2),
+				out_next_d32,weight_chunks,
+                                work->equalize);
+
+			input  += proc_rows*in_next_row*stride_height;
+			output += proc_rows*out_next_row;
+			n_lines = next_n_lines;
+			out_row += proc_rows;
+			proc_rows = next_proc_rows;
+		}//end activation rows
+
+	} else if(work->fix_overcompute==0) {
+
+		for(out_row = start_line; out_row < stop_line; ) {
+			int next_n_lines = Q6_R_min_RR(stop_line-out_row-proc_rows, next_proc_rows);
+			//wait_for_l2fetch();
+			if(next_n_lines > 0) {
+				int next_n_in_rows = (next_n_lines-1)*stride_height + filt_height;
+				l2fetch(input+(proc_rows*stride_height+pf_offset)*in_next_row, in_next_row, in_next_row, next_n_in_rows-pf_offset);
+			}
+
+			gvconv2dbbbs1_v66_asm(
+				input,
+				(int8_t *)weights,
+				output,
+				in_next_d32>>5,
+				out_next_row,
+				out_width - skip_col,
+				Q6_R_combine_RlRl(stride_height*skip_lines,stride_width),
+				in_depth,
+				filt_width,
+				filt_height,
+				n_lines,
+				biasbuf,
+				minmax.words,
+				work->recip, //recip_val,
+				32*((4-out_left_junk)&3),
+				skip_col,
+				out_next_d32, weight_chunks,
+                                work->equalize);
+                
+			input  += proc_rows*in_next_row*stride_height;
+			output += proc_rows*out_next_row;
+			n_lines = next_n_lines;
+			out_row += proc_rows;
+			proc_rows = next_proc_rows;
+		}//end activation rows
+
+	} else if(work->fix_overcompute==1) {
+
+		for(out_row = start_line; out_row < stop_line; ) {
+			int next_n_lines = Q6_R_min_RR(stop_line-out_row-proc_rows, next_proc_rows);
+			//wait_for_l2fetch();
+			if(next_n_lines > 0) {
+				int next_n_in_rows = (next_n_lines-1)*stride_height + filt_height;
+				l2fetch(input+(proc_rows*stride_height+pf_offset)*in_next_row, in_next_row, in_next_row, next_n_in_rows-pf_offset);
+			}
+
+			//int windex = (work->start_chunk + w) % work->vtcm_chunks;
+			gvconv2dbbbs1x4_v66_asm(
+				input,
+				(int8_t *)weights,
+				output,
+				in_next_d32>>5,
+				out_next_row,
+				out_width,
+				Q6_R_combine_RlRl(stride_height*skip_lines,stride_width),
+				in_depth,
+				filt_width,
+				filt_height,
+				n_lines,
+				biasbuf,
+				minmax.words,
+				work->recip, //recip_val,
+				0,
+				0,
+				out_next_d32,weight_chunks,
+                                work->equalize);
+
+			input  += proc_rows*in_next_row*stride_height;
+			output += proc_rows*out_next_row;
+			n_lines = next_n_lines;
+			out_row += proc_rows;
+			proc_rows = next_proc_rows;
+		}//end activation rows
+
+	} else { //handle cases of in_depth = 48 80 etc.
+
+		for(out_row = start_line; out_row < stop_line; ) {
+			int next_n_lines = Q6_R_min_RR(stop_line-out_row-proc_rows, next_proc_rows);
+			//wait_for_l2fetch();
+			if(next_n_lines > 0) {
+				int next_n_in_rows = (next_n_lines-1)*stride_height + filt_height;
+				l2fetch(input+(proc_rows*stride_height+pf_offset)*in_next_row, in_next_row, in_next_row, next_n_in_rows-pf_offset);
+			}
+
+			//int windex = (work->start_chunk + w) % work->vtcm_chunks;
+			gvconv2dbbbs1_d16_v66_asm(
+				input,
+				(int8_t *)weights,
+				output,
+				in_next_d32>>5,
+				out_next_row,
+				out_width - skip_col,
+				Q6_R_combine_RlRl(stride_height*skip_lines,stride_width),
+				in_depth,
+				filt_width,
+				filt_height,
+				n_lines,
+				biasbuf,
+				minmax.words,
+				work->recip, //recip_val,
+				32*((4-out_left_junk)&3),
+				skip_col,
+				out_next_d32,weight_chunks,
+                                work->equalize);
+
+			input  += proc_rows*in_next_row*stride_height;
+			output += proc_rows*out_next_row;
+			n_lines = next_n_lines;
+			out_row += proc_rows;
+			proc_rows = next_proc_rows;
+		}//end activation rows
+	}
+	gvrmaxmin(minmax.words);
+        logmsg(nn,2,"scaling back max by %f",info->weight_scale_factor);
+	nn_atomic_min(&info->minval,minmax.words[32]); 
+	nn_atomic_max(&info->maxval,minmax.words[ 0]); 
+
+	//logmsg(nn,2," posting back conv done sem %d sem %08x", 0, (int)(work->conv_done + 0));
+	for(w=0; w < weight_chunks; w++) {
+		//int windex = (work->start_chunk + w) % work->vtcm_chunks;
+		nn_checkpoint_arrival(nn,self,&info->conv_slices[work->start_chunk + w].checkpoint);
+		//nn_sem_post(work->conv_done + windex);
+	}
+	//my_cycles = nn_os_get_cycles(nn) - start_cycles;
+	//nn_atomic_add64(&info->cycles,my_cycles);
+	//logmsg(nn,2,"min=%d(%d) max=%d(%d) cycles=%lld",minmax.words[32],info->minval,minmax.words[0],info->maxval,my_cycles);
+	//debug_value_range(nn,output+start_line*out_next_row,out_width,stop_line-start_line,out_next_row*skip_lines);
+#endif
+	return;
 }
 
 #if 0
 static void supernode_execute_hvx_suma_work(struct nn_graph *nn, void *vinfo)
 {
     struct workitem *work = vinfo;
-    const struct supernode_info *info = work->info;
+    const struct supernode_info_new *info = work->info;
     int32_t in_depth = info->in_depth;
     int32_t in_next_row = info->in_next_row;
     int32_t in_next_d32 = info->in_next_d32;
@@ -1306,19 +1632,26 @@ static void supernode_execute_hvx_suma_work(struct nn_graph *nn, void *vinfo)
 }
 #endif
 
+#if 0
 static void supernode_execute_hvx_work(struct nn_graph *nn, void * vinfo)
 {
 	struct workitem *work = vinfo;
+	struct supernode_info_new *info = work->info;
 
-	supernode_execute_hvx_conv_work(nn, work);
+        if(info->use_v66)
+	    supernode_execute_hvx_conv_work_v66(nn, work);
+        else
+	    supernode_execute_hvx_conv_work(nn, work);
 
+        return;
 }
-
+#endif
+#if 0
 static void __attribute__((unused)) supernode_execute_hvx_work_v66s1(struct nn_graph *nn, void * vinfo)
 {
 	struct workitem *work = vinfo;
 	struct nn_node *self = work->self;
-	struct supernode_info *info = self->opaque;
+	struct supernode_info_new *info = self->opaque;
 	//int whoami = info->whoami;
 	const uint8_t *input = work->input;
 	const uint8_t *weights = work->weights;
@@ -1412,14 +1745,17 @@ static void __attribute__((unused)) supernode_execute_hvx_work_v66s1(struct nn_g
 	//logmsg(nn,0,"posting to %p",work->donesem);
 	nn_sem_post(work->donesem);
 }
+#endif
 
 static inline int supernode_reset_work_items(
 	struct nn_node *self,
 	struct nn_graph *nn,
-	struct supernode_info *info)
+	struct supernode_info_new *info)
 {
 	if (info->work_items) nn_free(info->work_items);
+	if (info->work_list) nn_free(info->work_list);
 	info->work_items = NULL;
+	info->work_list = NULL;
 	info->n_work_items = 0;
 	info->workitems_alloc = 0;
 	return 0;
@@ -1428,7 +1764,7 @@ static inline int supernode_reset_work_items(
 static inline int supernode_softreset_work_items(
 	struct nn_node *self,
 	struct nn_graph *nn,
-	struct supernode_info *info)
+	struct supernode_info_new *info)
 {
 	info->n_work_items = 0;
 	return 0;
@@ -1437,29 +1773,48 @@ static inline int supernode_softreset_work_items(
 static inline int supernode_add_work_item(
 	struct nn_node *self, 
 	struct nn_graph *nn, 
-	struct supernode_info *info,
+	struct supernode_info_new *info,
 	const struct workitem work /* BY VAL */)
 {
 	struct workitem *witems = info->work_items;
-	int new_work_items = info->n_work_items+1;
-	int new_work_size = new_work_items*sizeof(work);
+	int this_index = info->n_work_items;
+	int new_work_items = this_index+1;
 
-	if( new_work_size > info->workitems_alloc)
+	/* Round up to multiple of 16 work items */
+	if (new_work_items > info->workitems_alloc)
 	{
-		// reallocate (or first alloc when witems=NULL)
-		// round up to multiple of 512; at least 1536
-		new_work_size = (new_work_size <= 1536)? 1536 : ( (new_work_size+511) & ~511);
+		int new_work_alloc = (new_work_items + 15) & ~15;
 		struct workitem *new_data;
-		if ((new_data=nn_realloc(witems,new_work_size)) == NULL) {
+		if ((new_data=nn_realloc(witems,new_work_alloc*sizeof(*new_data))) == NULL) {
 			return errlog(nn,"realloc fails");
 		}
-		info->workitems_alloc = new_work_size;
+		info->workitems_alloc = new_work_alloc;
 		info->work_items = witems = new_data;
+#if 1
+		nn_os_workitem_t *new_list;
+		if ((new_list=nn_realloc(info->work_list,new_work_alloc*sizeof(*new_list))) == NULL) {
+			return errlog(nn,"realloc fails");
+		}
+		info->work_list = new_list;
+#endif
 	}
-
-	witems[new_work_items-1] = work;
+	witems[this_index] = work;
+	witems[this_index].my_idx = this_index;
 	info->n_work_items = new_work_items;
-	return 0;
+	
+	return this_index;
+}
+
+static inline void supernode_compile_worklist(
+	struct nn_graph *nn,
+	struct supernode_info_new *info,
+	struct nn_node *self)
+{
+	int i;
+	for (i = 0; i < info->n_work_items; i++) {
+		info->work_list[i].f = info->work_items[i].new_execute;
+		info->work_list[i].arg = &info->work_items[i];
+	};
 }
 
 int supernode_execute_workitem_prefetch(struct workitem *work, struct nn_node *node, struct nn_graph *nn)
@@ -1469,78 +1824,68 @@ int supernode_execute_workitem_prefetch(struct workitem *work, struct nn_node *n
 	return 0;
 }
 
-#define WEIGHT_COPY_BLOCK (1024*16)
-
-#ifdef V65
-static void hvx_blockcopy(uint8_t *out,const uint8_t *in, int size)
-{
-    int b;
-    int block = Q6_R_min_RR(size, WEIGHT_COPY_BLOCK);
-
-    l2fetch(in, 128, 128, block>>7);
-
-    for (b = 0; b < size; b+= WEIGHT_COPY_BLOCK) {
-        int next_block = Q6_R_min_RR(size-b-block, WEIGHT_COPY_BLOCK);
-
-        wait_for_l2fetch();
-        if (next_block > 0) l2fetch(in + block, 128, 128, next_block>>7);
-
-        vmemcpy_128(out, in, block);
-        in  += block;
-        out += block;
-        block = next_block;
-    }
-}
-#endif
-
+#if 1
+/* EJP: used in dwise supernode currently */
 static void supernode_hvx_copy_wait(struct nn_graph *nn, void * vinfo)
 {
 	/* Copy or prefetch */
 #ifdef V65
 	struct workitem *work = vinfo;
-#if 0
-        int block = Q6_R_min_RR((work->copy_size+work->weight_chunks-1)/work->weight_chunks,WEIGHT_COPY_BLOCK);
-        int early = (work->weight_chunks > 1 && work->weight_chunks & 1) || (work->weight_chunks > 2 && !(work->weight_chunks & 1)) ;
-
-        int num_chunks = (work->copy_size)/block;
-        int last_size = work->copy_size-(num_chunks-1)*block;
-//      logmsg(nn,0,"vtcm weight copy block to %p from %p, size=%lu",work->copy_out,work->copy_in,work->copy_size);
-        if(num_chunks > 1) for (i=0 ; i < num_chunks-1; i++) {
-                // prefetch the next block
-                l2fetch(work->copy_in+(i+1)*block,128,128,block/128);
-                // then copy this block
-                vmemcpy_weights_asm(work->copy_out+i*block,
-                                    work->copy_in +i*block,
-                                    block);
-                // wait for PF to be done
-		wait_for_l2fetch();
-                //printf("%d l2fetch %d copy %d\n",i, size, WEIGHT_COPY_BLOCK);
-        }
-        // remainder
-        if(early) {
-        	nn_sem_post_n_times( work->do_conv,  work->threads);
-        }
-        vmemcpy_weights_asm(work->copy_out+(num_chunks-1)*block,
-                            work->copy_in +(num_chunks-1)*block,
-                            last_size);
-        nn_sem_post_n_times( (early ? work->copy_done: work->do_conv), work->threads);
-#else
-    hvx_blockcopy(work->copy_out, work->copy_in, work->copy_size);
+    nn_graph_hvx_blockcopy(work->copy_out, work->copy_in, work->copy_size);
 
     nn_sem_post_n_times( work->do_conv,  work->threads);
-#endif
 
-#endif
-
-#ifdef V66
-	//logmsg(nn,0,"V66 weight copy %p <- %p (%d bytes)",work->copy_out,work->copy_in,work->copy_size);
-	asm volatile (
-		"M0 = %2; memcpy(%0,%1,M0)"
-	::"r"(work->copy_out),"r"(work->copy_in),"r"(work->copy_size-1)
-	:"m0");
 #endif
 	return;
 }
+#endif
+
+#if 0
+static inline void supernode_do_memcpy(struct nn_graph *nn, uint8_t *dst, const uint8_t *src, uint32_t size)
+{
+#ifdef V66
+	logmsg(nn,2,"copy %d bytes %p --> %p",size,src,dst);
+        asm volatile (
+                "M0 = %2; memcpy(%0,%1,M0)"
+        ::"r"(dst),"r"(src),"r"(size-1)
+        :"m0");
+	logmsg(nn,2,"memcpy complete",size,src,dst);
+#elif defined(V65)
+	logmsg(nn,2,"copy %d bytes %p --> %p",size,src,dst);
+	nn_graph_hvx_blockcopy(dst,src,size);
+	logmsg(nn,2,"memcpy complete",size,src,dst);
+#endif
+}
+#endif
+
+#if 0
+//do the memcpy from ddr to vtcm
+int supernode_memcpy(struct workitem *work, struct nn_node *node, struct nn_graph *nn)
+{
+#if defined(V66) || defined(V65)
+        if (work->copy_out == NULL) return 0;
+        if(work->wait_before) {
+          nn_sem_wait_n_times(work->conv_done, work->threads);
+        }
+        logmsg(nn,2,"memcpy'ing %p -> %p %ld bytes. waited on: %p",work->copy_in,work->copy_out,work->copy_size,work->conv_done);
+	nn_graph_memcpy(nn,work->copy_out,work->copy_in,work->copy_size);
+#endif
+        return 0;
+}
+
+//wait for the final convoltions to complete
+int supernode_check_sems(struct workitem *work, struct nn_node *node, struct nn_graph *nn)
+{
+#ifdef V66
+        int j;
+        for(j=0; j < work->weight_chunks; j++) {
+           logmsg(nn,2,"pending %08x ",(int)(work->conv_done+j));
+           nn_sem_wait_n_times(work->conv_done+j, work->threads);
+        }
+#endif
+        return 0;
+}
+#endif
 
 // This workitem does the following:
 //     (1) wait for 'conv_done', 'threads' times  (but only if conv_done is not NULL)
@@ -1555,7 +1900,8 @@ static void supernode_hvx_copy_wait(struct nn_graph *nn, void * vinfo)
 // The 'wait for conv_done' is used when this is not the first copy, in order to enure
 //  the previous convolutions are finished.
 
-
+#if 1
+/* EJP: used in dwise supernode currently */
 int supernode_execute_workitem_copy(struct workitem *work, struct nn_node *node, struct nn_graph *nn)
 {
 	nn_sem_t * conv_done = work->conv_done;
@@ -1571,11 +1917,12 @@ int supernode_execute_workitem_copy(struct workitem *work, struct nn_node *node,
 // add a "weight_copy" workitem.
 // if wait_before !=0, there will be a sem_wait off semaphores[2] prior
 // to triggering the copy.
+// FIXME: EJP: need to change to have this triggered by checkpoint
 //
-static inline __attribute__((unused)) void supernode_add_weight_copy(
+static inline __attribute__((unused)) int supernode_add_weight_copy(
 	struct nn_node *self,
 	struct nn_graph *nn,
-	struct supernode_info *info,
+	struct supernode_info_new *info,
 	int wait_before,
 	const uint8_t *input,
 	int weight_batch_size,
@@ -1587,20 +1934,22 @@ static inline __attribute__((unused)) void supernode_add_weight_copy(
 	work.copy_out = nn->vtcm_ptr;
 	work.execute = supernode_execute_workitem_copy;
 //	work.weight_chunks = weight_chunks;
-    work.copy_size = weight_chunks*weight_batch_size;
+        work.copy_size = weight_chunks*weight_batch_size;
 	work.threads = threads;
 	work.do_conv = &info->semaphores[1];		// post this after, * threads
-	work.conv_done =
-			wait_before ?  &info->semaphores[2]		// wait for this before, * threads
-			: NULL;										// no wait
+	work.conv_done = wait_before ?  &info->semaphores[2]	// wait for this before, * threads
+			: NULL;					// no wait
 //	work.copy_done = &info->semaphores[3];
-	supernode_add_work_item(self,nn,info,work);
+	return supernode_add_work_item(self,nn,info,work);
 }
-
-static inline __attribute__((unused)) void supernode_add_l2fetch(
+#endif
+//
+// Add an l2fetch work item
+// This needs to be triggered from checkpoint
+static inline __attribute__((unused)) int supernode_add_l2fetch(
 	struct nn_node *self,
 	struct nn_graph *nn,
-	struct supernode_info *info,
+	struct supernode_info_new *info,
 	const uint8_t *input,
 	int width,
 	int height)
@@ -1611,30 +1960,97 @@ static inline __attribute__((unused)) void supernode_add_l2fetch(
 	work.pf_stride = width;
 	work.pf_height = height;
 	work.execute = supernode_execute_workitem_prefetch;
-	supernode_add_work_item(self,nn,info,work);
+	return supernode_add_work_item(self,nn,info,work);
 }
 
-
-static inline void supernode_weights(
+#if 0
+// EJP: FIXME: wait for all convs to complete.  Should be able to be triggered by checkpoint?
+static inline void supernode_convs_done(
         struct nn_node *self,
         struct nn_graph *nn,
-        struct supernode_info *info,
-        int wait_before,	// on v65, 1 => need wait for prev convs to finish; 0=> no wait
+        struct supernode_info_new *info,
+        uint32_t num_weight_chunks,
+        uint32_t threads)
+{
+#ifdef V66
+          struct workitem work;
+          work.info = info;
+          work.threads = threads;
+          work.weight_chunks = num_weight_chunks;
+          work.execute = supernode_check_sems;
+          work.conv_done = &info->semaphores[0];
+          logmsg(nn,2," check sem for conv %d", work.weight_chunks);
+          supernode_add_work_item(self,nn,info,work);
+#endif
+          return;
+}
+#endif
+
+// V66 version of adding weights to be copied.  
+#if 0
+static inline int supernode_weight_chunk(
+        struct nn_node *self,
+        struct nn_graph *nn,
+        struct supernode_info_new *info,
+        int wait_before,	// on v65/66, 1 => need wait for prev convs to finish; 0=> no wait
         const uint8_t *weights,
         uint32_t weight_chunk_size,
-        uint32_t weight_chunks, uint32_t threads)
+        uint32_t index,
+	uint32_t threads)
 {
-#ifdef V65
-        uint32_t weights_total = weight_chunk_size * weight_chunks;
-        if (weights_total <=  (nn->vtcm_size-VTCM_CIRCBUF_SIZE)) {
-                return supernode_add_weight_copy(self,nn,info,
-                		wait_before, weights,weight_chunk_size,weight_chunks,threads);
+#ifdef V66
+        logmsg(nn,2,"chunk size = %ld, chunk num = %ld", weight_chunk_size, index);
+
+        if (weight_chunk_size <= nn->vtcm_size) {
+
+          int vtcm_num;
+          struct workitem work = {0};
+          work.info = info;
+
+          vtcm_num = index % info->n_weight_batches; //num_weight_chunks;
+          work.threads = threads;
+          work.copy_in = weights + index*weight_chunk_size,  //set to zero to all get same weights
+          work.copy_out = (uint8_t *)nn->vtcm_ptr + vtcm_num*weight_chunk_size;
+          work.copy_size = weight_chunk_size;
+          work.conv_done = &info->semaphores[vtcm_num];
+          work.wait_before = wait_before;
+          work.execute = supernode_memcpy;
+          logmsg(nn,0," queue weights job %d src: %p dst: %p  continue %d sem %08x", index, work.copy_in,work.copy_out,vtcm_num, (int)work.conv_done);
+          return supernode_add_work_item(self,nn,info,work);
         }
-        logmsg(nn,1," cache only %ld %ld %08x", weights_total, nn->vtcm_size, (int) nn->vtcm_ptr);
+#endif
+        return supernode_add_l2fetch(self,nn,info,weights+index*weight_chunk_size,weight_chunk_size/32,32);
+}
+#endif
+
+
+#if 0
+/* STILL USED FOR DWISE */
+/* OK, DWISE now l2fetch */
+// <= V65 version of getting weights
+static inline int supernode_weights(
+        struct nn_node *self,
+        struct nn_graph *nn,
+        struct supernode_info_new *info,
+        int wait_before,	// on v65/66, 1 => need wait for prev convs to finish; 0=> no wait
+        const uint8_t *weights,
+        uint32_t weight_chunk_size,
+        uint32_t weight_chunks,
+	uint32_t threads)
+{
+#if defined(V65)
+	if (info->use_v65) {
+        	uint32_t weights_total = weight_chunk_size * weight_chunks;
+        	if (weights_total <=  (nn->vtcm_size-VTCM_CIRCBUF_SIZE)) {
+                	return supernode_add_weight_copy(self,nn,info,
+                			wait_before, weights,weight_chunk_size,weight_chunks,threads);
+        	}
+        	logmsg(nn,1," cache only %ld %ld %08x", weights_total, nn->vtcm_size, (int) nn->vtcm_ptr);
+	}
 #endif
         return supernode_add_l2fetch(self,nn,info,weights,weight_chunk_size/32,weight_chunks*32);
 }
-
+#endif
 
 #if 0
 static inline void supernode_add_padding_zap(
@@ -1650,6 +2066,7 @@ static inline void supernode_add_padding_zap(
 // x should be !=0 and not denormal.
 //
 static inline float
+__attribute__((unused))
 to_next_power_of_two( float x)
 {
 	// round the 32-bit code up to the next value in which the mantissa is all zero.
@@ -1662,18 +2079,49 @@ to_next_power_of_two( float x)
 	return uu.f;
 }
 
-int supernode_execute_workitem_check_for_retry(struct workitem *work, struct nn_node *node, struct nn_graph *nn)
+//
+// This is like to_next_power_of_two(x), but it finds the first power of 2^(1/4) which
+// is > x, and then returns the one after that. So y/x > 1.189 but <= 1.414
+// The binary mantissa will always be one of four specific values.
+//     1.0000 1.1892 1.4142 1.6718
+//
+static inline float
+__attribute__((unused))
+round_up_quarter_octave( float x)
 {
-	struct supernode_info *info = node->opaque;
+	float xk = x * 1.18920708f;
+	float mant = fabsf( flt_getfrac( xk) );		 // 0.5 .. 0.999999
+	// slice against  r/2, r^2/2, r^3/2  and round up to the one at the end of the interval.
+	if( mant >= 0.7071067691f){		/* r^2/2 */
+		mant = (mant >= 0.8408964276f) ? 1.0f: 0.8408964276f;		// r^3/2,  r^4/2, r^3/2
+	}else{
+		mant = (mant >= 0.594603539f) ? 0.7071067691f: 0.594603539f;			// r/2, r^2/2, r/2
+	}
+	float res = flt_ldexp( mant, flt_getexp(xk));
+	return copysignf( res, x);
+}
+
+// needs to wait for all workers to be done
+// Maybe change to just be called by worker thread
+static int supernode_execute_workitem_check_for_retry(struct workitem *work, struct nn_node *node, struct nn_graph *nn)
+{
+	struct supernode_info_new *info = node->opaque;
 	float newval;
 	float extreme_out;
+        float prod_level_size;
+        prod_level_size = info->prod_level_size/info->weight_scale_factor ;
+            
 	int recalc = 0;
 	if (info->minval_precalculated && info->maxval_precalculated) return 0;
+        if(info->use_v66) {
+            info->maxval *= 2.f*info->weight_scale_factor;
+            info->minval *= 2.f*info->weight_scale_factor;
+        }
 	if (unlikely(!info->maxval_precalculated && (info->maxval > info->max_valid_val))) {
 		/* Mark as needing retry and set new max value */
 		info->needs_retry = 1;
-		extreme_out = info->maxval * info->prod_level_size + info->out_minval;
-		newval = to_next_power_of_two( fmaxf(extreme_out, 0x1.0p-4f));
+		extreme_out = info->maxval * prod_level_size + info->out_minval;
+		newval = round_up_quarter_octave( fmaxf(extreme_out, 0x1.0p-4f));
 		logmsg(nn,1,"max too small, recalculating %d > %d / %f > %f... picking %f",
 			info->maxval,info->max_valid_val,extreme_out,info->out_maxval,newval);
 		info->out_maxval = newval;
@@ -1682,8 +2130,8 @@ int supernode_execute_workitem_check_for_retry(struct workitem *work, struct nn_
 	if (unlikely(!info->minval_precalculated && (info->minval < info->min_valid_val))) {
 		/* Mark as needing retry and set new min value */
 		info->needs_retry = 1;
-		extreme_out = info->minval * info->prod_level_size + info->out_minval;
-		newval = to_next_power_of_two( fminf(extreme_out, -0x1.0p-8f));
+		extreme_out = info->minval * prod_level_size  + info->out_minval;
+		newval = round_up_quarter_octave( fminf(extreme_out, -0x1.0p-8f));
 		logmsg(nn,1,"min too large, recalculating %d < %d / %f < %f... picking %f",
 			info->minval,info->min_valid_val,extreme_out,info->out_minval,newval);
 		info->out_minval = newval;
@@ -1708,19 +2156,18 @@ int supernode_execute_workitem_check_for_retry(struct workitem *work, struct nn_
 	return 0;
 }
 
-int supernode_execute_workitem_vector_dispatch(struct workitem *work, struct nn_node *node, struct nn_graph *nn)
+#if 0
+// Spawn off a convolution work job
+//int supernode_execute_workitem_vector_dispatch(struct workitem *work, struct nn_node *node, struct nn_graph *nn)
+void supernode_execute_workitem_vector_dispatch(struct nn_graph *nn, void *vwork) // struct workitem *work, struct nn_node *node, struct nn_graph *nn)
 {
+	//struct workitem *work = vwork;
 	//logmsg(nn,0,"hvx launch work semaphore %p",work->donesem);
-#ifdef V66
-//#if 0
-	if (work->info->stride_width == 1) nn_os_work_for_vector(nn,supernode_execute_hvx_work_v66s1,work);
-	else nn_os_work_for_vector(nn,supernode_execute_hvx_work,work);
-#else
-	nn_os_work_for_vector(nn,supernode_execute_hvx_work,work);
-#endif
-	return 0;
+	nn_os_work_for_vector(nn,supernode_execute_hvx_work,vwork);
 }
+#endif
 
+// Wait for threads to finish
 int supernode_execute_workitem_vector_join(struct workitem *work, struct nn_node *node, struct nn_graph *nn)
 {
 	nn_sem_wait_n_times( work->donesem, NUM_THREADS);
@@ -1736,95 +2183,107 @@ int supernode_execute_workitem_join_some(struct workitem *work, struct nn_node *
 static void supernode_execute_zap_right(struct nn_graph *nn, void * vinfo)
 {
 	struct workitem *work = vinfo;
-	const struct supernode_info *info = work->info;
+	const struct supernode_info_new *info = work->info;
 	uint8_t *rowstart = work->zap_right;
 	uint8_t val = work->zap_value;
 	uint32_t size = work->zap_right_size;
 	uint32_t in_next_d32 = info->in_next_d32;
 	uint32_t in_next_row = info->in_next_row;
-	logmsg(nn,2,"zapping right: %d bytes @ %p rl_depths=%d next_d32=%d next_row=%d val=%d height=%d",size*32,rowstart,work->zap_rl_depths,in_next_d32,in_next_row,val,work->zap_height);
-	padzap_part(rowstart,val,in_next_d32,work->zap_rl_depths,in_next_row,work->zap_height,size);
-
-#if 0
-	uint8_t *p;
-	int h,d;
-	logmsg(nn,2,"zapping right: %d bytes @ %p rl_depths=%d next_d32=%d next_row=%d val=%d height=%d",size,rowstart,work->zap_rl_depths,in_next_d32,in_next_row,val,work->zap_height);
-	for (h = 0; h < work->zap_height; h++) {
-		p = rowstart;
-		for (d = 0; d < work->zap_rl_depths; d++) {
-			//logmsg(nn,0,"zapping right: %d bytes @ %p",size,p);
-			memset(p,val,size);
-			p += in_next_d32;
-		}
-		rowstart += in_next_row;
+	int32_t batch_stride = info->in_next_batch;
+	int32_t n_batches = work->zap_batches;
+	int i;
+	logmsg(nn,2,"zapping right: %d*%d bytes @ %p rl_depths=%d next_d32=%d next_row=%d val=%d height=%d",work->zap_batches,size*32,rowstart,work->zap_rl_depths,in_next_d32,in_next_row,val,work->zap_height);
+	for (i = 0; i < n_batches; i++) {
+		padzap_part(rowstart,val,in_next_d32,work->zap_rl_depths,in_next_row,work->zap_height,size);
+		rowstart += batch_stride;
 	}
-#endif
-	nn_sem_post(work->donesem);
+	if (work->zap_checkpoint) nn_checkpoint_arrival(nn,work->self,work->zap_checkpoint);
+	if (work->donesem) nn_sem_post(work->donesem);
 }
 
 static void supernode_execute_zap_left(struct nn_graph *nn, void * vinfo)
 {
 	struct workitem *work = vinfo;
-	const struct supernode_info *info = work->info;
+	const struct supernode_info_new *info = work->info;
 	uint8_t *rowstart = work->zap_left;
 	uint8_t val = work->zap_value;
 	uint32_t in_next_d32 = info->in_next_d32;
 	uint32_t in_next_row = info->in_next_row;
-
-	logmsg(nn,2,"zapping left: %d bytes @ %p rl_depths=%d next_d32=%d next_row=%d val=%d height=%d",32*work->zap_left_size,rowstart,work->zap_rl_depths,in_next_d32,in_next_row,val,work->zap_height);
-	/* EJP: FIXME: change 4 to in_left_pad maybe? */
-	padzap_part(rowstart,val,in_next_d32,work->zap_rl_depths,in_next_row,work->zap_height+2,work->zap_left_size);
-
-#if 0
-	uint32_t size = 128;
-	uint8_t *p;
-	int h,d;
-	logmsg(nn,2,"zapping left: %d bytes @ %p rl_depths=%d next_d32=%d next_row=%d val=%d height=%d",size,rowstart,work->zap_rl_depths,in_next_d32,in_next_row,val,work->zap_height);
-	for (h = 0; h < work->zap_height+1; h++) {
-		p = rowstart;
-		for (d = 0; d < work->zap_rl_depths; d++) {
-			//logmsg(nn,0,"zapping left: %d bytes @ %p",size,p);
-			memset(p,val,size);
-			p += in_next_d32;
-		}
-		rowstart += in_next_row;
+	int32_t batch_stride = info->in_next_batch;
+	int32_t n_batches = work->zap_batches;
+	int i;
+	logmsg(nn,2,"zapping left: %d*%d bytes @ %p rl_depths=%d next_d32=%d next_row=%d val=%d height=%d",work->zap_batches,32*work->zap_left_size,rowstart,work->zap_rl_depths,in_next_d32,in_next_row,val,work->zap_height);
+	for (i = 0; i < n_batches; i++) {
+		padzap_part(rowstart,val,in_next_d32,work->zap_rl_depths,in_next_row,work->zap_height+2,work->zap_left_size);
+		rowstart += batch_stride;
 	}
-#endif
-	nn_sem_post(work->donesem);
+	if (work->zap_checkpoint) nn_checkpoint_arrival(nn,work->self,work->zap_checkpoint);
+	if (work->donesem) nn_sem_post(work->donesem);
 }
 
 static void __attribute__((unused)) supernode_execute_zap_toptop(struct nn_graph *nn, void * vinfo)
 {
 	struct workitem *work = vinfo;
-	logmsg(nn,2,"zapping toptop: %d bytes @ %p val=%d",work->zap_top_size,work->zap_top,work->zap_value);
-	vmemset_nt_asm(work->zap_top - work->info->in_next_row,work->zap_value,work->info->in_next_row);
-	nn_sem_post(work->donesem);
+	uint8_t *start = work->zap_top - work->info->in_next_row;
+	int32_t batch_stride = work->info->in_next_batch;
+	int32_t n_batches = work->zap_batches;
+	int i;
+	logmsg(nn,2,"zapping toptop: %d*%d bytes @ %p val=%d",work->zap_batches,work->zap_top_size,work->zap_top,work->zap_value);
+	for (i = 0; i < n_batches; i++) {
+		vmemset_nt_asm(start,work->zap_value,work->info->in_next_row);
+		start += batch_stride;
+	}
+	if (work->zap_checkpoint) nn_checkpoint_arrival(nn,work->self,work->zap_checkpoint);
+	if (work->donesem) nn_sem_post(work->donesem);
 }
 
 static void supernode_execute_zap_top(struct nn_graph *nn, void * vinfo)
 {
 	struct workitem *work = vinfo;
-	logmsg(nn,2,"zapping top: %d bytes @ %p val=%d",work->zap_top_size,work->zap_top,work->zap_value);
-	vmemset_nt_asm(work->zap_top,work->zap_value,work->zap_top_size);
-	nn_sem_post(work->donesem);
+	uint8_t *start = work->zap_top;
+	int32_t batch_stride = work->info->in_next_batch;
+	int32_t n_batches = work->zap_batches;
+	int i;
+	logmsg(nn,2,"zapping top: %d*%d bytes @ %p val=%d",work->zap_batches,work->zap_top_size,work->zap_top,work->zap_value);
+	for (i = 0; i < n_batches; i++) {
+		vmemset_nt_asm(start,work->zap_value,work->zap_top_size);
+		start += batch_stride;
+	}
+	if (work->zap_checkpoint) nn_checkpoint_arrival(nn,work->self,work->zap_checkpoint);
+	if (work->donesem) nn_sem_post(work->donesem);
 }
 
 static void supernode_execute_zap_bot(struct nn_graph *nn, void * vinfo)
 {
 	struct workitem *work = vinfo;
-	logmsg(nn,2,"zapping bot: %d bytes @ %p val=%d",work->zap_bot_size,work->zap_bot,work->zap_value);
-	vmemset_nt_asm(work->zap_bot,work->zap_value,work->zap_bot_size);
-	nn_sem_post(work->donesem);
+	uint8_t *start = work->zap_bot;
+	int32_t batch_stride = work->info->in_next_batch;
+	int32_t n_batches = work->zap_batches;
+	int i;
+	logmsg(nn,2,"zapping bot: %d*%d bytes @ %p val=%d",work->zap_batches,work->zap_bot_size,work->zap_bot,work->zap_value);
+	for (i = 0; i < n_batches; i++) {
+		vmemset_nt_asm(start,work->zap_value,work->zap_bot_size);
+		start += batch_stride;
+	}
+	if (work->zap_checkpoint) nn_checkpoint_arrival(nn,work->self,work->zap_checkpoint);
+	if (work->donesem) nn_sem_post(work->donesem);
 }
 
 
 
-int supernode_execute_workitem_zap(struct workitem *work, struct nn_node *node, struct nn_graph *nn)
+/*
+ * EJP: FIXME: Change semaphores to checkpoint
+ * This workitem would start on a vector thread, add work to the queue, and checkpoint should trigger what's next
+ */
+static int supernode_execute_workitem_zap(struct workitem *work, struct nn_node *node, struct nn_graph *nn)
+//int supernode_execute_workitem_zap(struct nn_graph *nn, void *vwork)
 {
+	//struct workitem *work = vwork;
 	int sems_down = 0;
 	long right_ptr_l = (long)work->zap_right;
 	nn_sem_t donesem;
 	work->donesem = &donesem;
+	work->zap_checkpoint = NULL;
 	nn_sem_init(&donesem,0);
 	logmsg(nn,2,"zapping start");
 	if (right_ptr_l % 128) {
@@ -1832,14 +2291,16 @@ int supernode_execute_workitem_zap(struct workitem *work, struct nn_node *node, 
 		sems_down++;
 	}
 	if (work->zap_top_size > 0) {
+		//printf("zapping %d (%d) at top: %p\n", (int)(work->zap_top_size/work->info->in_next_row), (int)work->zap_top_size, work->zap_top);
 		nn_os_work_for_vector(nn,supernode_execute_zap_top,work);
 		sems_down++;
 	}
 	if (work->zap_bot_size > 0) {
+		//printf("zapping %d (%d) at bottom: %p\n", (int)(work->zap_bot_size/work->info->in_next_row), (int)work->zap_bot_size, work->zap_bot);
 		nn_os_work_for_vector(nn,supernode_execute_zap_bot,work);
 		sems_down++;
 	}
-#ifdef V66
+#if 0 //def V66
 	if (work->zap_left_size > 0) {
 		nn_os_work_for_vector(nn,supernode_execute_zap_left,work);
 		sems_down++;
@@ -1849,17 +2310,179 @@ int supernode_execute_workitem_zap(struct workitem *work, struct nn_node *node, 
 		sems_down++;
 #endif
 #ifndef V66
-	if (work->zap_top_size > 0) {
+	if(1) if (work->zap_top_size > 0) {
 		nn_os_work_for_vector(nn,supernode_execute_zap_toptop,work);
 		sems_down++;
 	}
 #endif
 	nn_sem_wait_n_times(&donesem, sems_down);
-
 	debug_pprint_vector(work->info);
 	work->donesem = NULL; // make klockwork happy: don't leave pointer to stack var
 	logmsg(nn,2,"zapping complete");
 	return 0;
+}
+
+static inline void supernode_handle_earlywork(struct nn_graph *nn, struct nn_node *self, struct supernode_info_new *info)
+{
+	struct nn_early_work *work = info->next_earlywork;
+	if (work == NULL) return;
+	if (work->vtcm_addr != nn->vtcm_ptr) return;
+	if (work->src_addr == NULL) return;
+	if (work->dst_addr == NULL) return;
+	if (work->bytes == 0) return;
+	logmsg(nn,2,"Doing early work copy: %d bytes %p <-- %p",work->bytes,work->dst_addr,work->src_addr);
+	supernode_do_memcpy(nn,work->dst_addr,work->src_addr,work->bytes);
+	work->valid = 1;
+}
+
+static inline void supernode_note_earlywork(
+	struct nn_graph *nn,
+	struct nn_node *self,
+	struct supernode_info_new *info,
+	void *dst_addr,
+	const void *src_addr,
+	size_t bytes)
+{
+	struct nn_early_work *work = &info->my_earlywork;
+	work->dst_addr = dst_addr;
+	work->src_addr = src_addr;
+	work->bytes = bytes;
+	work->valid = 0;
+	work->vtcm_addr = nn->vtcm_ptr;
+}
+
+static void note_alldone_checkpoint_arrival(struct nn_graph *nn, struct nn_node *self, void *opaque)
+{
+	struct workitem *work = opaque;
+	struct supernode_info_new *info = work->info;
+	logmsg(nn,2,"Saw all done checkpoint complete @ node %p work item %p",self,work);
+	if (work->next_startup_offset == 0) {
+		logmsg(nn,2,"Last batch, should return info=%p",info);
+		// Move early work before the alldone sem post
+		supernode_handle_earlywork(nn,self,info);
+		nn_sem_post(&info->alldone_sem);
+	} else {
+		logmsg(nn,4,"Enqueue next batch startup distance %d",work->next_startup_offset);
+		supernode_execute_some_strategy(self,nn,info->batch_start_idx + work->next_startup_offset,1);
+	}
+}
+
+static void note_startup_arrival(struct nn_graph *nn, struct nn_node *self, void *opaque)
+{
+	struct supernode_info_new *info = self->opaque;
+	struct weight_slice_info *myslice = opaque;
+	logmsg(nn,2,"Saw startup checkpoint complete @ node %p batch start offset=%d n=%d",self,
+		myslice->batch_start_offset,myslice->wakeup_items);
+	supernode_execute_some_strategy(self,nn,info->batch_start_idx+myslice->batch_start_offset,myslice->wakeup_items);
+	//nn_checkpoint_arrival(nn,self,&info->alldone_checkpoint);
+}
+
+static inline void supernode_do_startup_memcpy(
+	struct nn_graph *nn,
+	struct nn_node *self,
+	struct supernode_info_new *info,
+	uint8_t *dst,
+	const uint8_t *src,
+	uint32_t size)
+{
+	if (info->my_earlywork.valid) {
+		/* Skip over early work, predecessor did it */
+		logmsg(nn,2,"Yay, early work was valid! Skipping copy...");
+		info->my_earlywork.valid = 0;
+	} else {
+		supernode_do_memcpy(nn,dst,src,size);
+	}
+}
+
+
+/*
+ * EJP: FIXME: Change semaphores to checkpoint
+ * This workitem would start on a vector thread, add work to the queue, and checkpoint should trigger what's next
+ */
+//int supernode_execute_workitem_startwork(struct workitem *work, struct nn_node *node, struct nn_graph *nn)
+static void supernode_execute_workitem_startwork(struct nn_graph *nn, void *vwork) //struct workitem *work, struct nn_node *node, struct nn_graph *nn)
+{
+	struct workitem *work = vwork;
+	struct nn_node *node = work->self;
+	struct supernode_info_new *info = work->info;
+	int jobs = 0;
+	long right_ptr_l = (long)work->zap_right;
+	int work_idx = work->my_idx;
+	logmsg(nn,3,"starting work idx=%d",work_idx);
+	//nn_sem_init(&info->alldone_sem,0);
+	work->donesem = NULL;
+	work->zap_checkpoint = &info->startup_info.checkpoint;
+	info->batch_start_idx = work_idx + 1;
+	work->wait_before = 0;
+	// We set up our checkpoint for the number of zaps to do plus one arrival for ourselves.
+	nn_checkpoint_init(&info->startup_info.checkpoint,work->zap_jobs+1,note_startup_arrival,&info->startup_info);
+	nn_checkpoint_init(&info->alldone_checkpoint,work->join_iters,note_alldone_checkpoint_arrival,work);
+#ifdef V66
+	// V66 memcpy is in background, do it first to overlap with zapping
+	if (work->copy_size > 0) {
+		supernode_do_startup_memcpy(nn,node,info,work->copy_out,work->copy_in,work->copy_size);
+	}
+#endif
+	if (work->pf_height && work->pf_inp) {
+		l2fetch(work->pf_inp,work->pf_stride,work->pf_width,work->pf_height);
+	}
+	if (work->zap_right_size && (right_ptr_l % 128)) {
+		nn_os_work_for_vector(nn,supernode_execute_zap_right,work);
+		jobs++;
+	}
+	if (work->zap_top_size > 0) {
+		//printf("zapping %d (%d) at top: %p\n", (int)(work->zap_top_size/work->info->in_next_row), (int)work->zap_top_size, work->zap_top);
+		nn_os_work_for_vector(nn,supernode_execute_zap_top,work);
+		jobs++;
+	}
+	if (work->zap_bot_size > 0) {
+		//printf("zapping %d (%d) at bottom: %p\n", (int)(work->zap_bot_size/work->info->in_next_row), (int)work->zap_bot_size, work->zap_bot);
+		nn_os_work_for_vector(nn,supernode_execute_zap_bot,work);
+		jobs++;
+	}
+#if 0 //def V66
+	if (work->zap_left_size > 0) {
+		nn_os_work_for_vector(nn,supernode_execute_zap_left,work);
+		sems_down++;
+	}
+#else
+	if (work->zap_left_size > 0) {
+		nn_os_work_for_vector(nn,supernode_execute_zap_left,work);
+		jobs++;
+	}
+#endif
+#ifndef V66
+	if(1) if (work->zap_top_size > 0) {
+		nn_os_work_for_vector(nn,supernode_execute_zap_toptop,work);
+		jobs++;
+	}
+#endif
+#ifndef V66
+	// Pre-V66 memcpy work is in foreground, do it here to do it in parallel
+	if (work->copy_size > 0) {
+		supernode_do_startup_memcpy(nn,node,info,work->copy_out,work->copy_in,work->copy_size);
+	}
+#endif
+	// our own mark of checkpoint completion, mainly for pre-V66 memcpy
+	nn_checkpoint_arrival(nn,node,&info->startup_info.checkpoint);
+	if (unlikely(jobs != work->zap_jobs)) errlog(nn,"consistency failure in startup zap work");
+	//nn_sem_wait(&info->alldone_sem);
+	//logmsg(nn,0,"v60 startup complete");
+	return;
+}
+
+static int supernode_count_zap_jobs(struct workitem *work, struct nn_node *node, struct nn_graph *nn)
+{
+	int zaps = 0;
+	long right_ptr_l = (long)work->zap_right;
+	if (work->zap_right_size && ((right_ptr_l % 128) != 0)) zaps++;
+	if (work->zap_top_size > 0) zaps++;
+	if (work->zap_bot_size > 0) zaps++;
+	if (work->zap_left_size > 0) zaps++; /* Zap Left always? */
+#ifndef V66
+	if (work->zap_top_size > 0) zaps++; /* zap toptop */
+#endif
+	return zaps;
 }
 
 /*
@@ -1869,121 +2492,619 @@ int supernode_execute_workitem_zap(struct workitem *work, struct nn_node *node, 
  * This we can do ahead of time.
  */
 #ifndef ENABLE_VECTOR_WEIGHT_ARRANGE
-static inline float supernode_convert_weights_to_signed(
-	struct supernode_info *info,
-	uint8_t *src, 
-	int filt_height,
-	int filt_width,
-	int in_depth,
-	int out_depth,
-	int zero_val)
-{
-	int tmp;
-	int i;
-	float scaling = 1.0f/supernode_signed_weight_divisor(info,zero_val);
-	for (i = 0; i < (filt_height * filt_width * in_depth * out_depth); i++) {
-		tmp = src[i];
-		tmp -= zero_val;
-		tmp = scaling * tmp;
-		if (tmp < -128) tmp = -128;
-		if (tmp > 127) tmp = 127;
-		src[i] = tmp;
-	}
-	return scaling;
-}
+#if 1
+/*
+   float model
+ */
+float supernode_rearrange_vector_d32(
+  uint8_t *out_data,
+  const uint8_t* in_data,
+  int filt_height,
+  int filt_width,
+  int filt_depth,
+  int filt_depth_total,
+  int filt_batches,
+  int filt_batches_total,
+  int filt_offset,
+  int32_t *weight_scale,
+  int32_t *sumb
+) {
+  int x,y,z,d,s,v,i;
+  int inval;
+  int32_t max ;
+  int32_t sign, max_sign ;
+  int32_t sum, count=0;
+  int32_t tmp, found0, found255;
+  int32_t h, w, b, dhw = filt_depth*filt_height*filt_width;
+  float   ftmp,global_scale,total_mean =0.f;
+  float scaling; //, delta ;
+  float RND;
+         printf(" wzero = %d depth = %d\n",filt_offset, filt_depth);
+        if( filt_offset < 127 ){     
+             global_scale = (127.f)/(float)(255-filt_offset);
+        }else if( filt_offset > 129){
+             global_scale = (128.f)/(float)filt_offset;
+        }else{
+             global_scale =1.f;
+        }
+        found0 = found255 = 0;
+        for (b = 0; b < filt_batches; b++) {
+                max = 0;
+                sum = 0;
+                for (h = 0; h < filt_height; h++) {
+                        for (w = 0; w < filt_width; w++) {
+                                for (d = 0; d < filt_depth_total; d++) {
+                                        if (d >= filt_depth) tmp = filt_offset;
+                                        else tmp = in_data[
+                                                  h*filt_width*filt_depth*filt_batches
+                                                + w*filt_depth*filt_batches
+                                                + d*filt_batches
+                                                + b];
+                                        if(tmp == 0) found0 = 1;
+                                        if(tmp == 255) found255 = 1;
+                                        tmp -= filt_offset;
+                                        if(tmp < 0) { sign = -1; tmp = -tmp; } else sign = 1;
+                                        if(tmp > max) { max_sign = sign; max = tmp; }
+                                        sum += tmp ;
+                                }
+                        }
+                }
+                if(max_sign == -1 && max > 129) {
+                   scaling = (128.f)/(float)max;
+                } else if(max_sign == 1 && max > 128) {
+                   scaling = (127.f)/(float)max;
+                } else {
+                   scaling = 1.f;
+                }
+                if(scaling < 1.f) {
+                     float mean = (float) sum / (float) dhw;
+                     mean = (float) max / mean; 
+                     total_mean += mean;
+                     count += 1;
+                }
+                weight_scale[b] = (int32_t) ( 2147483648.f * scaling); 
+        }
+        //attempt to categorize the channels
+        if(scaling < 1.f) { 
+          //printf("total mean = %f\n", total_mean / (float) count);
+          RND = (1.f/64.f)*total_mean / (float) count;
+          if(RND > 0.5f) RND = 0.5f;
+          //printf("rnd val = %f\n", RND);
+        }
+        if(!found0 && !found255) printf("max and min not found\n");
+        for (b = filt_batches; b < filt_batches_total; b++) {
+                weight_scale[b] = 0x7fffffff; //1.0
+        }
+        for (b = 0; b < filt_batches; b++) {
+                sum = 0;
+                scaling = (float)weight_scale[b] /2147483648.f ;  
+                for (h = 0; h < filt_height; h++) {
+                        for (w = 0; w < filt_width; w++) {
+                                for (d = 0; d < filt_depth_total; d++) {
+                                        if (d >= filt_depth) inval = filt_offset;
+                                        else inval = in_data[
+                                                  h*filt_width*filt_depth*filt_batches
+                                                + w*filt_depth*filt_batches
+                                                + d*filt_batches
+                                                + b];
+                                        tmp = inval - filt_offset;
+                                       if(scaling < 1.f) {
+                                        ftmp = (float)tmp * scaling;
+                                        if(ftmp < 0.f) { sign = 1; ftmp = -ftmp; } else sign = 0;
+                                        tmp = ftmp + RND;
+                                        if(sign) tmp = -tmp;
+                                       }
+                                        if(tmp > 127) tmp = 127;
+                                        if(tmp <-128) tmp =-128;
+                                        sum += tmp; //inval - filt_offset; //tmp;
+                                }
+                        }
+                }
+                sumb[b] = sum;
+        }
+        for (b = filt_batches; b < filt_batches_total; b++) {
+                sumb[b] = 0;
+        }
+        for (x = 0; x < filt_batches_total; x+=32)
+        {
+          for (y = 0; y < filt_height; y++)
+          {
+            for (d = 0; d < filt_depth_total; d+=32)
+            {
+              for (z = 0; z < filt_width; z++)
+              {
+                  for (v = 0; v < 32; v+=4)
+                  for (s = 0; s < 32; s+=1)
+                  for (i = 0; i < 4; i+=1)
+                  {
+                    int in_d = d+v+i;
+                    int in_b = x+s;
 
-static inline int32_t supernode_gemsumb_signed(
-	struct supernode_info *info,
-	uint8_t *filt,
-	int32_t *sumb,
-	int32_t filt_height,
-	int32_t filt_width,
-	int32_t filt_depth,
-	int32_t filt_depth_total,
-	int32_t filt_batches,
-	int32_t filt_offset,
-	int32_t out_depth)
-{
-	int32_t sum;
-	int32_t tmp;
-	int32_t h;
-	int32_t w;
-	int32_t d;
-	int32_t b;
-	float scaling = 1.0f/supernode_signed_weight_divisor(info,filt_offset);
-	for (b = 0; b < filt_batches; b++) {
-		sum = 0;
-		for (h = 0; h < filt_height; h++) {
-			for (w = 0; w < filt_width; w++) {
-				for (d = 0; d < filt_depth; d++) {
-					if (d >= filt_depth) tmp = filt_offset;
-					else tmp = filt[
-						  h*filt_width*filt_depth*filt_batches
-						+ w*filt_depth*filt_batches
-						+ d*filt_batches
-						+ b];
-					tmp -= filt_offset;
-					tmp = scaling * tmp;
-					if (tmp < -128) tmp = -128;
-					if (tmp > 127) tmp = 127;
-					sum += tmp;
-				}
-			}
-		}
-		sumb[b] = sum;
-	}
-	for (b = filt_batches; b < out_depth; b++) {
-		sumb[b] = 0;
-	}
-	return 0;
-}
+                    scaling = (float)weight_scale[in_b] /2147483648.f ;  
+                    int in_idx = y*filt_width*filt_depth*filt_batches
+                                + z*filt_depth*filt_batches
+                                + in_d*filt_batches
+                                + in_b;
+                    int out_idx = x*filt_height*filt_width*filt_depth_total
+                                + y*filt_width*filt_depth_total*32
+                                + z*32*32
+                                + d*filt_width*32
+                                + v*32
+                                + 4*s
+                                + i;
+                    if ((in_d >= filt_depth) || (in_b >= filt_batches)) {
+                       inval = filt_offset;
+                    } else { 
+                       inval = in_data[in_idx];
+                    }
 
+                    tmp  = (inval - filt_offset) ;
+                    if(scaling < 1.f) {
+                      ftmp = (float)tmp * scaling ;
+                      if(ftmp < 0.f) { sign = 1; ftmp = -ftmp; } else sign = 0;
+                      tmp = ftmp + RND;
+                      if(sign) tmp = -tmp;
+                    }
+                    if(tmp > 127) tmp = 127;
+                    if(tmp <-128) tmp =-128;
+                    out_data[out_idx] = (int8_t)tmp;
+                  }
+              }//filt_width
+            }//in_depth
+          }//filt_height
+        }//out_depth
+  return(global_scale);
+}
+#else
+
+/* 
+   fixed point model to match supernode_procweights 
+ */
+float supernode_rearrange_vector_d32(
+  uint8_t *out_data,
+  const uint8_t* in_data,
+  int filt_height,
+  int filt_width,
+  int filt_depth,
+  int filt_depth_total,
+  int filt_batches,
+  int filt_batches_total,
+  int filt_offset,
+  int32_t *weight_scale,
+  int32_t *sumb
+) {
+  int x,y,z,d,s,v,i;
+  int inval;
+  int32_t max = 0;
+  int32_t sign, max_sign = 0;
+  int32_t sum;
+  int32_t tmp, RND;
+  int32_t h, w, b;
+  float   global_scale ;
+  int32_t scaleK, offsetK;
+  float * scaling = nn_memalign(128,  4*filt_batches_total);
+
+        if( filt_offset < 128 ){     
+             scaleK = (256*127+127)/(255-filt_offset);
+        }else if( filt_offset > 128){
+             scaleK = (256*128+127)/filt_offset;
+        }else{
+             scaleK = 0;
+        }
+        if(scaleK == 0)
+          global_scale = 1.f;
+        else
+          global_scale = (float)scaleK*(float)(1./256.f);
+
+        for (b = 0; b < filt_batches; b++) {
+                max = 0;
+                for (h = 0; h < filt_height; h++) {
+                        for (w = 0; w < filt_width; w++) {
+                                for (d = 0; d < filt_depth_total; d++) {
+                                        if (d >= filt_depth) tmp = filt_offset;
+                                        else tmp = in_data[
+                                                  h*filt_width*filt_depth*filt_batches
+                                                + w*filt_depth*filt_batches
+                                                + d*filt_batches
+                                                + b];
+                                        tmp -= filt_offset;
+
+                                        if(tmp < 0) { sign = -1; tmp = -tmp; } else sign = 1;
+                                        if(tmp > max) { max_sign = sign; max = tmp; }
+                                }
+                        }
+                }
+                if(max_sign == -1 && max > 128) {
+                   scaleK = (128*256+127)/max;
+                } else if(max_sign == 1 && max > 127) {
+                   scaleK = (127*256+127)/max;
+                } else {
+                   scaleK = 0;
+                }
+                weight_scale[b] = scaleK; 
+        }
+        for (b = filt_batches; b < filt_batches_total; b++) {
+                weight_scale[b] = 0;
+        }
+        for (b = 0; b < filt_batches; b++) {
+                scaleK = weight_scale[b];
+                if(scaleK == 0) sum = 0;
+                else sum = -128*filt_height*filt_width*filt_depth_total;
+                offsetK = 128*256 + 128 - scaleK*filt_offset;
+                for (h = 0; h < filt_height; h++) {
+                        for (w = 0; w < filt_width; w++) {
+                                for (d = 0; d < filt_depth_total; d++) {
+                                        if (d >= filt_depth) tmp = filt_offset;
+                                        else tmp = in_data[
+                                                  h*filt_width*filt_depth*filt_batches
+                                                + w*filt_depth*filt_batches
+                                                + d*filt_batches
+                                                + b];
+                                        if(scaleK == 0) {
+                                          tmp = tmp - filt_offset;
+                                          if(tmp > 127) tmp = 127;
+                                          if(tmp <-128) tmp =-128;
+                                          sum += tmp;
+                                        } else {
+                                          uint8_t w = (tmp * scaleK + offsetK) >> 8;
+                                          sum += w;
+                                        }
+                                }
+                        }
+                }
+                sumb[b] = sum; 
+        }
+        for (b = filt_batches; b < filt_batches_total; b++) {
+                sumb[b] = 0;
+        }
+        for (x = 0; x < filt_batches_total; x+=32)
+        {
+          for (y = 0; y < filt_height; y++)
+          {
+            for (d = 0; d < filt_depth_total; d+=32)
+            {
+              for (z = 0; z < filt_width; z++)
+              {
+                  for (v = 0; v < 32; v+=4)
+                  for (s = 0; s < 32; s+=1)
+                  for (i = 0; i < 4; i+=1)
+                  {
+                    int in_d = d+v+i;
+                    int in_b = x+s;
+
+                    scaleK = weight_scale[in_b];  
+                    offsetK = 128*256 + RND - scaleK*filt_offset;
+                    int in_idx = y*filt_width*filt_depth*filt_batches
+                                + z*filt_depth*filt_batches
+                                + in_d*filt_batches
+                                + in_b;
+                    int out_idx = x*filt_height*filt_width*filt_depth_total
+                                + y*filt_width*filt_depth_total*32
+                                + z*32*32
+                                + d*filt_width*32
+                                + v*32
+                                + 4*s
+                                + i;
+                    if ((in_d >= filt_depth) || (in_b >= filt_batches)) {
+                       inval = filt_offset;
+                    } else { 
+                       inval = in_data[in_idx];
+                    }
+
+                    if(scaleK==0) {
+                      tmp  = inval - filt_offset;
+                      if(tmp > 127) tmp = 127;
+                      if(tmp <-128) tmp =-128;
+                      out_data[out_idx] = tmp; //^0x80;
+                    } else {
+                      uint8_t w = (inval * scaleK + offsetK) >> 8;
+                      out_data[out_idx] = w ^ 0x80;
+                    }
+                  }
+              }//filt_width
+            }//in_depth
+          }//filt_height
+        }//out_depth
+        for (b = 0; b < filt_batches_total; b++) {
+                int32_t p;
+                scaleK = weight_scale[b];
+                if(scaleK == 0) {
+                  p = 0x7fffffff;
+                } else {
+                  p = (int32_t) (2147483648.f * (float)scaleK/256.f);
+                }
+                weight_scale[b] = p;
+        }
+        nn_free(scaling);
+  return(global_scale);
+}
+#endif
+/* current v65 model */
+#if 1
+float supernode_rearrange_scaler_d32(
+  uint8_t *out_data,
+  const uint8_t* in_data,
+  int filt_height,
+  int filt_width,
+  int filt_depth,
+  int filt_depth_total,
+  int filt_batches,
+  int filt_batches_total,
+  int filt_offset,
+  int32_t *sumb
+) {
+  int x,y,z,d,s,v,i;
+  int inval;
+  int32_t sum;
+  int32_t tmp, RND = 128;
+  int32_t h, w, b;
+  float   global_scale ;
+  int32_t scaleK, offsetK;
+
+        if( filt_offset < 128 ){     
+             scaleK = (256*127+127)/(255-filt_offset);
+             offsetK = 128*256 + RND - scaleK*filt_offset;
+        }else if( filt_offset > 128){
+             scaleK = (256*128+127)/filt_offset;
+             offsetK = 128*256 + RND - scaleK*filt_offset;
+        }else{
+             scaleK = 0;
+             offsetK = 0;
+        }
+        if(scaleK == 0)
+          global_scale = 1.f;
+        else
+          global_scale = (float)scaleK*(float)(1./256.f);
+
+        for (b = 0; b < filt_batches; b++) {
+                if(scaleK == 0) sum = 0;
+                else sum = -128*filt_height*filt_width*filt_depth_total;
+                offsetK = 128*256 + 128 - scaleK*filt_offset;
+                for (h = 0; h < filt_height; h++) {
+                        for (w = 0; w < filt_width; w++) {
+                                for (d = 0; d < filt_depth_total; d++) {
+                                        if (d >= filt_depth) tmp = filt_offset;
+                                        else tmp = in_data[
+                                                  h*filt_width*filt_depth*filt_batches
+                                                + w*filt_depth*filt_batches
+                                                + d*filt_batches
+                                                + b];
+                                        if(scaleK == 0) {
+                                          tmp = tmp - filt_offset;
+                                          if(tmp > 127) tmp = 127;
+                                          if(tmp <-128) tmp =-128;
+                                          sum += tmp;
+                                        } else {
+                                          uint8_t w = (tmp * scaleK + offsetK) >> 8;
+                                          sum += w;
+                                        }
+                                }
+                        }
+                }
+                sumb[b] = sum; 
+        }
+        for (b = filt_batches; b < filt_batches_total; b++) {
+                sumb[b] = 0;
+        }
+        for (x = 0; x < filt_batches_total; x+=32)
+        {
+          for (y = 0; y < filt_height; y++)
+          {
+            for (d = 0; d < filt_depth_total; d+=32)
+            {
+              for (z = 0; z < filt_width; z++)
+              {
+                  for (v = 0; v < 32; v+=4)
+                  for (s = 0; s < 32; s+=1)
+                  for (i = 0; i < 4; i+=1)
+                  {
+                    int in_d = d+v+i;
+                    int in_b = x+s;
+
+                    int in_idx = y*filt_width*filt_depth*filt_batches
+                                + z*filt_depth*filt_batches
+                                + in_d*filt_batches
+                                + in_b;
+                    int out_idx = x*filt_height*filt_width*filt_depth_total
+                                + y*filt_width*filt_depth_total*32
+                                + z*32*32
+                                + d*filt_width*32
+                                + v*32
+                                + 4*s
+                                + i;
+                    if ((in_d >= filt_depth) || (in_b >= filt_batches)) {
+                       inval = filt_offset;
+                    } else { 
+                       inval = in_data[in_idx];
+                    }
+
+                    if(scaleK==0) {
+                      tmp  = inval - filt_offset;
+                      if(tmp > 127) tmp = 127;
+                      if(tmp <-128) tmp =-128;
+                      out_data[out_idx] = tmp; //^0x80;
+                    } else {
+                      uint8_t w = (inval * scaleK + offsetK) >> 8;
+                      out_data[out_idx] = w ^ 0x80;
+                    }
+                  }
+              }//filt_width
+            }//in_depth
+          }//filt_height
+        }//out_depth
+  return(global_scale);
+}
+#else
+float supernode_rearrange_scaler_d32(
+  uint8_t *out_data,
+  const uint8_t* in_data,
+  int filt_height,
+  int filt_width,
+  int filt_depth,
+  int filt_depth_total,
+  int filt_batches,
+  int filt_batches_total,
+  int filt_offset,
+  int32_t *sumb
+) {
+  int x,y,z,d,s,v,i;
+  int inval;
+  int32_t sum;
+  int32_t tmp;
+  int32_t h, w, b;
+  float global_scale ;
+        if( filt_offset < 127 ){       /// max = 255-zval = 
+             global_scale = 127.0/(float)(255-filt_offset);
+        }else if( filt_offset > 129){
+             global_scale = 128.0/(float)(filt_offset);
+        }else{
+             global_scale = 1.0;
+        }
+        for (b = 0; b < filt_batches; b++) {
+                sum = 0;
+                for (h = 0; h < filt_height; h++) {
+                        for (w = 0; w < filt_width; w++) {
+                                for (d = 0; d < filt_depth_total; d++) {
+                                        if (d >= filt_depth) tmp = filt_offset;
+                                        else tmp = in_data[
+                                                  h*filt_width*filt_depth*filt_batches
+                                                + w*filt_depth*filt_batches
+                                                + d*filt_batches
+                                                + b];
+                                        tmp -= filt_offset;
+                                        tmp = (float) tmp * global_scale;
+                                        if(tmp > 127) tmp = 127;
+                                        if(tmp <-128) tmp =-128;
+                                        sum += tmp;
+                                }
+                        }
+                }
+                sumb[b] = sum;
+        }
+        for (b = filt_batches; b < filt_batches_total; b++) {
+                sumb[b] = 0;
+        }
+        for (x = 0; x < filt_batches_total; x+=32)
+        {
+          for (y = 0; y < filt_height; y++)
+          {
+            for (d = 0; d < filt_depth_total; d+=32)
+            {
+              for (z = 0; z < filt_width; z++)
+              {
+                  for (v = 0; v < 32; v+=4)
+                  for (s = 0; s < 32; s+=1)
+                  for (i = 0; i < 4; i+=1)
+                  {
+                    int in_d = d+v+i;
+                    int in_b = x+s;
+
+                    int in_idx = y*filt_width*filt_depth*filt_batches
+                                + z*filt_depth*filt_batches
+                                + in_d*filt_batches
+                                + in_b;
+                    int out_idx = x*filt_height*filt_width*filt_depth_total
+                                + y*filt_width*filt_depth_total*32
+                                + z*32*32
+                                + d*filt_width*32
+                                + v*32
+                                + 4*s
+                                + i;
+                    if ((in_d >= filt_depth) || (in_b >= filt_batches)) inval = filt_offset;
+                    else inval = in_data[in_idx];
+
+                    inval  = (inval - filt_offset) * global_scale;
+                    if(inval > 127) inval = 127;
+                    if(inval <-128) inval =-128;
+                    out_data[out_idx] = (int8_t)inval;
+                  }
+              }//filt_width
+            }//in_depth
+          }//filt_height
+        }//out_depth
+  return(global_scale);
+}
+#endif
 
 /*
- * This points to the original packed data.
- * Probably can process chunks of out depth
+    v60 case where weights are unsigned
  */
-static inline int32_t supernode_gemsumb_unsigned(
-	struct supernode_info *info,
-	uint8_t *filt,
-	int32_t *sumb,
-	int32_t filt_height,
-	int32_t filt_width,
-	int32_t filt_depth,
-	int32_t filt_depth_total,
-	int32_t filt_batches,
-	int32_t filt_offset,
-	int32_t out_depth)
-{
-	int32_t sum;
-	int32_t tmp;
-	int32_t h;
-	int32_t w;
-	int32_t d;
-	int32_t b;
-	for (b = 0; b < filt_batches; b++) {
-		sum = 0;
-		for (h = 0; h < filt_height; h++) {
-			for (w = 0; w < filt_width; w++) {
-				for (d = 0; d < filt_depth_total; d++) {
-					if (d >= filt_depth) tmp = filt_offset;
-					else tmp = filt[
-						  h*filt_width*filt_depth*filt_batches
-						+ w*filt_depth*filt_batches
-						+ d*filt_batches
-						+ b];
-					sum += tmp;
-				}
-			}
-		}
-		sumb[b] = sum;
-	}
-	for (b = filt_batches; b < out_depth; b++) {
-		/* likely executes 0 times */
+void supernode_rearrange_d32(
+  uint8_t *out_data,
+  const uint8_t* in_data,
+  int filt_height,
+  int filt_width,
+  int filt_depth,
+  int filt_depth_total,
+  int filt_batches,
+  int filt_batches_total,
+  int filt_offset,
+  int32_t *sumb
+) {
+  int x,y,z,d,s,v,i;
+  int inval;
+        int32_t sum;
+        int32_t tmp;
+        int32_t h, w, b;
+
+        for (b = 0; b < filt_batches; b++) {
+                sum = 0;
+                for (h = 0; h < filt_height; h++) {
+                        for (w = 0; w < filt_width; w++) {
+                                for (d = 0; d < filt_depth_total; d++) {
+                                        if (d >= filt_depth) tmp = filt_offset;
+                                        else tmp = in_data[
+                                                  h*filt_width*filt_depth*filt_batches
+                                                + w*filt_depth*filt_batches
+                                                + d*filt_batches
+                                                + b];
+                                        sum += tmp;
+                                }
+                        }
+                }
+                sumb[b] = sum ;
+        }
+        for (b = filt_batches; b < filt_batches_total; b++) {
 		sumb[b] = filt_height*filt_width*filt_depth_total*filt_offset;
-	}
-	return 0;
+        }
+        for (x = 0; x < filt_batches_total; x+=32)
+        {
+          for (y = 0; y < filt_height; y++)
+          {
+            for (d = 0; d < filt_depth_total; d+=32)
+            {
+              for (z = 0; z < filt_width; z++)
+              {
+                  for (v = 0; v < 32; v+=4)
+                  for (s = 0; s < 32; s+=1)
+                  for (i = 0; i < 4; i+=1)
+                  {
+                    int in_d = d+v+i;
+                    int in_b = x+s;
+
+                    int in_idx = y*filt_width*filt_depth*filt_batches
+                                + z*filt_depth*filt_batches
+                                + in_d*filt_batches
+                                + in_b;
+                    int out_idx = x*filt_height*filt_width*filt_depth_total
+                                + y*filt_width*filt_depth_total*32
+                                + z*32*32
+                                + d*filt_width*32
+                                + v*32
+                                + 4*s
+                                + i;
+                    if ((in_d >= filt_depth) || (in_b >= filt_batches)) inval = filt_offset;
+                    else inval = in_data[in_idx];
+
+                    out_data[out_idx] = inval;
+                  }
+              }//filt_width
+            }//in_depth
+          }//filt_height
+        }//out_depth
+  return;
 }
+
 #endif //!ENABLE_VECTOR_WEIGHT_ARRANGE
 
 #if 0
@@ -2174,7 +3295,7 @@ static inline void supernode_cleaninv_weights(uint8_t *weights, int size)
 {
 #ifdef V66
 	int i;
-	for (i = 0; i < (size+31); i += 32) {
+	for (i = 0; i < (size+63); i += 64) {
 		asm volatile ("dccleaninva(%0)" : :"r"(weights+i));
 	}
 #endif
@@ -2185,7 +3306,7 @@ static void __attribute__((unused)) supernode_execute_suma(struct nn_graph *nn, 
 {
 	struct workitem *work = vinfo;
 	//struct nn_node *self = work->self;
-	const struct supernode_info *node = work->info;
+	const struct supernode_info_new *node = work->info;
 	const uint8_t *input = work->suma_in;
 	int32_t *integral_tmp = work->suma_int_tmp;
 	int32_t *sumabuf = work->suma_output;
@@ -2351,12 +3472,14 @@ static int __attribute__((unused)) supernode_spawn_suma(struct workitem *work, s
 static inline __attribute__((unused)) void *supernode_add_suma(
 	struct nn_node *self,
 	struct nn_graph *nn,
-	struct supernode_info *info,
+	struct supernode_info_new *info,
 	const uint8_t *input)
 {
-#if defined(V66) || defined(V65)
+#if defined(V65) || defined(V66)
+	logmsg(nn,0,"I thought this was if zero'd out");
 	return NULL;
-#else
+#endif
+	if (info->use_v65 || info->use_v66) return NULL;
 	struct workitem suma_work;
 	//int32_t in_width_total = info->in_width;
 	//int32_t in_height = info->in_height;
@@ -2381,14 +3504,14 @@ static inline __attribute__((unused)) void *supernode_add_suma(
 	suma_work.execute = supernode_spawn_suma;
 	supernode_add_work_item(self,nn,info,suma_work);
 	return sumabuf;
-#endif
 }
 #endif
 
-static inline __attribute__((unused)) void supernode_add_padding_zap(
+#if 1
+static inline __attribute__((unused)) int supernode_add_padding_zap(
 	struct nn_node *self,
 	struct nn_graph *nn,
-	struct supernode_info *info,
+	struct supernode_info_new *info,
 	struct workitem zapwork /* BY VAL */,
 	int32_t input_batch_offset,
 	int32_t top_zap,
@@ -2399,7 +3522,30 @@ static inline __attribute__((unused)) void supernode_add_padding_zap(
 	zapwork.zap_left += input_batch_offset;
 	zapwork.zap_right += input_batch_offset;
 	zapwork.execute = supernode_execute_workitem_zap;
-	supernode_add_work_item(self,nn,info,zapwork);
+	return supernode_add_work_item(self,nn,info,zapwork);
+}
+#endif
+
+static inline __attribute__((unused)) int supernode_add_batch_startup(
+	struct nn_node *self,
+	struct nn_graph *nn,
+	struct supernode_info_new *info,
+	struct workitem startwork /* BY VAL */,
+	int32_t input_batch_offset,
+	int32_t top_zap,
+	int32_t left_zap,
+	int32_t zap_batches)
+{
+	startwork.next_startup_offset = 0;
+	startwork.zap_top += input_batch_offset;
+	startwork.zap_bot += input_batch_offset;
+	startwork.zap_left += input_batch_offset;
+	startwork.zap_right += input_batch_offset;
+	startwork.zap_batches = zap_batches;
+	startwork.new_execute = supernode_execute_workitem_startwork;
+	int n_zaps = supernode_count_zap_jobs(&startwork,self,nn);
+	startwork.zap_jobs = n_zaps;
+	return supernode_add_work_item(self,nn,info,startwork);
 }
 
 
@@ -2518,120 +3664,77 @@ static inline __attribute__((unused)) uint32_t propose_bw(
 		+ weight_slice_factor*size_per_line*height_total;
 }
 
-#ifdef V66
-static inline int32_t act_resize(unsigned int size)
+static inline int32_t slice_for_cache_v66(
+        int32_t node_id,
+        /* General stuff */
+        struct nn_graph *nn,
+        /* activation information */
+        int32_t batches,
+        int32_t d32_slices,
+        int32_t width_total,
+        int32_t out_width,
+        int32_t out_height,
+        int32_t stride_height,
+        int32_t filt_width,
+        int32_t filt_height,
+        /* Weights information */
+        int32_t weight_d32_size,
+        int32_t weight_d32_slices,
+        /* Results! */
+        int32_t *inner_act_batches,
+        int32_t *inner_act_rows,
+        int32_t *inner_weight_chunks,
+        int32_t *burst_chunks)
 {
-	return size;
-}
+        int32_t input_height = out_height*stride_height+filt_height-stride_height;
+        int32_t size_per_line = 32*d32_slices*width_total;
+        int32_t act_total_size = size_per_line*out_height*stride_height;
+        int32_t weight_total_size = weight_d32_size * weight_d32_slices;
+        logmsg(nn,2,"id=%d in_h=%d out_h=%d sz_per_line=%d w_d32_sz=%d w_d32_slices=%d act_tot=%d w_tot_sz=%d fw=%d fh=%d",
+                   node_id,
+                input_height, out_height, size_per_line,
+                weight_d32_size, weight_d32_slices,
+                act_total_size, weight_total_size,filt_width,filt_height);
 
-static inline int32_t good_act_size(unsigned int size)
-{
-	return (size < 256*1024);
-}
+        if (weight_d32_size > nn->vtcm_size) {
+                logmsg(nn,1,"weight slice too big %d", weight_d32_size);
+                *inner_act_batches = 1;
+                *inner_weight_chunks = 1;
+                *burst_chunks = 1;
+        } else if (weight_total_size <= nn->vtcm_size) {
+                logmsg(nn,1,"weights fit");
+                *inner_act_batches = batches;
+                *inner_weight_chunks = weight_d32_slices;
+                if(weight_d32_size <= (nn->vtcm_size/2)) {
+                  *burst_chunks = Q6_R_min_RR(2, weight_d32_slices);
+                } else {
+                  *burst_chunks = 1;
+                }
+        } else {
+                logmsg(nn,1,"weights dont fit");
+                *inner_act_batches = 1; //batches;
+                int32_t nchunks  = (nn->vtcm_size)/weight_d32_size;
+                *inner_weight_chunks = nchunks;
+                if(weight_d32_size <= (nn->vtcm_size/2)) {
+                  *burst_chunks = Q6_R_min_RR(2, weight_d32_slices);
+                } else {
+                  *burst_chunks = 1;
+                }
+        }
+	//*inner_weight_chunks &= (-(*burst_chunks));
+        int32_t overhead = Q6_R_max_RR(filt_height,stride_height)*size_per_line;
+        int32_t nchunks = *inner_weight_chunks;
 
-static inline int32_t cache_unfriendly(unsigned int act_size, unsigned int weight_size)
-{
-	return ((act_size+weight_size) > 384*1024);
-}
-
-static inline int32_t slice_for_cache(
-	int32_t node_id,
-	/* General stuff */
-	struct nn_graph *nn,
-	/* activation information */
-	int32_t batches,
-	int32_t d32_slices,
-	int32_t width_total,
-	int32_t out_height,
-	int32_t stride_height,
-	int32_t filt_height,
-	/* Weights information */
-	int32_t weight_d32_size,
-	int32_t weight_d32_slices,
-	/* Extra room for the output slice */
-	int32_t out_d32_slice_size,
-	/* Results! */
-	int32_t *inner_act_batches,
-	int32_t *inner_act_rows,
-	int32_t *inner_weight_chunks)
-{
-	int32_t input_height = out_height*stride_height+filt_height-stride_height;
-	int32_t total_input_rows = input_height * batches;
-	int32_t size_per_line = 32*d32_slices*width_total;
-	int32_t act_total_size = size_per_line*total_input_rows;
-	int32_t weight_total_size = weight_d32_size * weight_d32_slices;
-	//luc
-	logmsg(nn,1,"id=%d in_h=%d out_h=%d sz_per_line=%d w_d32_sz=%d w_d32_slices=%d act_tot=%d w_tot_sz=%d",
-		   node_id,
-		input_height,
-		out_height,
-		size_per_line,
-		weight_d32_size,
-		weight_d32_slices,
-		act_total_size,
-		weight_total_size);
-	if (good_weight_size(weight_total_size)) {
-		/* Find a good inner activation size. Doesn't have to be big... */
-		/* Meh, just guess for now */
-		logmsg(nn,1,"weights fit");
-		*inner_act_batches = 1;
-		*inner_act_rows = 3;		// Just a guess
-		*inner_weight_chunks = weight_d32_slices;
-		return 0;
-	}
-
-	if (good_act_size(act_resize(act_total_size))) {
-		logmsg(nn,1,"activations fit");
-		*inner_act_batches = batches;
-		*inner_act_rows = (out_height+NUM_THREADS-1)/(2*NUM_THREADS);
-		/* See if weights + next weights are still cache friendly if we do 2 at a time */
-		if (cache_unfriendly(act_total_size,2*2*weight_d32_size)) *inner_weight_chunks = 1;
-		else *inner_weight_chunks = 2;
-		return 0;
-	}
-
-	float desired_act_to_weight_ratio = (float)act_total_size/(float)weight_total_size;
-	int32_t out_weight_chunks = 1;
-	int32_t out_rows = 2;
-	int32_t out_batches = 1;
-	do {
-		int32_t total_rows = out_batches*(out_rows*stride_height+filt_height-stride_height);
-		int32_t weight_size = weight_d32_size*out_weight_chunks;
-		float current_ratio = (float)(total_rows*size_per_line)/weight_size;
-		int32_t weights_tot = weight_size * out_weight_chunks;
-		logmsg(nn,1,"ratio: %f --> %f. weight_chunks=%d out_rows=%d out_batches=%d",
-			current_ratio,desired_act_to_weight_ratio,
-			out_weight_chunks,
-			out_rows,
-			out_batches);
-		if ((total_rows == total_input_rows) && (weights_tot == weight_total_size)) {
-			logmsg(nn,1,"error: got everything?!?!?");
-			break;
-		}
-		if (cache_unfriendly(act_resize(total_rows*size_per_line),2*out_weight_chunks*weight_d32_size)) break;
-		/* EJP: in V66, make sure weights fit in 1/2 VTCM */
-		if (good_weight_size((out_weight_chunks+1)*weight_d32_size)
-			&& ((current_ratio >= desired_act_to_weight_ratio) || (total_rows == total_input_rows))) {
-			/* Bump weights */
-			out_weight_chunks++;
-			continue;
-		}
-		if (good_act_size(act_resize(total_rows*size_per_line))) {
-			/* Bump act */
-			if (out_rows < input_height) out_rows++;
-			//else if (out_batches < batches) out_batches++;
-			continue;
-		}
-		/* Well, nothing seems like a good deal any more */
-		break;
-	} while (1);
-	logmsg(nn,1,"out_batches=%d out_rows=%d out_weight_chunks=%d",out_batches,out_rows,out_weight_chunks);
-	*inner_act_batches=out_batches;
-	*inner_act_rows=(out_rows + 2*NUM_THREADS - 1)/(2*NUM_THREADS);
-	*inner_weight_chunks=out_weight_chunks;
+        //(overhead+2*nlines1*size_per_line)*NUM_THREADS + weight_d32_size*nchunks = 384*1024
+        int32_t nlines0 = (28*1024 + size_per_line*stride_height - 1)/(size_per_line*stride_height);
+        int32_t nlines1 = (768*1024-NUM_THREADS*32*out_width*nchunks-NUM_THREADS*overhead +
+                          2*NUM_THREADS*size_per_line*stride_height -1)/(2*NUM_THREADS*size_per_line*stride_height);
+        int32_t nlines2 = ((stride_height*out_height+1)/4 - filt_height + stride_height + 1)/(4*stride_height);
+        nlines1 = Q6_R_min_RR(nlines0,nlines1);
+        *inner_act_rows = Q6_R_max_RR(Q6_R_min_RR(nlines2,nlines1), 1);
 	return 0;
 }
-#else
+#if 1
 static inline int32_t slice_for_cache(
         int32_t node_id,
         /* General stuff */
@@ -2670,11 +3773,11 @@ static inline int32_t slice_for_cache(
                 weight_total_size);
 
         *inner_act_rows = 1;
-        if (weight_d32_size > 256*1024) {
+        if (weight_d32_size > nn->vtcm_size) {
                 logmsg(nn,1,"weight slice too big %d", weight_d32_size);
                 *inner_act_batches = 1;
                 *inner_weight_chunks = 1;
-        } else if (weight_total_size <= 256*1024) {
+        } else if (weight_total_size <= nn->vtcm_size) {
                 logmsg(nn,1,"weights fit");
                 *inner_act_batches = 1;
                 *inner_weight_chunks = weight_d32_slices;
@@ -2683,11 +3786,11 @@ static inline int32_t slice_for_cache(
                 *inner_act_batches = batches;
 #if 0
                 /* See how many weight slices fit in cache, 1 current and 1 on the way  try to do 2 else do 1 at a time */
-                *inner_weight_chunks = (256*1024)/(weight_d32_size);
+                *inner_weight_chunks = (nn->vtcm_size)/(weight_d32_size);
                 if (*inner_weight_chunks < 1) *inner_weight_chunks = 1;
                 *inner_weight_chunks = (*inner_weight_chunks + 1)&(~1); //round up to 2
 
-                if(*inner_weight_chunks * weight_d32_size > 256*1024) *inner_weight_chunks -= 1;
+                if(*inner_weight_chunks * weight_d32_size > nn->vtcm_size) *inner_weight_chunks -= 1;
 
                 int num_blocks = weight_d32_slices / *inner_weight_chunks;
                 num_blocks = (weight_d32_slices+num_blocks-1) / num_blocks;
@@ -2697,7 +3800,7 @@ static inline int32_t slice_for_cache(
 
                 if(*inner_weight_chunks < 1) *inner_weight_chunks = 1;
 #else
-                int32_t nchunks  = (256*1024)/weight_d32_size;
+                int32_t nchunks  = (nn->vtcm_size)/weight_d32_size;
                 int32_t nchunks2 = Q6_R_max_RR(nchunks&~1, 1);     //round to 2
                 int32_t niter  = (weight_d32_slices + nchunks -1)/nchunks;
                 int32_t niter2 = (weight_d32_slices + nchunks2-1)/nchunks2;
@@ -2727,7 +3830,7 @@ static inline int32_t slice_for_cache(
 
         int32_t datasize_for_outrow = stride_height*size_per_line + width_total*sizeof(int32_t) + 32*out_width*nchunks;
         int32_t nlines0 = 32*1024/(size_per_line*stride_height);
-        int32_t nlines1 = (256*1024-(nchunks+1)*weight_d32_size-NUM_THREADS*overhead)/(NUM_THREADS*datasize_for_outrow);
+        int32_t nlines1 = (nn->vtcm_size-(nchunks+1)*weight_d32_size-NUM_THREADS*overhead)/(NUM_THREADS*datasize_for_outrow);
 
         *inner_act_batches = batches;
         *inner_act_rows = Q6_R_max_RR(Q6_R_min_RR(nlines0,nlines1), 1); 
@@ -2737,10 +3840,10 @@ static inline int32_t slice_for_cache(
 }
 #endif
 
-static void fill_info_minmax_basics(
+static int fill_info_minmax_basics(
 	struct nn_graph *nn,
 	struct nn_node *self,
-	struct supernode_info *info)
+	struct supernode_info_new *info)
 {
 	/* Pull out the inputs we need */
 	const struct tensor *min_in_tensor = self->inputs[2];
@@ -2752,59 +3855,188 @@ static void fill_info_minmax_basics(
 
 	/* Get min/max values for input, weights, and bias data */
 	float in_min_float = tensor_get_float(min_in_tensor,0);
-	float in_max_float = fmaxf(tensor_get_float(max_in_tensor,0),in_min_float+0.00001f);
+	float in_max_float = tensor_get_float(max_in_tensor,0);
+
+	if( !flt_isfinite(in_min_float) || ! flt_isfinite(in_max_float)){
+		return errlog(nn,"input range to supernode, not finite");
+	}
+	in_max_float = fmaxf(in_max_float,in_min_float+0.00001f);
 	//float filt_min_float = tensor_get_float(min_filt_tensor,0);
 	//float filt_max_float = fmaxf(tensor_get_float(max_filt_tensor,0),filt_min_float+0.00001f);
 	//float bias_min_float = tensor_get_float(bias_min_tensor,0);
 	//float bias_max_float = tensor_get_float(bias_max_tensor,0);
 
-	/* find zero offset for each input */
-	int32_t input_offset = quantize_uint8(0.0f,in_min_float,in_max_float);
-
-	/* Find level size for each input */
-	float in_level_size = (in_max_float - in_min_float) / 255;
+	/* find zero offset, level size for input */
+	float in_level_size;
+	int32_t input_offset = get_qu8_level_size_zero(in_min_float,in_max_float, & in_level_size);
 
 	// filter level (already compensated for any scaling done)
 	float filt_level_size = info->weights_level_size;
 
-	//float bias_level_size = (bias_max_float - bias_min_float) / 255;
-
 	/* The product level size is the product of the input and filter level size */
 	float prod_level_size = in_level_size * filt_level_size;
 
-	/* Calculate conversion ratio from bias to product space */
-	//float bias_to_prod_ratio = (bias_level_size / prod_level_size);
-	/* What is the value of the output minimum in the product space? */
-	/* We need to add it to the products to move the smallest valid value to zero */
-	//float min_out_prod_offset = -info->out_minval / prod_level_size;
+#if 1	// new calculation without int64 divide
+	//
+	// final scaling is to multiply by prod_level_size / output_level_size.
+	//
+	float output_level_size;
+	/*int32_t output_offset =*/ get_qu8_level_size_zero(info->out_minval,info->out_maxval, & output_level_size);
+	// output level size, adjusted for weight scaling
+	float output_level_size_adj = output_level_size * info->weight_scale_factor;
+	float final_scaling = prod_level_size/output_level_size_adj;
+	// if it's >=1.0 we need recip_shift > 0
+	int recip_shamt = max_i32( 0, flt_getexp(final_scaling));
+	int recip_val;
+	float final_scaling_inv;
 
-	uint64_t maxsum = fast_roundf((info->out_maxval-info->out_minval) / prod_level_size);
-	uint32_t recip_shamt = 0;
-	uint64_t recip_val_64 = 0x7F80000000ULL/maxsum;  //255 << 31
+	if( recip_shamt > 0 && info->recip_shamt_must_be_zero ){
+		// oops, node doesn't support gain >=1.0 ... We need to expand the output range
+		// by a factor of 'final_scaling'; and then force scaling to 1.0 (or to
+		// recip_val = 0x7fffffff, which is as close as we can get).
+		// *important*: when info->recip_shamt_must_be_zero, caller must be
+		// prepared for change in output range (bias should be found *after*)
+		//
+		// note: if we move one endpoint, and the other is fixed (and non-zero),
+		// the adjust_minmax_for_zero_with_constraints may expand the range a bit more
+		// and then we need to use recip_val smaller than 0x7fffffff; 'need_correction'
+		// is set when this occurs.
+		int need_correction = 0;
+		if( final_scaling > 1.0f){ // because it could be exactly 1.0
+			int flags = (info->minval_precalculated?1:0) | (info->maxval_precalculated?2:0);
+			if( flags== 3 ){
+				logmsg(nn,0,"can't support this fixed output range; need gain=%f", final_scaling);
+			}else{
+				if(flags == 0 ){	// unconstrained
+					info->out_minval *= final_scaling;
+					info->out_maxval *= final_scaling;
+				}else {
+					float new_range = (info->out_maxval-info->out_minval)*final_scaling;
+					if( flags==1){		// min constrained, max not.
+						info->out_minval = info->out_minval_spec;
+						info->out_maxval = info->out_minval_spec + new_range;
+					}else{ // max constrained, min not
+						info->out_minval = info->out_maxval_spec - new_range;
+						info->out_maxval = info->out_maxval_spec;
+					}
+					adjust_minmax_for_zero_with_constraints( & info->out_minval, & info->out_maxval, flags);
+					float new_adj_range = info->out_maxval-info->out_minval;
+					if( new_adj_range > new_range){
+						// ok then, we need to adjust scale for the range we expanded because of the scale...
+						final_scaling = new_range/new_adj_range;  // < 1.0
+						need_correction = 1;
+					}
+				}
+			}
+		}
+		recip_shamt  = 0;
+		if( !need_correction){
+			recip_val= 0x7FFFFFFF;
+			final_scaling = final_scaling_inv = 1.0f;
+		}else{
+			recip_val = roundf_i32(  final_scaling * (float)(1u<<31));
+			final_scaling_inv = 1.0f/final_scaling;
+		}
 
-	maxsum += 1;
-
+	}else{
+		// find final_scaling with 31-recip_shamt frac bits now.
+		// Will be <= 0x7FFFFF80,
+		//This rounding will be lossless unless final_scaling < (1/128).
+		recip_val = roundf_i32( flt_ldexp( final_scaling, (31-recip_shamt)));
+		final_scaling_inv = output_level_size_adj/prod_level_size;
+	}
 	info->prod_level_size = prod_level_size;
-	info->max_valid_val = (info->out_maxval - info->out_minval) / prod_level_size;
+	// find range of pre-scaled values which don't constitute overflow; allows for rounding to 0
+	// or to 255.
+	info->min_valid_val = -0.49f*final_scaling_inv;
+	info->max_valid_val = 255.49f*final_scaling_inv;
 
 	info->in_max_float = in_max_float;
 	info->in_min_float = in_min_float;
 
 	info->in_offset = input_offset;
 
+	info->recip_val = recip_val;
+	info->recip_shamt = recip_shamt;
+
+
+    if(info->use_v66){
+		// do the same calc for different info->weights_level[i]
+		// .. using the same recip_shamt. Since all info->weights_level[i] are >= info->weight_scale_factor
+		// there should be no overflow.
+		int odv = info->out_depth_valid;
+		float weights_level_prev = info->weight_scale_factor;	// likely many duplicates...
+		uint32_t recip_val_prev = recip_val;
+		float common_scale = flt_ldexp( prod_level_size, (31-recip_shamt));
+
+		for(int i = 0; i < odv; i++){
+			uint32_t recip_val_i = recip_val_prev;
+			float weights_level_i =  info->weights_level[i];
+			if( weights_level_i != weights_level_prev ){
+				recip_val_i = roundf_u32( common_scale/(output_level_size * weights_level_i) );
+				if( recip_val_i & 0x80000000u){
+					logmsg(nn,0,"channel recip val %d has overflowed should not happen %08X as channel %f > global %f",i,info->recip[i], weights_level_i, info->weight_scale_factor);
+				}
+				weights_level_prev = weights_level_i;
+				recip_val_prev = recip_val_i;
+			}
+			info->recip[i] = recip_val_i;
+		}
+    }
+#else
+
+	/* Calculate conversion ratio from bias to product space */
+	//float bias_to_prod_ratio = (bias_level_size / prod_level_size);
+	/* What is the value of the output minimum in the product space? */
+	/* We need to add it to the products to move the smallest valid value to zero */
+	//float min_out_prod_offset = -info->out_minval / prod_level_size;
+    int ovf = 0;
+
+	uint64_t maxsum = fast_roundf((info->out_maxval-info->out_minval)*info->weight_scale_factor / prod_level_size);
+	uint32_t recip_shamt = 0;
+	uint64_t recip_val_64 = 0x7F80000000ULL/maxsum;  //255 << 31
+
+	maxsum += 1;
+
+	info->min_valid_val = 0;
+	info->max_valid_val = (info->out_maxval - info->out_minval)*info->weight_scale_factor / prod_level_size;
+
+	info->in_max_float = in_max_float;
+	info->in_min_float = in_min_float;
+
+	info->in_offset = input_offset;
+
+        if(recip_val_64 >= 0x80000000ULL) {
+            logmsg(nn,1,"main recip value overflowed %08X",recip_val_64);
+            ovf = 1;
+        }
 	while (recip_val_64 >= 0x80000000ULL) {
 		recip_shamt++;
 		recip_val_64 = 0x7F80000000ULL / (maxsum << recip_shamt);
 	}
 	info->recip_val = recip_val_64;
 	info->recip_shamt = recip_shamt;
-	return;
+        if(info->use_v66) for(int i = 0; i < info->out_depth_valid; i++)
+        {
+	   //maxsum = fast_roundf((info->out_maxval-info->out_minval)*info->weight_scale_factor*info->weights_level[i] / prod_level_size );
+	   maxsum = fast_roundf((info->out_maxval-info->out_minval)*info->weights_level[i] / prod_level_size );
+	   info->recip[i] = 0x7F80000000ULL / (maxsum << recip_shamt);
+           if(info->recip[i] & 0x80000000 && !ovf)logmsg(nn,0,"channel recip val %d has overflowed should not happen %08X as channel %f > global %f",i,info->recip[i], info->weights_level[i], info->weight_scale_factor);
+        }
+        //prod_level_size /= info->weight_scale_factor;
+	info->prod_level_size = prod_level_size;
+
+#endif
+	return 0;
 }
 
+/*
+ * EJP: XXX: FIXME: We allocate enough for rounded up computation depth, but here we write full info->out_depth
+ */
 static int fill_bias_buf(
 	struct nn_graph *nn,
 	struct nn_node *self,
-	struct supernode_info *info,
+	struct supernode_info_new *info,
 	int bias32,
 	int32_t extra)
 {
@@ -2818,8 +4050,10 @@ static int fill_bias_buf(
 	float bias_level_size = (bias_max_float - bias_min_float) / bias_denom;
 	const uint8_t *bias8_ptr = bias_tensor->data;
 	const int32_t *bias32_ptr = bias_tensor->data;
-	float bias_to_prod_ratio = (bias_level_size / info->prod_level_size);
-	float min_out_prod_offset = -info->out_minval / info->prod_level_size;
+        float prod_level_size = info->prod_level_size; // /info->weight_scale_factor;
+        logmsg(nn,1,"fill bias buf %f %f",info->prod_level_size ,info->weight_scale_factor);
+	float bias_to_prod_ratio = (bias_level_size / prod_level_size);
+	float min_out_prod_offset = -info->out_minval / prod_level_size;
 	int32_t bias_depth = bias_tensor->shape.depth;
 	int i;
 	int32_t biasval;
@@ -2828,12 +4062,16 @@ static int fill_bias_buf(
 	int32_t gemsumb_val;
 	int32_t final;
 	logmsg(nn,3,"in_offset=%d bias_levelsize=%f prod_level_size=%f ratio=%f",info->in_offset,bias_level_size,info->prod_level_size,bias_to_prod_ratio);
-	for (i = 0; i < info->out_depth; i++) {
+	for (i = 0; i < info->out_depth_valid; i++) {
 		if (i >= bias_depth) biasval = bias_offset;
 		else if (bias32) biasval = bias32_ptr[i];
 		else biasval = bias8_ptr[i];
 		bias_fval = (biasval - bias_offset) * bias_to_prod_ratio;
 		minout_bias_fval = bias_fval + min_out_prod_offset;
+                if(info->use_v66) {
+                   logmsg(nn,3,"channel[%d] = %08x",i,info->weight_scale[i]);
+                   minout_bias_fval *= info->weights_level[i]; //make bigger to match bigger sums
+                }
 		gemsumb_val = info->gemsumb[i];
 		final = -gemsumb_val * info->in_offset + fast_roundf(minout_bias_fval) + extra;
 		logmsg(nn,3,"i=%d biasval%d=%d fval=%f minout_fval=%f gemsumb_val=%d extra=%d final=%d",
@@ -2843,6 +4081,23 @@ static int fill_bias_buf(
 	return 0;
 }
 
+
+void note_chunk_checkpoint_arrival(struct nn_graph *nn, struct nn_node *self, void *opaque)
+{
+	struct supernode_info_new *info = self->opaque;
+	struct weight_slice_info *myslice = opaque;
+	//long idx = myslice - info->conv_slices;
+#if 1
+	logmsg(nn,2,"chunk checkpoint did %d... copy %d bytes %p --> %p, wakeup %d @ offset %d alldone=%d/%d",
+		myslice->checkpoint.required,
+		myslice->copy_size,myslice->copy_in,myslice->copy_out,
+		myslice->wakeup_items,myslice->batch_start_offset,
+		info->alldone_checkpoint.count,info->alldone_checkpoint.required);
+#endif
+	if (myslice->copy_size > 0) supernode_do_memcpy(nn,myslice->copy_out,myslice->copy_in,myslice->copy_size);
+	supernode_execute_some_strategy(self,nn,info->batch_start_idx + myslice->batch_start_offset, myslice->wakeup_items);
+	nn_checkpoint_arrival(nn,self,&info->alldone_checkpoint);
+}
 
 //luc
 //extern const char *info_id2name(unsigned int id);
@@ -2889,8 +4144,8 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 	/* Pull out the inputs we need */
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *filt_tensor = self->inputs[1];
-	const struct tensor *min_in_tensor = self->inputs[2];
-	const struct tensor *max_in_tensor = self->inputs[3];
+	//const struct tensor *min_in_tensor = self->inputs[2];
+	//const struct tensor *max_in_tensor = self->inputs[3];
 	//const struct tensor *min_filt_tensor = self->inputs[4];
 	//const struct tensor *max_filt_tensor = self->inputs[5];
 	const struct tensor *stride_tensor = self->inputs[6];
@@ -2902,11 +4157,13 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 	struct tensor *out_min = self->outputs[1];
 	struct tensor *out_max = self->outputs[2];
 	/* Structures with auxillary information */
-	struct supernode_info *info = self->opaque;
+	struct supernode_info_new *info = self->opaque;
 	/* 
 	 * Find the dimensions of the input data, 
 	 * both dimensions of data as well as padding
 	 */
+	info->in_shape = in_tensor->shape;
+
 	int32_t in_batches = in_tensor->shape.batches;
 	int32_t in_width = in_tensor->shape.width;
 	int32_t in_height = in_tensor->shape.height;
@@ -2944,6 +4201,13 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 			& required_w_before, & required_w_after);
 	int32_t out_height = nn_pad_compute_outsize_and_pad(in_height,filt_height,stride_height,self->padding,
 		& required_h_before, & required_h_after);
+
+	// total number of inputs on each row actually needed (including the required_w before and after).
+	// this is normally the same as required_w_before + in_width + required_w_after
+	//  but it may be a bit less, when required_w_after = 0 and stride_width >1
+	//
+	int32_t required_w_total = filt_width + (out_width-1)*stride_width;
+
 	//logmsg(nn,1, "h: %ld(%ld)%ld  w %ld(%ld)%ld\n", required_h_before, out_height, required_h_after,
 	//		required_w_before, out_width, required_w_after);
 	/* Set up pointers to bulk data */
@@ -2952,28 +4216,6 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 	//uint8_t *bias = bias_tensor->data;
 	uint8_t *out = out_tensor->data;
 	//int32_t *bias32_ptr = bias_tensor->data;
-
-	/* Get min/max values for input, weights, and bias data */
-	float in_max_float = tensor_get_float(max_in_tensor,0);
-	float in_min_float = tensor_get_float(min_in_tensor,0);
-	//float filt_max_float = tensor_get_float(max_filt_tensor,0);
-	//float filt_min_float = tensor_get_float(min_filt_tensor,0);
-	//float bias_min_float = tensor_get_float(bias_min_tensor,0);
-	//float bias_max_float = tensor_get_float(bias_max_tensor,0);
-
-	/* find zero offset for each input */
-	int32_t input_offset = quantize_uint8(0.0f,in_min_float,in_max_float);
-	int32_t filt_offset = info->filt_offset;
-	//int32_t bias_offset = quantize_uint(0.0f,bias_min_float,bias_max_float);
-
-	/* Find level size for each input */
-	float in_level_size = (in_max_float - in_min_float) / 255;
-	/* level size for weights, precomp for any scaling done */
-	float filt_level_size = info->weights_level_size;
-	//float bias_level_size = (bias_max_float - bias_min_float) / 255;
-
-	/* The product level size is the product of the input and filter level size */
-	float prod_level_size = in_level_size * filt_level_size;
 
 	/* Calculate conversion ratio from bias to product space */
 	//float bias_to_prod_ratio = (bias_level_size / prod_level_size);
@@ -3007,22 +4249,10 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 	 * the filter width / stride combination, otherwise we won't be hitting the right pixels exactly.
 	 */
 
-	/* If we did normal convolution, how many junk values would we have on the left? */
-	int32_t out_left_junk = (in_left_pad - required_w_before) / stride_width;
-
-	/* Do we need to skip some elements on the input so that we stride to the right starting point? */
-	int32_t in_left_skip = in_left_pad - (out_left_junk * stride_width + required_w_before);
-
 	/* Where does our output data start? */
 	uint8_t *out_data_start = out + out_top_pad * out_width_total * out_depth_total;
 
-	/* What is the maximum value in product space? */
-	/* Maybe it should be (info->out_maxval - info->out_minval) / prod_level_size... */
-	int32_t maxsum = fast_roundf((info->out_maxval-info->out_minval) / prod_level_size);
-	uint32_t recip_val = 0x7F80000000ULL/maxsum;  //255 << 31
-	uint32_t recip_shamt = 0;
-
-	int out_depth_iters = out_depth_total/32;
+	int num_out_slices = (out_depth+31)/32;
 
 	/* Grab some precomputed weight size information */
 	//int n_weight_batches = info->n_weight_batches;
@@ -3036,18 +4266,18 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 	//int32_t input_skip_lines;
 
 	struct workitem work = {0}; // klocwork
-	struct workitem waitwork;
-	struct workitem copywork;
-	struct workitem zapwork;
+	//struct workitem waitwork = work;
+	//struct workitem copywork = work;
+	struct workitem startwork = work;
 	//int workidx = 0;
 	//int32_t tmpval32;
 
 
 	logmsg(nn,1,"Supernode %x: Recalculating Strategy...",self->node_id);
-	//logmsg(nn,0,"Weight batch size: %d. Per 256KB: %d",weight_batch_size,256*1024/weight_batch_size);
+	//logmsg(nn,0,"Weight batch size: %d. Per %d: %d",nn->vtcm_size,weight_batch_size,nn->vtcm_size/weight_batch_size);
 
 	/* Some sanity checks... */
-	if (out_depth_iters <= 0) return errlog(nn,"no out depth to iterate?");
+	if (num_out_slices <= 0) return errlog(nn,"no out depth to iterate?");
 	if (((in_width_total) % 4) != 0) return errlog(nn,"width fail");
 	if ((in_depth_total % 32) != 0) return errlog(nn,"depth fail");
 	if (((out_width_total) % 4) != 0) return errlog(nn,"width math fail");
@@ -3055,30 +4285,57 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 	if (in_depth_before_pad != 0) return errlog(nn,"depth before pad not supported");
 
 
+	// check all the padding requirements:
+	//   (1) required_w_before  <= in_left_pad
+	//   (2) required_w_after  <= in_right_pad+in_left_pad
+	//     (because the  right side can use the left-padding of the following row).
+	//      Condition (2) can fail when (1) passes, if you have an even-width filter and the right-side
+	//      padding is 0.
+	//  NOTE: if required_w_after > in_right_pad, it means that right-side
+	//  output pixels are using left-padding on the next line, and the bottom right corner
+	//  will need one extra row of bottom padding to support it.
+	//
+	// and
+	//  (3) required_h_before <= in_top_pad
+	//  (4) required_h_after + extra_bottom_row <= in_bottom_pad
+	//   (where 'extra_bottom_row' is 1 if the right edge overlap mentioned above is needed.
+
+
 	/* EJP: hopefully handle arbitrary in left pad... */
 	if (in_left_pad != 4) logmsg(nn,2,"Caution: left pad == %d",in_left_pad);
-	if (required_w_before > in_left_pad) {
-		//logmsg(nn,0,"in_left_pad: %d layout: %d",in_left_pad,in_tensor->format.layout);
-		return errlog(nn,"FIXME: insufficient left pad");
+
+	// 1 if an extra bottom row is needed to supply RHS padding in the last input row.
+	int32_t extra_bottom_row = 0;
+	if(required_w_after > in_right_pad){
+		extra_bottom_row = 1;
+		// However when the vertical stride > 1, and the required_h_after = 0, it's possible
+		// that we don't really need an extra bottom row, since in some cases the
+		// last input row is itself not used.
+		// Check for that, to avoid unnecessary requirement for extra padding.
+		//
+		if( stride_height > 1 && required_h_after == 0){
+			// number of input rows needed to generate output (including padding)
+			int h_needed = filt_height + (out_height-1)*stride_height;
+			if( h_needed < required_h_before + in_height ){
+				// we have at least one superfluous bottom row, so don't need
+				// to artificially add padding.
+				extra_bottom_row = 0;
+			}
+		}
 	}
-	if (required_w_after > (in_right_pad + in_left_pad)) {
-		return errlog(nn,"FIXME: insufficient right pad? Strange...");
+
+	int32_t required_h_after_augmented = required_h_after + extra_bottom_row;
+
+	if( required_w_before > in_left_pad || required_w_after > (in_right_pad + in_left_pad)){
+		return errlog(nn, "insufficient W padding: %d(%d)%d, filter needs %d()%d\n",
+				(int)in_left_pad, (int)in_width, (int)in_right_pad, (int)required_w_before, (int)required_w_after);
 	}
-	if (required_h_before > in_top_pad) return errlog(nn,"top pad");
-	if (required_h_after > in_bottom_pad) return errlog(nn,"bot pad");
+	if(  required_h_before > in_top_pad || required_h_after_augmented > in_bottom_pad ){
+		return errlog(nn, "insufficient H padding: %d(%d)%d, filter needs %d()%d+%d\n",
+				(int)in_top_pad, (int)in_height, (int)in_bottom_pad,
+				(int)required_h_before, (int)required_h_after,(int)extra_bottom_row);
+	}
 
-	if (in_left_skip < 0) return errlog(nn,"wrong in left skip");
-
-	//logmsg(nn,0,"maxsum=0x%x recip_val=0x%x shamt=%d",maxsum,recip_val,recip_shamt);
-	if (recip_val & 0x80000000U) logmsg(nn,0,"***** reciprocal is negative if signed, ??problem??");
-
-	/* Compute reciprocal and shift amount */
-	logmsg(nn,2,"out_maxval=%f in_level_size=%f filt_level_size=%f prod_level_size=%f maxsum ~= %f",
-		info->out_maxval,
-		in_level_size,
-		filt_level_size,
-		prod_level_size,
-		maxsum);
 
 	logmsg(nn,2,"in: %p h/w/d: %d/%d/%d total h/w/d: %d/%d/%d first valid row: %p first valid data: %p",
 		in,
@@ -3087,64 +4344,90 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 		in+(in_depth_total*in_width_total*in_top_pad),
 		in+(in_depth_total*in_width_total*in_top_pad)+(in_depth_total*in_left_pad));
 
+	if (tensor_out_prepare_padded_d32(out_tensor,
+		out_batches,
+		out_height,out_top_pad,out_bottom_pad,
+		out_width,out_left_pad,out_right_pad,
+		out_depth,out_depth_before_pad,out_depth_after_pad,
+		NN_TYPE_QUINT8) != 0) {
+		return errlog(nn,"output tensor prep fail");
+	}
+
 	/*
 	 * Update info / supernode info values
 	 * These values are stored in structures for use during normal execution
 	 */
+	{
+		struct tensor_addressing tin = tensor_addressing_d32( in_tensor);
+		info->in_next_d32 = tin.d32_stride;
+		info->in_next_row = tin.height_stride;
+		info->in_next_batch = tin.batch_stride;
+		info->in_width = tin.d32_stride / 32u;
+		info->in_depth = 32*tin.nd32_total;
+	}
 
-	info->prod_level_size = prod_level_size;
-	info->max_valid_val = (info->out_maxval - info->out_minval) / prod_level_size;
-	info->min_valid_val = 0;
+	info->out_width_processed = out_width;
 
-	info->in_max_float = in_max_float;
-	info->in_min_float = in_min_float;
-
-	info->recip_val = recip_val;
-	info->recip_shamt = recip_shamt;
-
-	info->in_offset = input_offset;
-
-	info->in_width = in_width_total;
-	info->in_depth = in_depth_total;	// Maybe can optimize to just in_depth?
-	info->in_next_d32 = in_width_total * 32;
-	info->in_next_row = in_width_total * in_depth_total;
-
-	info->out_width = out_width_total;
-	info->out_depth = out_depth_total;
+	{
+		struct tensor_addressing tout = tensor_addressing_d32	( out_tensor);
+		info->out_next_d32 = tout.d32_stride;
+		info->out_next_row = tout.height_stride;
+		info->out_width = tout.d32_stride /32u;				// includes width padding
+		info->out_depth_total = 32*tout.nd32_total;			// includes all padding
+	}
+	info->out_depth_valid = out_depth + out_depth_after_pad;	// know how much we'll compute
 
 	info->stride_height = stride_height;
 	info->stride_width = stride_width;
 
-	info->out_next_d32 = out_width_total * 32;
-	info->out_next_row = out_width_total * out_depth_total;
 
-	info->input_base = in + (in_top_pad - required_h_before)*info->in_next_row;
+	// input_base0, in_height:  this omits any top/bottom padding rows that we don't need
+
+	info->input_base0 = in + (in_top_pad - required_h_before)*info->in_next_row;
 	info->in_height = in_height + required_h_before + required_h_after;
 	info->weights_base = info->weights;
 
-	info->out_left_junk = out_left_junk;
-	info->in_left_skip = in_left_skip;
+	/* 
+	 * If we are striding, we need to ensure that the total left padding is compatible with 
+	 * the filter width / stride combination, otherwise we won't be hitting the right pixels exactly.
+	 */
+	/* If we did normal convolution, how many junk values would we have on the left? */
+	info->out_left_junk = (in_left_pad - required_w_before) / info->stride_width;
+	/* Do we need to skip an element on the input so that we stride to the right starting point? (covers even/odd leftover from out_left_junk) */
+	info->in_left_skip = in_left_pad - (info->out_left_junk * info->stride_width + required_w_before);
+	if (info->in_left_skip < 0
+			|| (info->stride_width==2 && info->in_left_skip > 1) ){
+		return errlog(nn,"wrong in left skip");
+	}
 
 	/* Is skip_col the same as in_left_skip? */
         //info->skip_col = ((out_width & 3) <= ((4-out_left_junk)&3) && (out_width & 3)!=0);
-        info->skip_col = in_left_skip;
+        info->skip_col = info->in_left_skip;
 
-	info->out_height = out_height;
+	info->out_height = out_tensor->shape.height;
 	info->filt_width = filt_width;
 	info->filt_height = filt_height;
 
-	fill_info_minmax_basics(nn,self,info);
+	if(  fill_info_minmax_basics(nn,self,info) != 0 )
+		return -1;
 	//fill_info_dim_basics(nn,self,info);
-
+	logmsg(nn,2,"out_maxval=%f in_level_size=%f filt_level_size=%f prod_level_size=%f maxvalid ~= %d",
+		info->out_maxval,
+		info->prod_level_size/info->weights_level_size,
+		info->weights_level_size,
+		info->prod_level_size,
+		info->max_valid_val);
 	/*
 	 * Recompute bias values
 	 * We need to incorporate the input bias values, min offset, and gemsumb values into the bias buffer
 	 * The bias buffer is added in the "product" (in_stepsize * filt_stepsize) number system
 	 */
+	int filt_offset = info->weights_offset;
+	int input_offset = info->in_offset;
 
 	int bias32 = (self->node_type == OP_Supernode_8x8p32to8_d32);
 	int32_t bias_extra = 0;
-        if (!info->use_v65 && filt_height==1 && filt_width==1 && ENABLE_FASTSUMA_1x1) bias_extra = in_depth_total*input_offset*filt_offset;
+        if (!info->use_v65 && filt_height==1 && filt_width==1 && ENABLE_FASTSUMA_1x1) bias_extra = info->in_depth*input_offset*filt_offset;
 	logmsg(nn,2,"in_depth_total=%d input_offset=%d filt_offset=%d bias_extra=%d",in_depth_total,input_offset,filt_offset,bias_extra);
 	fill_bias_buf(nn,self,info,bias32,bias_extra);
 
@@ -3159,7 +4442,7 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 		bias_offset = 0;
 		bias_to_prod_ratio *= 0x1.0p-24f;
 	}
-	for (i = 0; i < out_depth_total; i++) {
+	for (i = 0; i < info->out_depth; i++) {
 		int32_t biasval = bias[i];
 		if (bias32) biasval = bias32_ptr[i];
 		float bias_fval = ((biasval - bias_offset) * bias_to_prod_ratio);
@@ -3229,18 +4512,10 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 		return errlog(nn,"min out prep fail");
 	}
 	if (tensor_out_prepare_normal(out_max,1,1,1,1,NN_TYPE_FLOAT) != 0) {
-		return errlog(nn,"max out prep fail");
+		return errlog(nn,"max out prep fail max_size=%d @ %p",out_max->max_size,&out_max->max_size);
 	}
 	tensor_set_float(out_min,0,info->out_minval);
 	tensor_set_float(out_max,0,info->out_maxval);
-	if (tensor_out_prepare_padded_d32(out_tensor,
-		out_batches,
-		out_height,out_top_pad,out_bottom_pad,
-		out_width,out_left_pad,out_right_pad,
-		out_depth,out_depth_before_pad,out_depth_after_pad,
-		NN_TYPE_QUINT8) != 0) {
-		return errlog(nn,"output tensor prep fail");
-	}
 
 	/*
 	 * Overcompute Reduction
@@ -3248,33 +4523,44 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 	 * We should make this very robust so we can have truly arbitrary padding
 	 */
 
-#ifndef HEXAGON_V66
+//#ifndef HEXAGON_V66
+#if 1
 	/*
 	 * In V60-V65, we should just be able to move the pointer to 
 	 *   (b,-required_h_before,required_w_before,0)
 	 * since there is no strict vector alignment requirement for the activation (for this node...)
 	 */
 	// maybe info->in_width = in_width + required_w_before + required_w_after;
-	info->out_width = out_width + out_right_pad;
+	info->out_width = out_tensor->shape.width + out_tensor->format.width_pad[1];
 	info->out_left_junk = 0;
 	if (info->use_v65) {
-                //if(((out_width+7)%8) < (2+((out_width+5)%6))) { //too general for now
-                if(out_width == 17 || out_width == 35) {          //big gains for iv3
-                   info->num_accs = 6;
-                   info->out_width = (out_width + 5) - ((out_width + 5) % 6);  //use 6
-                } else {
-                   info->num_accs = 8;   //use a default of multiples of 4
-                }
+		int naccs = 8;		// default, multiples of 8
+		//if(((out_width+7)%8) < (2+((out_width+5)%6))) { //too general for now
+		if( info->out_width >= 11 && info->out_width <= 36){
+			// use multiples of 6?
+			//big gains for iv3
+			// use 6 for 11,12,17,18,35,36
+			// 9,10,33,34 would be good too but currently asm needs last group to be 5 or 6
+			int div6 = (info->out_width+5)/6u;	// # of groups of 6
+			int pad6 = div6*6 - info->out_width;	// amount to pad to reach mul of 6
+			if( pad6 <= 1 && (info->out_width <=18 || info->out_width >= 35)){
+				naccs = 6;
+				info->out_width = div6*6;
+			}
+		}
+		info->num_accs = naccs;
+
 		//v65 chops off what it doesn't want and puts it in a buffer
 		info->in_left_skip = in_left_pad - required_w_before ; //1,2,3 or 4
 		int edge = (in_left_pad - required_w_before) & ~3;
-		info->input_base = tensor_location_d32(in_tensor,0,-required_h_before,edge-in_left_pad,0);
+		info->input_base = tensor_location_bhw_d32(in_tensor,0,-required_h_before,edge-in_left_pad);
 	} else {
-		info->input_base = tensor_location_d32(in_tensor,0,-required_h_before,-required_w_before,0);
+		// this may not be vector aligned, but it is 32 aligned: it points to the first h-padding unit we need
+		info->input_base = tensor_location_bhw_d32(in_tensor,0,-required_h_before,-required_w_before);
 		info->in_left_skip = 0;
 	}
 	info->skip_col = info->in_left_skip;
-	out_data_start = tensor_location_d32(out_tensor,0,0,0,0);
+	out_data_start = tensor_location_bhw_d32(out_tensor,0,0,0);
 	logmsg(nn,2,"now out_width=%d out_left_junk=%d out_data_start=%p",info->out_width,info->out_left_junk,out_data_start);
 //	info->suma_start = 3 + in_left_pad - required_w_before;
 #else
@@ -3332,12 +4618,14 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 	 * Set up work items
 	 */
 
+#if 0
 	/* FIXME for v66: copy work has to actually work. */
 	copywork.execute = supernode_execute_workitem_copy;
 	copywork.info = info;
 	copywork.self = self;
+#endif
 
-	waitwork.execute = supernode_execute_workitem_join_some;
+	//waitwork.execute = supernode_execute_workitem_join_some;
 
 	work.info = info;
 	work.self = self;
@@ -3346,17 +4634,14 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 	//work.weights = filtdst;
 	work.stop_line = info->out_height;
 	work.skip_lines = 1;
-	work.execute = supernode_execute_workitem_vector_dispatch;	// FIXME, pick the right function
+	//work.new_execute = supernode_execute_workitem_vector_dispatch;	// FIXME, pick the right function
+	work.new_execute = supernode_execute_hvx_conv_work;	// FIXME, pick the right function
 
 #if 0
         if(required_h_before < in_top_pad) work.zap_top_size = required_h_before + 1; //allow for integration
         else work.zap_top_size = required_h_before;
 
-        work.zap_bot_size = required_h_after;
-        /* If we need extra right padding, add another row to the bottom zapping to handle overflow */
-        if ((required_w_after > in_right_pad) && (required_h_after < in_bottom_pad)) {
-                work.zap_bot_size += 1;
-        }
+        work.zap_bot_size = required_h_after_augmented;
         work.zap_right = tensor_location_d32(in_tensor,0,0,in_width,0);
         work.zap_left = tensor_location_d32(in_tensor,0,0,-in_left_pad,0);
         work.zap_left_size = in_left_pad*32;
@@ -3374,27 +4659,35 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
                 /* EJP: FIXME: this probably doesn't work if zap_right_size goes byond the vector size */
         }
 #else
-	zapwork.self = self;
-	zapwork.info = info;
-	zapwork.zap_top = (uint8_t *)info->input_base;
-	zapwork.zap_bot = (uint8_t *)info->input_base 
+	startwork.self = self;
+	startwork.info = info;
+	// top/bottom zapping based on entire rows (all padding) so they use input_base0.
+	startwork.zap_top = (uint8_t *)info->input_base0;
+	startwork.zap_bot = (uint8_t *)info->input_base0
 		+ (required_h_before + in_height)*info->in_next_row;
-	zapwork.zap_top_size = info->in_next_row * required_h_before;
-	zapwork.zap_bot_size = info->in_next_row * required_h_after;
-	/* If we need extra right padding that we don't have, add another row to the bottom zapping to handle overflow */
-	if ((required_w_after > in_right_pad) && (required_h_after < in_bottom_pad)) {
-		zapwork.zap_bot_size += info->in_next_row;
+
+	startwork.zap_top_size = info->in_next_row * required_h_before;
+	startwork.zap_bot_size = info->in_next_row * required_h_after_augmented;
+
+	uint8_t  * z0 = tensor_location_bhw_d32(in_tensor,0,0,0);	// first real pixel on first row
+	startwork.zap_left = z0 - 32*in_left_pad;					// start of left padding on first row
+	startwork.zap_right = z0 + 32*in_width;					// start of right padding on first row
+	// do not zap beyond the right padding
+	// EJP: are there other cases where we need to zap right pad?
+	startwork.zap_right_size = Q6_R_min_RR(in_right_pad,required_w_after);
+	startwork.zap_rl_depths = in_depth_total / 32;
+
+	// zap all of the left padding if
+	// (a) any left padding is needed, or
+	// (b) the req. for right padding exceeds the actual right padding (so left is needed for that)
+	if (required_w_before != 0 || required_w_after > in_right_pad) {
+		startwork.zap_left_size = in_left_pad;
+	} else {
+		startwork.zap_left_size = 0;
 	}
-	zapwork.zap_left = tensor_location_d32(in_tensor,0,0,-in_left_pad,0);
-	zapwork.zap_right = tensor_location_d32(in_tensor,0,0,in_width,0);
-	if (required_w_after) zapwork.zap_right_size = Q6_R_max_RR(in_right_pad,required_w_after);
-	else zapwork.zap_right_size = 0;	// EJP: are there other cases where we need to zap right pad?
-	zapwork.zap_rl_depths = in_depth_total / 32;
-	//zapwork.zap_left_size = required_w_before;
-	if (required_w_before) zapwork.zap_left_size = in_left_pad;
-	else zapwork.zap_left_size = 0;
-	zapwork.zap_height = in_height;
-	zapwork.zap_value = input_offset;
+	startwork.zap_height = in_height;
+	startwork.zap_value = input_offset;
+	logmsg(nn,2,"padding=%d required_w_before: %d required_w_after: %d required_h_before: %d required_h_after: %d",self->padding,required_w_before,required_w_after,required_h_before,required_h_after);
 
 	/*
 	 * If we have padding zap work to do, add it to the list
@@ -3402,20 +4695,22 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 	 * FIXME: maybe just set zap_right and zap_right_size and let it be on
 	 * the next row if enough left pad exists.
 	 */
-	if ((out_right_pad > 0) && (zapwork.zap_left_size == 0)) {
+	/* GLS: leaving this stuff in; it may be needed to avoid contaminating min/max in output width padding */
+	if ((out_right_pad > 0) && (startwork.zap_left_size == 0)) {
 		//if (out_right_pad > in_left_pad) return errlog(nn,"oops, not enough left pad");
 		/* EJP: FIXME: this probably doesn't work if zap_right_size goes byond the vector size */
-		zapwork.zap_left_size = in_left_pad;
-		zapwork.zap_right_size = in_right_pad;
+		startwork.zap_left_size = in_left_pad;
+		startwork.zap_right_size = in_right_pad;
 	}
-#ifndef V66
+//#ifndef V66
+#if 1
 	/* EJP: this is extra padding for integral/suma, but maybe it's no longer needed? */
-	if (zapwork.zap_left_size == 0) {
-		zapwork.zap_left_size = in_left_pad;
+	if (startwork.zap_left_size == 0) {
+		startwork.zap_left_size = in_left_pad;
 	}
-	if (zapwork.zap_top_size == 0 && in_top_pad > 0) {
-		zapwork.zap_top_size = info->in_next_row;
-		zapwork.zap_top = (uint8_t *)info->input_base - info->in_next_row;
+	if(0)if (startwork.zap_top_size == 0 && in_top_pad > 0) {
+		startwork.zap_top_size = info->in_next_row;
+		startwork.zap_top = (uint8_t *)info->input_base0 - info->in_next_row;
 	}
 #endif
 #endif
@@ -3481,24 +4776,6 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 	//luc
 //	logmsg(nn,0,"opname=%s name=%s ",info_id2opname(self->node_id),info_id2name(self->node_id));
 
-#ifdef  V66
-	slice_for_cache(
-		self->node_id,
-		nn,
-		out_batches,
-		in_depth_total/32,
-		info->in_width,
-		//info->in_height,
-		info->out_height,
-		info->stride_height,
-		info->filt_height,
-		weight_batch_size,
-		out_depth_total/32,
-		out_width_total*out_height_total*32,
-		&inner_act_batches,
-		&inner_act_rows,
-		&inner_weight_chunks);
-#else
 	slice_for_cache(
 		self->node_id,
 		nn,
@@ -3512,25 +4789,26 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 		info->filt_width,
 		info->filt_height,
 		weight_batch_size,
-		out_depth_total/32,
+		num_out_slices,
 		&inner_act_batches,
                 &inner_act_rows,
 		&inner_weight_chunks);
 
 	work.num_lines = inner_act_rows;
 	inner_act_rows = (out_height+NUM_THREADS-1)/(NUM_THREADS);
-#endif
 
 	/* Ignore batch / weight slice factor for now ... */
 	int32_t outer_act_batches = (out_batches + inner_act_batches - 1)/inner_act_batches;
 	int32_t outer_act_iters = (out_height + inner_act_rows - 1)/inner_act_rows;
-	int32_t outer_weight_chunks = (out_depth_total/32 + inner_weight_chunks - 1) / inner_weight_chunks;
+	int32_t outer_weight_chunks = (num_out_slices + inner_weight_chunks - 1) / inner_weight_chunks;
+
+	// NOTE: outer_act_iters <= NUM_THREADS.
 
 	logmsg(nn,1,"batch/row/weight chks: inner=%d,%d,%d outer=%d,%d,%d out_height=%d out_depth_chunks=%d",
 		inner_act_batches,work.num_lines,inner_weight_chunks,
 		outer_act_batches,outer_act_iters,outer_weight_chunks,
 		out_height,
-		out_depth_total/32);
+		num_out_slices);
 
     /*-------------------------------------------------------------*/
     /*  Setup parameters and allocate scratch for SUMA computation */
@@ -3544,22 +4822,32 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 
     if (!info->use_v65) {
         if(info->filt_width ==1 && info->filt_height == 1 && ENABLE_FASTSUMA_1x1) {
-/* eewwww.  Well, if we adjust the pointers to skip over the left
- * pad, that's fine. But if the result isn't aligned, the fast SUMA code won't
- * have things lined up right.  Fortunately, we have a hook for adjusting where
- * we start looking in the suma buffer.  This isn't a great fix, but it seems to 
- * fix the critical bug...
- */
+        	// each row of the suma has
+        	//   (a) one slot for each 'unused' left-padding element (if any); 0..3
+        	//   (b) one slot for each input element which is used by the convolution
+        	//       including req. left & right (i.e. required_w_total )
+        	//   (c) padding to a multiple of 32.
+        	//  suma_start points to section (b).
+        	//
             info->suma_start = (in_left_pad-required_w_before)&3; 
-            suma_buf_rowstride = roundup(in_width_total,32);
+            suma_buf_rowstride = roundup(info->suma_start+required_w_total,32);
             scratch_size = 32;	 // not actually used; minimal size
         } else {
+        	// each row of the integral buffer will have (in i32 slots):
+        	//   (a) 8 zeros
+        	//   (b) one slot for each 'unused' left-padding element (if any); 0..3
+        	//   (c) one slot for each input element which is used by the convolution
+        	//       including req. left & right (i.e. required_w_total )
+        	//   (d) padding up to a multiple of 32.
+        	// The 'suma_start' points to the first element before section (c)
+        	// 'suma buf' has the same width, and the the first 'proper' output
+        	// will be at position 'suma_start'.
+        	//
             info->suma_start = 7 + ((in_left_pad-required_w_before)&3);
-            suma_buf_rowstride = roundup(in_width_total+info->suma_start+1,32);
+            suma_buf_rowstride = roundup(info->suma_start + 1 + required_w_total,32);
             info->suma_width = suma_buf_rowstride;
             // this is 4 rows for 'scratch_128xW' plus enough rows for the integral buffer
             int scratch_rows = 4 + (work.num_lines-1)*info->stride_height+info->filt_height+1;
-
             scratch_size = suma_buf_rowstride*scratch_rows + 32;
         }
 
@@ -3582,7 +4870,8 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 	int ow,ob,or,ib;
 
 
-
+	int curr_suma_progress = 0;
+	int batchstart_idx = 0;
 	//if (hlines_per_slice <= NUM_THREADS) return errlog(nn,"OOPS: chopped too fine");
 	for (ob = 0; ob < outer_act_batches; ob++) {
 	for (ib = 0; ib < inner_act_batches; ib++) {
@@ -3591,17 +4880,51 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 			continue;
 		work.suma_buf = sumabuf_batch0 + b*sumabuf_batch_stride;
 
+#if 0
 		/* l2fetch first weight chunk */
 		logmsg(nn,1,"adding l2fetch: %p %d %d",info->weights,weight_batch_size,inner_weight_chunks);
+// Add workitem: weights
+// EJP: merge into startwork
 		supernode_weights(self,nn,info,b!=0, /*don't wait for previous in batch 0*/
 				info->weights,weight_batch_size,info->use_v65 ? inner_weight_chunks : 1, outer_act_iters);
-
+#endif
 		/* Zap padding is back */
-		supernode_add_padding_zap(self,nn,info,zapwork,b*input_batch_size,required_h_before,required_w_before);
+		//supernode_add_padding_zap(self,nn,info,zapwork,b*input_batch_size,required_h_before,required_w_before);
+		curr_suma_progress ++;	// advance per batch
+// Add workitem: padzap
+// EJP: make startwork
+		info->startup_info.batch_start_offset = 0;
+		if (info->use_v65) {
+			uint32_t weights_total = inner_weight_chunks * weight_batch_size;
+			if (unlikely(weights_total > (nn->vtcm_size - VTCM_CIRCBUF_SIZE))) return errlog(nn,"oops: v65 selected but weights too big");
+			startwork.copy_in = info->weights;
+			startwork.copy_out = nn->vtcm_ptr;
+			startwork.copy_size = inner_weight_chunks * weight_batch_size;
+			info->startup_info.wakeup_items = outer_act_iters;
+			//if (b == 0) supernode_note_earlywork(nn,self,info,startwork.copy_out,startwork.copy_in,startwork.copy_size);
+		} else {
+			/* For V60, we need to finish the gemsuma before the rest can continue */
+			startwork.pf_inp = info->weights;
+			startwork.pf_width = startwork.pf_stride = weight_batch_size/32;
+			/* EJP: V60 code prefetches next chunk of weights automatically, just PF first chunk */
+			//startwork.pf_height = 1 * 32;
+			startwork.pf_height = inner_weight_chunks * 32;
+			//info->startup_info.wakeup_items = outer_act_iters * outer_weight_chunks;
+			info->startup_info.wakeup_items = outer_act_iters;
+		}
+		startwork.join_iters = outer_weight_chunks;
+	        if (b > 0) info->work_items[batchstart_idx].next_startup_offset = info->n_work_items - batchstart_idx - 1;
+		int NOW_BATCHES=1;
+		batchstart_idx = supernode_add_batch_startup(self,nn,info,startwork,b*input_batch_size,required_h_before,required_w_before,NOW_BATCHES);
 
 	for (ow = 0; ow < outer_weight_chunks; ow++) {
-            work.need_initialize_suma = (ow==0) || (outer_act_iters==1&&ow==1);
+
             int last_chunk_in_batch = (ow == (outer_weight_chunks-1));
+	    int start_weights = ow * inner_weight_chunks;
+	    int now_chunks = Q6_R_min_RR(num_out_slices - start_weights,inner_weight_chunks);
+	    int32_t next_weight_chunks = inner_weight_chunks;
+	    int32_t max_next_weight_chunks = num_out_slices-start_weights-now_chunks;
+	    next_weight_chunks = Q6_R_min_RR(max_next_weight_chunks,next_weight_chunks);
 	    for (or = 0; or < outer_act_iters; or++) {
                // work.suma_scratch = scratch[n_scratch++%2];
 
@@ -3610,12 +4933,13 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 		int needs_next_outer_weights = pf_outer_act && (ow != (outer_weight_chunks-1));
 
 		int start_row = or * inner_act_rows;
-		int start_weights = ow * inner_weight_chunks;
 		int n_rows = Q6_R_min_RR(out_height-start_row,inner_act_rows);
-		int now_chunks = Q6_R_min_RR(out_depth_total/32 - start_weights,inner_weight_chunks);
 
 
 		/* FILL OUT NORMAL WORK INFORMATION */
+		work.need_initialize_suma = (ow ==0);
+		//work.suma_progress_need = curr_suma_progress;
+		//work.suma_progress_index = or;
 		const uint8_t *filtsrc = info->weights_base + start_weights*weight_batch_size;
 		const uint8_t *filtdst = supernode_filtbuf_location(nn,info,ow,filtsrc,now_chunks*weight_batch_size);
 		work.weights = filtdst;
@@ -3626,37 +4950,61 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 		work.biases = info->biasbuf + start_weights*32;
 		work.start_line = start_row;
 		work.stop_line = work.start_line + n_rows;
-		work.do_conv = &info->semaphores[1];			// sem to wait for, before starting conv
+		//work.do_conv = &info->semaphores[1];			// sem to wait for, before starting conv
+		work.do_conv = NULL;
 		work.conv_done = &info->semaphores[2];			// sem to post, after conv if not last_chunk (v65 only)
 //		work.copy_done = &info->semaphores[3];
+		work.start_chunk = start_weights;
 		work.last_chunk = last_chunk_in_batch && ( b == in_batches-1);
 
 		if (needs_next_outer_weights) {
-			int32_t next_weight_chunks = inner_weight_chunks;
-			int32_t max_next_weight_chunks = out_depth_total/32-start_weights-now_chunks;
-			next_weight_chunks = Q6_R_min_RR(max_next_weight_chunks,next_weight_chunks);
 			work.pf_inp = filtsrc + now_chunks*weight_batch_size;
 			work.pf_width = weight_batch_size;
 			work.pf_stride = work.pf_width;
 			work.pf_height = next_weight_chunks;
 
-			logmsg(nn,1,"or=%d ow=%d set up weight pf ptr=%p width=%d height=%d",
-					or,ow,work.pf_inp,work.pf_width,work.pf_height);
+			logmsg(nn,1,"or=%d ow=%d/%d set up weight pf ptr=%p width=%d height=%d",
+					or,ow,outer_weight_chunks,work.pf_inp,work.pf_width,work.pf_height);
 		} else {
 			work.pf_inp = NULL;
 			work.pf_width = 0;
 			work.pf_stride = 0;
 			work.pf_height = 0;
-			logmsg(nn,1,"or=%d ow=%d no pf",or,ow);
+			logmsg(nn,1,"or=%d ow=%d/%d no pf",or,ow,outer_weight_chunks);
 		}
-
 		work.donesem = &info->semaphores[0];
 		semaphore_count++;
+// Add workitem: work
 		supernode_add_work_item(self,nn,info,work);
-	}//or
+	    }//or
+	    memset(&info->conv_slices[start_weights],0,sizeof(info->conv_slices[ow]));
+            if ((ow == 0) && (!info->use_v65)) {
+                /* For V60 code, wake up rest of items once first batch is done */
+                /* This ensures ordering of gemsuma with other work items */
+                info->conv_slices[ow].wakeup_items = (outer_weight_chunks-1)*outer_act_iters;
+                info->conv_slices[ow].batch_start_offset = (ow+1)*outer_act_iters;
+            }
+	    if (!last_chunk_in_batch && info->use_v65) {
+		info->conv_slices[start_weights].copy_in = work.pf_inp;
+		info->conv_slices[start_weights].copy_out = nn->vtcm_ptr;
+		info->conv_slices[start_weights].copy_size = next_weight_chunks * weight_batch_size;
+		info->conv_slices[start_weights].batch_start_offset = (ow+1)*outer_act_iters;
+		info->conv_slices[start_weights].wakeup_items = outer_act_iters;
+		logmsg(nn,1,"v65: Setting up copy %p-->%p %d bytes, %d items @ %d",
+			info->conv_slices[start_weights].copy_in,
+			info->conv_slices[start_weights].copy_out,
+			info->conv_slices[start_weights].copy_size,
+			info->conv_slices[start_weights].wakeup_items,
+			info->conv_slices[start_weights].batch_start_offset);
+	    }
+            nn_checkpoint_init(&info->conv_slices[start_weights].checkpoint,outer_act_iters,note_chunk_checkpoint_arrival,(void *)&info->conv_slices[start_weights]);
+#if 0
 	if(!last_chunk_in_batch && info->use_v65)
+// Add workitem: weights
+// Needs to be merged into work checkpoint work
 		    supernode_weights(self,nn,info,1, /*wait for previous*/
 				work.pf_inp, work.pf_width,work.pf_height, outer_act_iters);
+#endif
         }//ow
         }//ib
         }//ob
@@ -3667,10 +5015,11 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 	// However, for v65, the work thread only posts done_sem in units where last_chunk is set.
 	// (earlier ones are joined by the weight-copy ops).
 
-	if( info->use_v65) semaphore_count = outer_act_iters;
-	waitwork.join_iters = semaphore_count;
-	waitwork.donesem = &info->semaphores[0];
-	supernode_add_work_item(self,nn,info,waitwork);
+	//if( info->use_v65) semaphore_count = outer_act_iters;
+	//waitwork.join_iters = semaphore_count;
+	//waitwork.donesem = &info->semaphores[0];
+// Add workitem: wait for shutdown
+	//supernode_add_work_item(self,nn,info,waitwork);
 #if 0
 	/*
 	 * If we have padding zap work to do, add it to the list
@@ -3728,7 +5077,7 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 				info,
 				batch_input,
 				in_width_total*in_depth_total,
-				in_hlines_per_slice+required_h_before+required_h_after);
+				in_hlines_per_slice+required_h_before+required_h_after_augmented);
 		if (hslice == 0) supernode_add_padding_zap(
 				self,
 				nn,
@@ -3738,7 +5087,7 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 				required_h_before,
 				required_w_before);
 		if (hslice == 0) work.suma_buf = supernode_add_suma(self,nn,info,batch_input);
-		for (d = 0; d < out_depth_iters; d++) {
+		for (d = 0; d < num_out_slices; d++) {
 			//const uint8_t *filtsrc = info->weights_base + workidx*weight_batch_size;
 			const uint8_t *filtsrc = info->weights_base + d*weight_batch_size;
 			int workidx_mod_batches = workidx % n_weight_batches;
@@ -3751,16 +5100,16 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 				Always zap right pad
 				If required_w_before, zap left pad (4 w's)
 				If required_h_before, zap top pad
-				If required_h_after, zap bottom pad
+				If required_h_after_augmented, zap bottom pad
 			*/
 			/* as we near the end of this activation slice, get the next one */
-			if ((d == out_depth_iters-1) && ((hslice+1) < height_slice_factor)) supernode_add_l2fetch(
+			if ((d == num_out_slices-1) && ((hslice+1) < height_slice_factor)) supernode_add_l2fetch(
 				self,
 				nn,
 				info,
 				batch_input + in_width_total*in_depth_total*in_hlines_per_slice*(hslice+1),
 				in_width_total*in_depth_total,
-				in_hlines_per_slice+required_h_before+required_h_after);
+				in_hlines_per_slice+required_h_before+required_h_after_augmented);
 			work.weights = filtdst;
 			work.donesem = &info->semaphores[workidx_mod_batches];
 
@@ -3792,33 +5141,676 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 	}
 #endif
 	/* Add work to check the output min/max and see if we need to adjust and try again */
-	work.execute = supernode_execute_workitem_check_for_retry;
-	supernode_add_work_item(self,nn,info,work);
+	//work.execute = supernode_execute_workitem_check_for_retry;
+	//supernode_add_work_item(self,nn,info,work);
 
 	/*
 	 * Sometimes we want to collect some statistics...
 	 */
 	if (0) supernode_statistics(nn,info,self);
 
-
 	/*
 	 * We've calculated the strategy, mark that the work is done. Hopefully it sticks!
 	 */
-
+	supernode_compile_worklist(nn,info,self);
+	info->prepared_vtcm_addr = nn->vtcm_ptr;
 	info->needs_retry = 0;
 	info->strategy_valid = 1;
 	return 0;
 }
 
-int supernode_execute_strategy(struct nn_node *self, struct nn_graph *nn)
+
+/*
+ * What do we have to do before calling the work function?
+ *
+ * Some things are cacheable:
+ * * Biasbuf number range conversion
+ * * Adding min_out value (converted) into biasbuf
+ * * Adding gemsumb values (if needed) into biasbuf
+ * * Adding in_offset * weight_offset * N into biasbuf (if needed)
+ * * Partitioning scheme
+ * * Reciprocal for range conversion
+ * * Min and Max output information
+ * * Strategy for partitioning
+ * * Work function
+ * * output shape/padding
+ *
+ * * Ensure that cached value is still accurate given these inputs (if not, recalc)
+ * * Add work_for_vector items
+ * * Wait for workers to complete
+ * * Any fixup / postproc 
+ * 
+ * * The work function is passed to work_for_vector.  It can be different for different architectures.
+ * * The strategy for partitioning could be a set of functions.
+ */
+int supernode_recalculate_strategy_v66(struct nn_node *self, struct nn_graph *nn)
 {
-	int i;
-	int err = 0;
-	struct supernode_info *info = self->opaque;
-	int n_work_items = info->n_work_items;
+	/* Pull out the inputs we need */
+	const struct tensor *in_tensor = self->inputs[0];
+	const struct tensor *filt_tensor = self->inputs[1];
+	//const struct tensor *min_in_tensor = self->inputs[2];
+	//const struct tensor *max_in_tensor = self->inputs[3];
+	//const struct tensor *min_filt_tensor = self->inputs[4];
+	//const struct tensor *max_filt_tensor = self->inputs[5];
+	const struct tensor *stride_tensor = self->inputs[6];
+	//const struct tensor *bias_tensor = self->inputs[7];
+	//const struct tensor *bias_min_tensor = self->inputs[8];
+	//const struct tensor *bias_max_tensor = self->inputs[9];
+	/* Find the output tensors */
+	struct tensor *out_tensor = self->outputs[0];
+	struct tensor *out_min = self->outputs[1];
+	struct tensor *out_max = self->outputs[2];
+	/* Structures with auxillary information */
+	struct supernode_info_new *info = self->opaque;
+
+	info->in_shape = in_tensor->shape;
+	/* 
+	 * Find the dimensions of the input data, 
+	 * both dimensions of data as well as padding
+	 */
+	int32_t in_batches = in_tensor->shape.batches;
+	int32_t in_width = in_tensor->shape.width;
+	int32_t in_height = in_tensor->shape.height;
+	int32_t in_depth = in_tensor->shape.depth;
+	int32_t in_left_pad = in_tensor->format.width_pad[0];
+	int32_t in_right_pad = in_tensor->format.width_pad[1];
+	int32_t in_depth_before_pad = in_tensor->format.depth_pad[0];
+	int32_t in_depth_after_pad = in_tensor->format.depth_pad[1];
+	int32_t in_top_pad = in_tensor->format.height_pad[0];
+	int32_t in_bottom_pad = in_tensor->format.height_pad[1];
+	int32_t in_width_total = in_width + in_left_pad + in_right_pad;
+	int32_t in_depth_total = in_depth + in_depth_before_pad + in_depth_after_pad;
+	int32_t in_height_total = in_height + in_top_pad + in_bottom_pad;
+
+        info->in_depth_after = in_depth_after_pad;
+
+	/* Find the dimensions of the filter weights.  filt_batches == out_depth */
+	int32_t filt_batches = filt_tensor->shape.filt_batches;
+	int32_t filt_height = filt_tensor->shape.filt_height;
+	int32_t filt_width = filt_tensor->shape.filt_width;
+	//int32_t filt_depth = filt_tensor->shape.filt_depth;
+
+	/* Find the stride values */
+	int32_t stride_width = stride_tensor->shape.width;
+	int32_t stride_height = stride_tensor->shape.height;
+
+	/* Calculate output dimensions */
+	int32_t out_batches = in_batches;
+	int32_t out_depth = filt_batches;
+
+        int32_t required_w_before, required_w_after;
+        int32_t required_h_before, required_h_after;
+
+        /* Find output size, amount of padding required in each direction by the padding type, filter size, and stride */
+
+        int32_t out_width = nn_pad_compute_outsize_and_pad(in_width,filt_width,stride_width,self->padding,
+                        & required_w_before, & required_w_after);
+        int32_t out_height = nn_pad_compute_outsize_and_pad(in_height,filt_height,stride_height,self->padding,
+                & required_h_before, & required_h_after);
+
+	/* Set up pointers to bulk data */
+	uint8_t *in = in_tensor->data;
+
+	/* 
+	 * Set output padding values to sensible defaults.
+	 * FUTURE WORK: find optimized padding values instead of default ones
+	 */
+	int32_t out_right_pad = ((-out_width) & 3);
+	int32_t out_left_pad = 4;
+	int32_t out_top_pad = 4;
+	int32_t out_bottom_pad = out_top_pad;
+	int32_t out_depth_before_pad = 0;
+	int32_t out_depth_after_pad = (-out_depth) & 31;
+	int32_t out_depth_total = out_depth + out_depth_before_pad + out_depth_after_pad;
+	int32_t out_width_total = out_width + out_left_pad + out_right_pad;
+//	int32_t out_height_total = out_height + out_top_pad + out_bottom_pad;
+
+	//int32_t filt_batches_total = out_depth_total;
+	//int32_t filt_depth_total = in_depth_total;
+
+	/* How much storage for each frame in the batch? */
+	int32_t input_batch_size = in_height_total * in_width_total * in_depth_total;
+	//int32_t output_batch_size = out_height_total * out_height_total * out_depth_total;
+
+	int num_out_slices = (out_depth+31)/32;
+	int num_in_slices = (in_depth+31)/32;
+
+	/* Grab some precomputed weight size information */
+	//int n_weight_batches = info->n_weight_batches;
+	int weight_batch_size = info->weight_batch_size;
+
+	struct workitem work = {0};
+	//struct workitem waitwork = work;
+	struct workitem startwork = work;
+	//int workidx = 0;
+
+	logmsg(nn,1,"Supernode %x: Recalculating 66 Strategy...",self->node_id);
+	//logmsg(nn,0,"Weight batch size: %d. Per %d: %d",nn->vtcm_size,weight_batch_size,nn->vtcm_size/weight_batch_size);
+
+	/* Some sanity checks... */
+	if (num_out_slices <= 0) return errlog(nn,"no out depth to iterate?");
+	if (((in_width_total) % 4) != 0) return errlog(nn,"width fail");
+	if ((in_depth_total % 32) != 0) return errlog(nn,"depth fail");
+	if (((out_width_total) % 4) != 0) return errlog(nn,"width math fail");
+	if ((out_depth_total % 32) != 0) return errlog(nn,"depth math fail");
+	if (in_depth_before_pad != 0) return errlog(nn,"depth before pad not supported");
+
+	/* EJP: hopefully handle arbitrary in left pad... */
+	if (in_left_pad != 4) logmsg(nn,2,"Caution: left pad == %d",in_left_pad);
+	if (required_w_before > in_left_pad) {
+		//logmsg(nn,0,"in_left_pad: %d layout: %d",in_left_pad,in_tensor->format.layout);
+		return errlog(nn,"FIXME: insufficient left pad");
+	}
+	if (required_w_after > (in_right_pad + in_left_pad)) {
+		return errlog(nn,"FIXME: insufficient right pad? Strange...");
+	}
+	if (required_h_before > in_top_pad) return errlog(nn,"top pad");
+	if (required_h_after > in_bottom_pad) return errlog(nn,"bot pad");
+
+
+	logmsg(nn,2,"in: %p h/w/d: %d/%d/%d total h/w/d: %d/%d/%d first valid row: %p first valid data: %p = %p",
+		in,
+		in_height,in_width,in_depth,
+		in_height_total,in_width_total,in_depth_total,
+		in+(in_depth_total*in_width_total*in_top_pad),
+	       in+(in_depth_total*in_width_total*in_top_pad)+(32*in_left_pad),
+	       tensor_location_d32(in_tensor, 0,0,0,0));
+
+
+	/* Where does our output data start? */
+	int fail;
+	if ((fail = tensor_out_prepare_padded_d32(out_tensor,
+						  out_batches,
+						  out_height,out_top_pad,out_bottom_pad,
+						  out_width,out_left_pad,out_right_pad,
+						  out_depth,out_depth_before_pad,out_depth_after_pad,
+						  NN_TYPE_QUINT8)) != 0) {
+		errlog(nn,"output tensor prep fail %d", fail);
+		return fail;
+	}
+
+	/*
+	 * Update info / supernode info values
+	 * These values are stored in structures for use during normal execution
+	 */
+	{
+		struct tensor_addressing tin = tensor_addressing_d32( in_tensor);
+		info->in_next_d32 = tin.d32_stride;
+		info->in_next_row = tin.height_stride;
+		info->in_next_batch = tin.batch_stride;
+		info->in_width = tin.d32_stride/32u;
+		info->in_depth = 32 * tin.nd32;
+	}
+	{
+		struct tensor_addressing tout = tensor_addressing_d32( out_tensor);
+		info->out_next_d32 = tout.d32_stride;
+		info->out_next_row = tout.height_stride;
+		info->out_width = tout.d32_stride/32u;
+		info->out_depth_valid = 32 * tout.nd32;
+		info->out_depth_total = 32 * tout.nd32_total;
+	}
+
+	info->stride_height = stride_height;
+	info->stride_width = stride_width;
+
+
+	info->input_base = in + (in_top_pad - required_h_before)*info->in_next_row;
+	info->in_height = in_height + required_h_before + required_h_after;
+	info->weights_base = info->weights;
+
+	/* 
+	 * If we are striding, we need to ensure that the total left padding is compatible with 
+	 * the filter width / stride combination, otherwise we won't be hitting the right pixels exactly.
+	 */
+	/* If we did normal convolution, how many junk values would we have on the left? */
+	info->out_left_junk = (in_left_pad - required_w_before) / info->stride_width;
+	/* Do we need to skip an element on the input so that we stride to the right starting point? (covers even/odd leftover from out_left_junk) */
+	info->in_left_skip = in_left_pad - (info->out_left_junk * info->stride_width + required_w_before);
+	if (info->in_left_skip < 0
+			|| (info->stride_width==2 && info->in_left_skip > 1) ){
+		return errlog(nn,"wrong in left skip");
+	}
+
+	/* Is skip_col the same as in_left_skip? */
+        info->skip_col = info->in_left_skip;
+
+	info->out_height = out_tensor->shape.height;
+	info->filt_width = filt_width;
+	info->filt_height = filt_height;
+
+	if (fill_info_minmax_basics(nn,self,info) != 0) return -1;
+	//fill_info_dim_basics(nn,self,info);
+	logmsg(nn,2,"out_maxval=%f in_level_size=%f filt_level_size=%f prod_level_size=%f maxvalid ~= %d",
+		info->out_maxval,
+		info->prod_level_size/info->weights_level_size,
+		info->weights_level_size,
+		info->prod_level_size,
+		info->max_valid_val);
+	/*
+	 * Recompute bias values
+	 * We need to incorporate the input bias values, min offset, and gemsumb values into the bias buffer
+	 * The bias buffer is added in the "product" (in_stepsize * filt_stepsize) number system
+	 */
+
+	int bias32 = (self->node_type == OP_Supernode_8x8p32to8_d32);
+	int32_t bias_extra = 0;
+	int input_offset = info->in_offset;
+	int filt_offset = info->weights_offset;
+
+	logmsg(nn,2,"in_depth_total=%d input_offset=%d filt_offset=%d bias_extra=%d",in_depth_total,input_offset,filt_offset,bias_extra);
+	fill_bias_buf(nn,self,info,bias32,bias_extra);
+
+	/* 
+	 * Recompute weights
+	 * The weights need to be arranged so that they are in a depth32 compatible format.
+	 * We keep note that we've rearranged the weights so we only do this once.
+	 * For architectures that support signed weights, we convert weights to signed
+	 * FIXME: maybe we should move this to check time instead of recalculation time
+	 */
+	//FIXME: RECALC / REARRANGE WEIGHTS
+
+	/*
+	 * Prepare output tensors
+	 */
+	if (tensor_out_prepare_normal(out_min,1,1,1,1,NN_TYPE_FLOAT) != 0) {
+		return errlog(nn,"min out prep fail");
+	}
+	if (tensor_out_prepare_normal(out_max,1,1,1,1,NN_TYPE_FLOAT) != 0) {
+		return errlog(nn,"max out prep fail");
+	}
+	tensor_set_float(out_min,0,info->out_minval);
+	tensor_set_float(out_max,0,info->out_maxval);
+
+	/*
+	 * Overcompute Reduction
+	 * We may have too much input padding.  If we can avoid computing it, that's great!
+	 * We should make this very robust so we can have truly arbitrary padding
+	 */
+
+	/* If we don't require any left padding, we can skip it */
+	//return errlog(nn,"FIXME: left padding");
+	/* 
+	 * EJP: move this (maybe) and refactor
+	 * 
+	 * Try and skip over input left padding if possible
+	 *  - Adjust input pointer right by a vector
+	 *  - Decrease in width
+	 *  - Now we really need to recompute out_width / out_left_junk / in_left_skip / pointers
+	 * So this maybe should be moved up.
+	 * Perhaps a better strategy would be to reconsider as:
+	 *  - For this architecture, how do I adjust the input pointers/values?
+	 *  - Based on those values, how do I set output pointers/values?
+	 */
+	//HANA values
+	logmsg(nn,2,"padding=%d required_w_before: %d required_w_after: %d required_h_before: %d required_h_after: %d",self->padding,required_w_before,required_w_after,required_h_before,required_h_after);
+	logmsg(nn,2," v66 chosen");
+	work.fix_overcompute = 0;
+	if (required_w_before > 0 && stride_width == 1 && filt_width > 1 && (out_width & 3) == 0) {
+		info->input_base = tensor_location_d32(in_tensor,0,-required_h_before,-required_w_before,0);
+		info->skip_col = 0;
+		info->out_width = out_width;
+		work.fix_overcompute = 1;
+		logmsg(nn,1," choose width overcompute ");
+	} else if (required_w_before == 0 && in_left_pad == 4) {
+		info->input_base = tensor_location_d32(in_tensor,0,-required_h_before,0,0);
+		//info->input_base += 32*in_left_pad;
+		info->in_width -= in_left_pad;
+		/* FIXME: this is wrong if we have 1x1 filters with 2x stride or something maybe? */
+		info->out_left_junk = 0;
+		info->in_left_skip = 0;
+		info->out_width -= out_left_pad;
+		info->skip_col = 0;
+		logmsg(nn,1," valid padding only");
+	} else {
+		//only skip col if oput wdth is over 3 otherwise pipe is not flushed correctly
+		info->skip_col = (((out_width & 3) <= ((4-info->out_left_junk)&3) && (out_width & 3)!=0 && out_width > 4)) ? 4:0;
+		info->input_base = tensor_location_d32(in_tensor,0,-required_h_before,-in_left_pad,0);
+		logmsg(nn,1," same or valid (with non mod4 in_left_pad) padding ");
+	}
+
+	//handle cases of in_depth = 48 80 etc.
+	if(work.fix_overcompute == 0 && stride_width==1 && info->in_depth_after == 16 && info->in_depth > 32 && filt_width > 1 && filt_height > 1) {
+		work.fix_overcompute = 2;
+	}
+
+	/* Skip initial padding lines */
+	//input_skip_lines = in_top_pad-required_h_before;
+	//info->input_base += info->in_next_row*input_skip_lines;
+
+
+	/*
+	 * Preparing the work list
+	 * We create a work list, which is just a list of items for the main thread to do
+	 * We need to put in all the things we need to do to execute the node:
+	 * * Padding zapping
+	 * * Actual convolution
+	 * * l2fetch / memcpy of values
+	 * * Waiting on semaphores for things to finish
+	 * The work list is currently executed by the main thread
+	 * This means that vector work needs to be passed to nn_os_work_for_vector
+	 */
+
+	logmsg(nn,1,"softreset work items ...");
+	supernode_softreset_work_items(self,nn,info);
+	logmsg(nn,1,"softreset work items done");
+	/*
+	 * Set up work items
+	 */
+
+	/* FIXME for v66: copy work has to actually work. */
+	//copywork.execute = supernode_execute_workitem_copy;
+	//copywork.info = info;
+	//copywork.self = self;
+
+	//waitwork.execute = supernode_execute_workitem_join_some;
+
+	work.info = info;
+	work.self = self;
+	//work.input = info->input_base;
+	//work.output  = out;
+	//work.weights = filtdst;
+	work.stop_line = info->out_height;
+	work.skip_lines = 1;
+	//work.new_execute = supernode_execute_workitem_vector_dispatch;	// FIXME, pick the right function
+	work.new_execute = supernode_execute_hvx_conv_work_v66;			// FIXME, pick the right function
+
+	startwork.self = self;
+	startwork.info = info;
+	startwork.zap_top = (uint8_t *)info->input_base;
+	startwork.zap_bot = (uint8_t *)info->input_base
+		+ (required_h_before + in_height)*info->in_next_row;
+	startwork.zap_top_size = info->in_next_row * required_h_before;
+	startwork.zap_bot_size = info->in_next_row * required_h_after;
+	/* If we need extra right padding that we don't have, add another row to the bottom zapping to handle overflow */
+	if ((required_w_after > in_right_pad) && (required_h_after < in_bottom_pad)) {
+		startwork.zap_bot_size += info->in_next_row;
+	}
+	startwork.zap_left = tensor_location_d32(in_tensor,0,0,-in_left_pad,0);
+	startwork.zap_right = tensor_location_d32(in_tensor,0,0,in_width,0);
+	if (required_w_after) startwork.zap_right_size = Q6_R_max_RR(in_right_pad,required_w_after);
+	else startwork.zap_right_size = 0;	// EJP: are there other cases where we need to zap right pad?
+	startwork.zap_rl_depths = in_depth_total / 32;
+	//startwork.zap_left_size = in_left_pad; //always zap
+	if (required_w_before || required_w_after > in_right_pad) startwork.zap_left_size = in_left_pad;
+	else startwork.zap_left_size = 0;  //DJH always pad
+
+	startwork.zap_height = in_height;
+	startwork.zap_value = input_offset;
+
+	/*
+	 * If we have padding zap work to do, add it to the list
+	 * Some extra zapping happens due to getting GEMSUMA to work, perhaps it could be optimized
+	 * FIXME: maybe just set zap_right and zap_right_size and let it be on
+	 * the next row if enough left pad exists.
+	 */
+	if ((out_right_pad > 0) && (startwork.zap_left_size == 0)) {
+		//if (out_right_pad > in_left_pad) return errlog(nn,"oops, not enough left pad");
+		/* EJP: FIXME: this probably doesn't work if zap_right_size goes byond the vector size */
+		startwork.zap_left_size = in_left_pad;
+		startwork.zap_right_size = in_right_pad;
+	}
+	//work.zap_rl_depths = in_depth_total/32;
+	//work.zap_value = input_offset;
+
+	/* 
+	 * Slicing was a good first attempt, but needs refactoring.
+	 *   Traffic ~= activation_chunk_size * weight_slices + weight_chunk_size * activation_slices
+	 *   ... but maybe not quite so simple.  Want to maximize use of locality
+	 *   Maybe need outer_activation, outer_weights, inner_activation, inner_weights nested loops
+	 * What's the right optimization technique?
+	 *  Weights have to be at least 32*h*w*in_depth
+	 *  Probably need at least a few rows of activation
+	 *  Weight chunks outer, activation inner --> more activation BW
+	 *  Activation chunks outer, weight chunks inner --> more weight BW
+	 *  Looking at the literature, it looks like it's a non-trivial problem?
+	 * If we have a huge activation, we want to favor activation locality.
+	 * If we have huge weights, we want to favor weight locality.
+	 * So... our constraints are:
+	 *  * Minimum effective weights size (d32 chunk size), granularity
+	 *  * Minimum effective activation size (currently some rows, but we could subdivide further...), granularity
+	 *  * Weights + Activation + prefetching room < cache_size
+	 *  * Either Weights or Activations needs to have multiple chunks for multithreading!
+	 * Given those things, try and find something that matches the activation/weight size ratio.
+	 *   Start with minimum amounts of activation/weights
+	 *   Add to activation/weight size to try and get closer to the ratio, see if it's still cache-friendly
+	 *   If we can't add the thing that makes the ratio better, try and add a little more of the other one
+	 * Once we have activation/weight chunk sizes, how should we proceed to the next chunk of work?
+	 *   Probably the one that needs less bandwidth immediately.
+	 *   We will need to iterate over all the weight and activation chunks, but the instantaneous BW requirements are lower if going to the next small thing.
+	 * Need to be aware of threading...
+	 *   Let's start out with always threading by dividing the activation, easier to handle suma/integral/zapping
+	 * So.......
+	 * for (outer_weights) {
+	 *   for (outer_activations) {
+	 *     for (inner_weights) {
+	 *       for (inner_activations) {
+	 *       }
+	 *     }
+	 *   }
+	 * }
+	 * If weights_fit: outer_weights = 1, outer_activations = n_act_chunks, inner_weights = all, inner_activations=chunksize/threads
+	 * else if activations_fit: outer_weights = 1, outer_activations = 1, inner_weights = all, inner_activations=all/threads
+	 * else outer_weights = n_weight_chunks, outer_activations = n_act_chunks, inner_weights = weight_chunksize, inner_activations=chunksize/threads
+	 * 
+	 * TBD: should we consider batches just part of the activation size?
+	 *   * Probably, but it's hard to index and iterate over. 
+	 *   * Maybe split above loop activations into outer_batches, outer_rows
+	 */
+
+	/* Determine how we want to slice the work */
+	int32_t inner_act_batches;
+	int32_t inner_act_rows;
+	int32_t inner_weight_chunks;
+        int32_t burst_chunks; //how many weight chuks to process per activation each time
+
+	slice_for_cache_v66(
+		self->node_id,
+		nn,
+		out_batches,
+		num_in_slices,
+		info->in_width,
+                info->out_width,
+		info->out_height,
+		info->stride_height,
+		info->filt_width,
+		info->filt_height,
+		weight_batch_size,
+		num_out_slices,
+		&inner_act_batches,
+                &inner_act_rows,
+		&inner_weight_chunks,
+                &burst_chunks);
+	work.num_lines = inner_act_rows;
+        work.vtcm_chunks = inner_weight_chunks;
+	inner_act_rows = (out_height+NUM_THREADS-1)/(NUM_THREADS);
+
+	/* Ignore batch / weight slice factor for now ... */
+	int32_t outer_act_batches = (out_batches + inner_act_batches - 1)/inner_act_batches;
+	int32_t outer_act_iters = (out_height + inner_act_rows - 1)/inner_act_rows;
+	int32_t outer_weight_chunks = (num_out_slices + inner_weight_chunks - 1) / inner_weight_chunks;
+
+	// NOTE: outer_act_iters <= NUM_THREADS.
+
+	logmsg(nn,1,"batch/row/weight chks: inner=%d,%d,%d outer=%d,%d,%d out_height=%d out_depth_chunks=%d",
+		inner_act_batches,work.num_lines,inner_weight_chunks,
+		outer_act_batches,outer_act_iters,outer_weight_chunks,
+		out_height,
+		num_out_slices);
+
+    /*-------------------------------------------------------------*/
+    /*  Setup parameters  */
+    /*-------------------------------------------------------------*/
+	int i,iw,ow,or,ib,ob,b;
+        int total_chunks = num_out_slices;
+
+	float underload_ratio = 1.0f;
+	for (or = 0; or < outer_act_iters; or++) {
+		int start_row = or * inner_act_rows;
+		int n_rows = Q6_R_min_RR(out_height-start_row,inner_act_rows);
+		if (n_rows < inner_act_rows) underload_ratio = (float)n_rows/inner_act_rows;
+	};
+
+
+	info->startup_info.batch_start_offset = 0;
+	//info->startup_info.wakeup_items = outer_act_iters * inner_weight_chunks;
+
+	//if (hlines_per_slice <= NUM_THREADS) return errlog(nn,"OOPS: chopped too fine");
+	int batchstart_idx = 0;
+	int weights_fit = (total_chunks == inner_weight_chunks);
+
+	for (ob = 0; ob < outer_act_batches; ob++) {
+	inner_act_batches = Q6_R_min_RR(inner_act_batches,(in_batches-ob*inner_act_batches));
+	int NOW_BATCHES=inner_act_batches;
+
+
+
+	info->startup_info.wakeup_items = 0; // figure out below, refigure each batch
+	//if (b >= in_batches) continue;
+	//if (b > 0) return errlog(nn,"Fixme: batches");
+
+#if 0
+        for(iw = 0; iw < inner_weight_chunks; iw++)
+        {
+	   supernode_weight_chunk(self,nn,info, 0, info->weights, weight_batch_size, iw, outer_act_iters);
+        }
+#else
+	//supernode_weight_chunk(self,nn,info,0,info->weights,weight_batch_size*inner_weight_chunks,0,outer_act_iters);
+#endif
+	if ((ob == 0) || (!weights_fit)) {
+		logmsg(nn,2,"adding memcpy: %p %d*%d",info->weights, weight_batch_size, inner_weight_chunks);
+		startwork.copy_in = info->weights;
+		startwork.copy_out = nn->vtcm_ptr;
+		startwork.copy_size = weight_batch_size*inner_weight_chunks;
+	} else {
+		logmsg(nn,2,"Memcpy should be OK already:");
+		startwork.copy_in = NULL;
+		startwork.copy_out = NULL;
+		startwork.copy_size = 0;
+	}
+	if (ob == 0) supernode_note_earlywork(nn,self,info,startwork.copy_out,startwork.copy_in,startwork.copy_size);
+
+	/* Zap padding is back */
+	if (ob > 0) info->work_items[batchstart_idx].next_startup_offset = info->n_work_items - batchstart_idx - 1;
+	startwork.join_iters = total_chunks;
+	batchstart_idx = supernode_add_batch_startup(self,nn,info,startwork,ob*input_batch_size,required_h_before,required_w_before,NOW_BATCHES);
+	logmsg(nn,2,"batchstart idx: %d",batchstart_idx);
+	/* If we reuse VTCM, set burst_chunks to 1, because it's hard to figure out wakeup and wrapround below */
+	if (total_chunks == inner_weight_chunks) burst_chunks = inner_weight_chunks;
+	else burst_chunks = 1;
+	if ((in_batches == 1) && (underload_ratio < 0.67) && (burst_chunks > 2)) {
+		logmsg(nn,2,"Underload ratio=%f, changing burst chunks: %d-->%d",underload_ratio,burst_chunks,1);
+		burst_chunks = 1;
+	}
+
+
+	for (ow = 0; ow < total_chunks; ) {
+
+          int32_t now_chunks = Q6_R_min_RR(total_chunks-ow, burst_chunks);
+	  //int32_t next_chunks = Q6_R_min_RR(total_chunks-(ow+now_chunks),burst_chunks);
+	  int32_t copy_chunks = Q6_R_max_RR(0,Q6_R_min_RR(burst_chunks,total_chunks-(inner_weight_chunks + ow)));
+          if (ow < inner_weight_chunks) info->startup_info.wakeup_items += outer_act_iters * inner_act_batches;
+	for (ib = 0; ib < inner_act_batches; ib++) {
+	b = ob * inner_act_batches + ib;
+	  for (or = 0; or < outer_act_iters; or++) {
+
+		int start_row = or * inner_act_rows;
+		int n_rows = Q6_R_min_RR(out_height-start_row,inner_act_rows);
+                logmsg(nn,2,"%d) %d line", or,n_rows);
+
+		/* FILL OUT NORMAL WORK INFORMATION */
+		work.weights = (uint8_t *) nn->vtcm_ptr + (ow % info->n_weight_batches) * weight_batch_size;
+		work.start_chunk = ow;
+		work.weight_chunks = now_chunks;
+		work.input = info->input_base+b*input_batch_size;
+		work.output = tensor_location_d32(out_tensor,b,0,0,32*ow);
+		work.biases = info->biasbuf + 32 * ow;
+                work.equalize = info->weight_scale + 32 * ow;
+                work.recip = info->recip + 32 * ow;
+                work.recip_sh = info->recip_sh + 32 * ow;
+		work.start_line = start_row;
+		work.stop_line = work.start_line + n_rows;
+                work.conv_done = info->semaphores;
+                work.threads = outer_act_iters;
+                work.last_chunk = ((ow + now_chunks) == total_chunks );
+		supernode_add_work_item(self,nn,info,work);
+	  }//or
+        }//ib
+	  for (i = 0; i < now_chunks; i++) {
+              //int refill_chunk = inner_weight_chunks + ow + i;
+              //int weight_chunk_id = -1;
+              //int n_weights = 0;
+              //weight_chunk_id = supernode_weight_chunk(self,nn,info,1,info->weights,weight_batch_size,iw,outer_act_iters);
+              if (i < copy_chunks) {
+                iw  = inner_weight_chunks + ow + i ;
+	        //weight_chunk_id = supernode_weight_chunk(self,nn,info, 1, info->weights,weight_batch_size,iw,outer_act_iters);
+		info->conv_slices[ow+i].copy_in = info->weights + iw * weight_batch_size;
+		info->conv_slices[ow+i].copy_out = ((uint8_t *)nn->vtcm_ptr) + (iw % info->n_weight_batches) * weight_batch_size;
+		info->conv_slices[ow+i].copy_size = weight_batch_size;
+		//info->conv_slices[ow+i].batch_start_offset = batchstart_idx + iw * outer_act_iters;
+		info->conv_slices[ow+i].batch_start_offset = iw * outer_act_iters * inner_act_batches;
+		info->conv_slices[ow+i].wakeup_items = outer_act_iters*inner_act_batches;
+              } else {
+		iw = -1;
+		memset(&info->conv_slices[ow+i],0,sizeof(info->conv_slices[ow+i]));
+              }
+              nn_checkpoint_init(&info->conv_slices[ow+i].checkpoint,outer_act_iters*inner_act_batches,note_chunk_checkpoint_arrival,(void *)&info->conv_slices[ow+i]);
+	  }
+#if 0
+          for (i = 0; i < next_chunks; i++)
+          {
+             //iw  = inner_weight_chunks + ow + i ;
+             if(iw < total_chunks) {
+	       //supernode_weight_chunk(self,nn,info, 1, info->weights,weight_batch_size,iw,outer_act_iters);
+             }
+          }
+#endif
+          ow += now_chunks;
+        }//ow
+	//nn_checkpoint_init(&info->alldone_checkpoint,total_chunks,note_alldone_checkpoint_arrival,(void *)(-1));
+	//supernode_convs_done(self,nn,info,inner_weight_chunks,outer_act_iters); //check off all outstadning jobs
+
+        }//ob
+	/* Add work to check the output min/max and see if we need to adjust and try again */
+	//work.execute = supernode_execute_workitem_check_for_retry;
+	//supernode_add_work_item(self,nn,info,work);
+
+	/*
+	 * Sometimes we want to collect some statistics...
+	 */
+	if (0) supernode_statistics(nn,info,self);
+
+	/*
+	 * We've calculated the strategy, mark that the work is done. Hopefully it sticks!
+	 */
+	supernode_compile_worklist(nn,info,self);
+	info->prepared_vtcm_addr = nn->vtcm_ptr;
+	info->needs_retry = 0;
+	info->strategy_valid = 1;
+	return 0;
+}
+
+void supernode_vector_kickoff(struct nn_graph *nn, void *vself)
+{
+	struct nn_node *self = vself;
+	logmsg(nn,2,"vector kickoff!");
+	supernode_execute_some_strategy(self,nn,0,1);
+}
+
+static int supernode_execute_strategy(struct nn_node *self, struct nn_graph *nn)
+{
+	struct supernode_info_new *info = self->opaque;
 	info->cycles = 0;
 	info->minval = 0;
 	info->maxval = 0;
+	if (0) {
+		return supernode_execute_some_strategy(self,nn,0,info->n_work_items);
+	} else {
+		nn_sem_init(&info->alldone_sem,0);
+		nn_os_work_for_vector(nn,supernode_vector_kickoff,self);
+		nn_sem_wait(&info->alldone_sem);
+		supernode_execute_workitem_check_for_retry(NULL,self,nn);
+		return 0;
+	}
 #if 0
 	logmsg(nn,2,"weights cksum: %08x",data_cksum(
 		info->weights,
@@ -3826,19 +5818,19 @@ int supernode_execute_strategy(struct nn_node *self, struct nn_graph *nn)
 		* info->filt_width
 		* info->in_depth
 		* info->out_depth));
-#endif
 	for (i = 0; i < n_work_items; i++) {
 		//Q6_dcfetch_A(&info->work_items[i+1]);
 		struct workitem *p = &info->work_items[i];
 		err |= p->execute(p,self,nn);
 	}
 	return err;
+#endif
 }
 
 static inline int supernode_strategy_valid(
 	struct nn_node *self,
 	struct nn_graph *nn,
-	struct supernode_info *info)
+	struct supernode_info_new *info)
 {
 	const struct tensor *in_min_tensor = self->inputs[2];
 	const struct tensor *in_max_tensor = self->inputs[3];
@@ -3846,6 +5838,11 @@ static inline int supernode_strategy_valid(
 	if (!info->strategy_valid) return 0;
 	if (tensor_get_float(in_min_tensor,0) != info->in_min_float) return 0;
 	if (tensor_get_float(in_max_tensor,0) != info->in_max_float) return 0;
+	if (nn->vtcm_ptr != info->prepared_vtcm_addr) return 0;
+
+	if( ! shape_matches( &info->in_shape, &self->inputs[0]->shape)){
+		return 0;
+	}
 	/*
 	 * FIXME: check input max/min/shape
 	 */
@@ -3857,7 +5854,7 @@ int get_circ_buf_size(struct nn_node *self, struct nn_graph *nn)
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *filt_tensor = self->inputs[1];
 	const struct tensor *stride_tensor = self->inputs[6];
-	struct supernode_info *info = self->opaque;
+	struct supernode_info_new *info = self->opaque;
 	int32_t in_width = in_tensor->shape.width;
 	int32_t in_left_pad = in_tensor->format.width_pad[0];
 	int32_t in_right_pad = in_tensor->format.width_pad[1];
@@ -3886,7 +5883,7 @@ int get_circ_buf_size(struct nn_node *self, struct nn_graph *nn)
 
 static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 {
-	struct supernode_info *nodeinfo = self->opaque;
+	struct supernode_info_new *nodeinfo = self->opaque;
 	struct tensor *out = self->outputs[0];
 	struct tensor *out_min = self->outputs[1];
 	struct tensor *out_max = self->outputs[2];
@@ -3894,10 +5891,22 @@ static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	//logmsg(nn,0,"NEW supernode id=%d",self->node_id);
 	//logmsg(nn,0,"FIXME: memset out for debug... remove");
 	//memset(out->data,0xAB,out->max_size);
+	if (out->format.layout == NN_LAYOUT_D32_LOVINGLY_PREPARED) {
+		logmsg(nn,2,"Prepared output.");
+		logmsg(nn,2,"out tensor info: bhwd=%d,%d,%d,%d paddings=(%d,%d)x(%d,%d)x(%d,%d)",
+			out->shape.batches,out->shape.height,out->shape.width,out->shape.depth,
+			out->format.height_pad[0],out->format.height_pad[1],
+			out->format.width_pad[0],out->format.width_pad[1],
+			out->format.depth_pad[0],out->format.depth_pad[1]);
+	}
 	nn_scratch_reset(nn);			// if we recurse, reset scratch ptr
+	l2fetch(nodeinfo,sizeof(*nodeinfo),sizeof(*nodeinfo),1);
+	if ((nodeinfo->work_items != NULL) && (nodeinfo->n_work_items > 0)) {
+		l2fetch(nodeinfo->work_items,sizeof(struct workitem),sizeof(struct workitem),nodeinfo->n_work_items);
+	}
 
         nodeinfo->circ_buf_size = (get_circ_buf_size(self, nn) + 127) & (~127); //used in v65 
-#if defined(V65) || defined(SCRATCH)
+#if defined(V65) && !defined(V66)
         int i;
 	int total_size = nodeinfo->circ_buf_size * NUM_THREADS;
 	char *buf;
@@ -3913,16 +5922,22 @@ static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 		nn_os_bufstack_push(&nodeinfo->bufstack,buf+i*nodeinfo->circ_buf_size);
 	}
 #endif
-	nn_scratch_grow(nn,nodeinfo->circ_buf_size * NUM_THREADS);
+	//nn_scratch_grow(nn,nodeinfo->circ_buf_size * NUM_THREADS);
 
 	if (likely(supernode_strategy_valid(self,nn,nodeinfo))) {
 		if (supernode_execute_strategy(self,nn) != 0) {
 			return errlog(nn,"execute strategy failed");
 		}
 	} else {
-		if (supernode_recalculate_strategy(self,nn) != 0) {
-			return errlog(nn,"recalc strategy failed");
-		}
+                if(nodeinfo->use_v66 == 1) {
+			if (supernode_recalculate_strategy_v66(self,nn) != 0) {
+				return errlog(nn,"recalc strategy for v66 failed");
+			}
+                } else {
+			if (supernode_recalculate_strategy(self,nn) != 0) {
+				return errlog(nn,"recalc strategy failed");
+			}
+                }
 		if (supernode_execute_strategy(self,nn) != 0) {
 			return errlog(nn,"execute strategy fail after recalc");
 		}
@@ -3953,7 +5968,7 @@ static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 
 int supernode_check(struct nn_node *self, struct nn_graph *nn)
 {
-	struct supernode_info *info = self->opaque;
+	struct supernode_info_new *info = self->opaque;
 	if (self->n_inputs != 12) return errlog(nn,"supernode wrong # inputs... now need min/max with inf for self-detecting");
 	if (self->n_outputs != 3) return errlog(nn,"supernode wrong # outputs");
 	const struct tensor *filt_tensor = self->inputs[1];
@@ -3974,17 +5989,51 @@ int supernode_check(struct nn_node *self, struct nn_graph *nn)
 	int32_t stride_width = stride_tensor->shape.width;
 	uint32_t out_depth = filt_batches_roundup;
 	int32_t weight_batch_size = filt_width * filt_height * filt_depth_roundup * 32;
-	int32_t n_weight_batches = supernode_n_weight_batches(weight_batch_size);
+	int32_t n_weight_batches = supernode_n_weight_batches(weight_batch_size, nn->vtcm_size);
+	int32_t total_weight_batches = filt_batches_roundup/32;
 	float specified_minval = tensor_get_float(self->inputs[10],0);
 	float specified_maxval = tensor_get_float(self->inputs[11],0);
 	int i;
+        int use_v66 = 0;
+
+	int circ_buf_est = 2*(filt_height+stride_tensor->shape.height)*filt_depth*(self->output_defs[0].max_sizes[1]*stride_width+8);
+	nn_scratch_grow(nn,circ_buf_est*NUM_THREADS);
+
 #ifdef HEXAGON_V66
+
+#if 0
+        nn_os_vtcm_acquire(nn);
+        uint8_t * ts_buf = nn_memalign(128,512);
+        uint8_t * td_buf = (uint8_t *) nn->vtcm_ptr;
+
+        for(i=0; i < 256; i++) ts_buf[i] = i;
+
+        asm volatile (
+                "M0 = %2; memcpy(%0,%1,M0)"
+        ::"r"(td_buf),"r"(ts_buf),"r"(256-1)
+        :"m0");
+
+        for(i=0; i < 256; i++) {
+             logmsg(nn, 0, " %02x -> buf[%d] -> %02x" , ts_buf[i], i, td_buf[i]);
+             //if(ts_buf[i] != td_buf[i]) return errlog(nn,"FIXME: memcpy doesnt work properly");
+        }
+
+        nn_free(ts_buf);
+        nn_os_vtcm_release(nn);
+#endif
+        
 	/*
 	 * In V66, we need chunks of weights to not cross a page boundary,
 	 * but if weights_size is too big then memalign can fail
 	 */
 	weights_size = 1U << (32-__builtin_clz(weights_size-1));
 	int weights_align = weights_size;
+        if(weight_batch_size <= nn->vtcm_size)
+        {
+	  use_v66 = 1;
+        }
+	if (stride_width > 2) use_v66 = 0;
+	logmsg(nn,2,"stride_width = %d use_v66=%d",stride_width,use_v66);
 #else
 	int weights_align = 128;
 #endif
@@ -3993,7 +6042,7 @@ int supernode_check(struct nn_node *self, struct nn_graph *nn)
         /*
          * bail out to use v60 imlpementation if weights chunks dont fit into VTCM
          */
-        if(weight_batch_size <= 256*1024)
+        if(weight_batch_size <= nn->vtcm_size)
         {
 	  use_v65 = 1;
         }
@@ -4045,7 +6094,64 @@ int supernode_check(struct nn_node *self, struct nn_graph *nn)
 		nn_free(info);
 		return errlog(nn,"alloc gemsumb");
 	}
+	if ((info->conv_slices = nn_calloc(total_weight_batches,sizeof(*info->conv_slices))) == NULL) {
+		nn_free(info->gemsumb);
+		nn_free(info->biasbuf);
+		nn_free(info->minmax_buf);
+		nn_free(info->weights);
+		nn_free(info->semaphores);
+		nn_free(info);
+	}
+        if ((info->weights_level = nn_memalign(128,out_depth*sizeof(float))) == NULL) {
+                nn_free(info->gemsumb);
+                nn_free(info->biasbuf);
+                nn_free(info->minmax_buf);
+                nn_free(info->weights);
+                nn_free(info->semaphores);
+                nn_free(info->conv_slices);
+                nn_free(info);
+        }
+        if ((info->weight_scale = nn_memalign(128,out_depth*sizeof(int32_t))) == NULL) {
+                nn_free(info->gemsumb);
+                nn_free(info->biasbuf);
+                nn_free(info->minmax_buf);
+                nn_free(info->weights);
+                nn_free(info->semaphores);
+                nn_free(info->conv_slices);
+                nn_free(info->weights_level);
+                nn_free(info);
+        }
+        if ((info->recip = nn_memalign(128,out_depth*sizeof(int32_t))) == NULL) {
+                nn_free(info->gemsumb);
+                nn_free(info->biasbuf);
+                nn_free(info->minmax_buf);
+                nn_free(info->weights);
+                nn_free(info->semaphores);
+                nn_free(info->conv_slices);
+                nn_free(info->weights_level);
+                nn_free(info->weight_scale);
+                nn_free(info);
+        }
+        if ((info->recip_sh = nn_memalign(128,out_depth*sizeof(int32_t))) == NULL) {
+                nn_free(info->gemsumb);
+                nn_free(info->biasbuf);
+                nn_free(info->minmax_buf);
+                nn_free(info->weights);
+                nn_free(info->semaphores);
+                nn_free(info->conv_slices);
+                nn_free(info->weights_level);
+                nn_free(info->weight_scale);
+                nn_free(info->recip);
+                nn_free(info);
+        }
+
+#if 0
+	for (i = 0; i < total_weight_batches; i++) {
+		nn_checkpoint_init(&info->conv_checkpoints[i],1,note_conv_checkpoint_arrival,(void *)(i));
+	}
+#endif
 	info->use_v65 = use_v65;
+	info->use_v66 = use_v66;
         info->num_accs = 6;
 	for (i = 0; i < n_weight_batches+3; i++) {
 		nn_sem_init(&info->semaphores[i],0);
@@ -4064,8 +6170,9 @@ int supernode_check(struct nn_node *self, struct nn_graph *nn)
 		rpfparms.out_data = info->weights;
 		rpfparms.filt_tensor = filt_tensor;
 		rpfparms.zero_offset = filt_offset;
-		rpfparms.signed_mode_sel = use_v65;
+		rpfparms.signed_mode_sel = use_v65 | use_v66;
 		rpfparms.gemsumb = info->gemsumb;
+                rpfparms.scalefac_vec = info->weight_scale;
 
 		nn_sem_init( & rpfparms.done_sem, 0);
 		// call it directly.
@@ -4073,52 +6180,47 @@ int supernode_check(struct nn_node *self, struct nn_graph *nn)
 		repack_filter_for_d32( nn, &rpfparms);
 		nn_os_vector_release(vv);
 		weight_scalefac = rpfparms.coeffscale;
+                logmsg(nn,2,"weights global scale factor= %f with %d zero",weight_scalefac,filt_offset);
 	}
 #else // ! ENABLE_VECTOR_WEIGHT_ARRANGE
-	int32_t (*gemsumb_fn)(struct supernode_info *info,
-		uint8_t *filt,
-		int32_t *sumb,
-		int32_t filt_height,
-		int32_t filt_width,
-		int32_t filt_depth,
-		int32_t filt_depth_total,
-		int32_t filt_batches,
-		int32_t filt_offset,
-		int32_t out_depth);
-	if (use_v65) gemsumb_fn = supernode_gemsumb_signed;
-	else gemsumb_fn = supernode_gemsumb_unsigned;
-	gemsumb_fn(
-		info,
-		filt_tensor->data,
-		info->gemsumb,
-		filt_height,
-		filt_width,
-		filt_depth,
-		filt_depth_roundup,
-		filt_batches,
-		filt_offset,
-		out_depth);
-	for (i = 0; i < out_depth; i++) logmsg(nn,4,"gemsumb[%d]=%x",i,info->gemsumb[i]);
-	if ((filt_width * filt_height * filt_depth_roundup * filt_batches_roundup) % 128) return errlog(nn,"filt dims too odd");
-	supernode_rearrange_for_d32(
-		info->weights,
-		filt_tensor->data,
-		filt_height,
-		filt_width,
-		filt_depth,
-		filt_depth_roundup,
-		filt_batches,
-		filt_batches_roundup,
-		filt_offset);
-	if (info->use_v65)
-		weight_scalefac = supernode_convert_weights_to_signed(
-			info,
-			info->weights,
-			filt_height,
-			filt_width,
-			filt_depth_roundup,
-			filt_batches_roundup,
-			filt_offset);
+        if(info->use_v66) {
+           weight_scalefac = supernode_rearrange_vector_d32(
+                info->weights,
+                filt_tensor->data,
+                filt_height,
+                filt_width,
+                filt_depth,
+                filt_depth_roundup,
+                filt_batches,
+                filt_batches_roundup,
+                filt_offset,
+                info->weight_scale,
+                info->gemsumb);
+        } else if(info->use_v65) {
+           weight_scalefac = supernode_rearrange_scaler_d32(
+                info->weights,
+                filt_tensor->data,
+                filt_height,
+                filt_width,
+                filt_depth,
+                filt_depth_roundup,
+                filt_batches,
+                filt_batches_roundup,
+                filt_offset,
+                info->gemsumb);
+        } else {
+            supernode_rearrange_d32(
+                info->weights,
+                filt_tensor->data,
+                filt_height,
+                filt_width,
+                filt_depth,
+                filt_depth_roundup,
+                filt_batches,
+                filt_batches_roundup,
+                filt_offset,
+                info->gemsumb);
+        }
 #endif// ! ENABLE_VECTOR_WEIGHT_ARRANGE
 
 	supernode_cleaninv_weights(
@@ -4131,18 +6233,42 @@ int supernode_check(struct nn_node *self, struct nn_graph *nn)
 	info->n_weight_batches = n_weight_batches;
         info->in_right_padpad = 8*stride_width; //tack on this to circular buffer to avoid bad max's
 
-
-    float filt_level_size = (filt_max_float - filt_min_float) / ( 255.0f* weight_scalefac );
-    if (use_v65) {
-    	info->weights_offset = 0;
-    } else {
-    	info->weights_offset = filt_offset;
+        if(info->use_v65) { 
+          info->weight_scale_factor = 1.f;   //set to 1.0 for 65 operation
+        } else {
+          info->weight_scale_factor = weight_scalefac;
+        }
+        logmsg(nn,1,"scale factor global %f",info->weight_scale_factor);
+        float filt_level_size = (filt_max_float - filt_min_float) / ( 255.0f* weight_scalefac );
+        if (use_v66) {
+              filt_level_size = (filt_max_float - filt_min_float) / 255.f;
+        }
+        if (use_v65 || use_v66) {
+        	info->weights_offset = 0;
+        } else {
+        	info->weights_offset = filt_offset;
+        }
+        info->filt_offset = filt_offset;
+        info->weights_level_size = filt_level_size;
+        logmsg(nn,2,"filt_offset  = %d", filt_offset);
+        if(use_v66) for(i=0; i < filt_batches_roundup; i++) {
+              float scale = (float) info->weight_scale[i] / 2147483648.f;  //r0.5 to .999  - local sf
+              info->weight_scale[i]= (int32_t) (1073741824.f / scale);
+              info->weights_level[i] = scale; ///weight_scalefac;   
+              logmsg(nn, 2, "%d	global scale = %f local scale = %f ratio = %08lX",i,weight_scalefac,scale,info->weight_scale[i]);
+        }
+#if 0
+    logmsg(nn,0,"%d,%d	%d,%d",filt_height,filt_width,filt_depth_roundup,filt_batches_roundup);
+    if(use_v66) for(i=0; i < filt_batches_roundup/32; i++) {
+          for(j=0; j < 32*filt_height*filt_width*filt_depth_roundup; j++)
+          {
+             logmsg(nn,0,"%d,%d	%d",i,j,info->weights[j+i*32*filt_height*filt_width*filt_depth_roundup]);
+          }
     }
-    info->filt_offset = filt_offset;
-    info->weights_level_size = filt_level_size;
-
+#endif
 	logmsg(nn,2,"stride_width=%d in_right_padpad=%d",stride_width,info->in_right_padpad);
 
+	nn_sem_init(&info->alldone_sem,0);
 	setup_initial_output_range( info, specified_minval, specified_maxval, 0.0f, 0.5f);
 
 	return 0;
@@ -4163,7 +6289,7 @@ int supernode_check(struct nn_node *self, struct nn_graph *nn)
 // But the range need not be 'proper'.
 //
 static void
-setup_initial_output_range( struct supernode_info *info,
+setup_initial_output_range( struct supernode_info_new *info,
 	float specified_minval,		// range specified by inputs
 	float specified_maxval,
 	float minval_default,			// use when specified_minval = -INF
@@ -4202,9 +6328,14 @@ setup_initial_output_range( struct supernode_info *info,
 
 static int supernode_dtor(struct nn_node *self, struct nn_graph *nn)
 {
-	struct supernode_info *info = self->opaque;
+	struct supernode_info_new *info = self->opaque;
 	if (info != NULL) {
 		supernode_reset_work_items(self,nn,info);
+                nn_free(info->recip_sh);
+                nn_free(info->recip);
+                nn_free(info->weight_scale);
+                nn_free(info->weights_level);
+		nn_free(info->conv_slices);
 		nn_free(info->gemsumb);
 		nn_free(info->semaphores);
 		nn_free(info->biasbuf);
@@ -4217,12 +6348,38 @@ static int supernode_dtor(struct nn_node *self, struct nn_graph *nn)
 }
 
 
+static int supernode_earlywork_note_pred(struct nn_node *self, struct nn_graph *nn, struct nn_node *predecessor)
+{
+	struct supernode_info_new *info = self->opaque;
+	if (info == NULL) return errlog(nn,"Oops: no supernode info available");
+	if (predecessor == NULL) return errlog(nn,"Oops: NULL predecessor");
+	if (predecessor->ops->earlywork_register != NULL) {
+		if (predecessor->ops->earlywork_register(predecessor,nn,&info->my_earlywork) != 0) {
+			return errlog(nn,"registering early work with %p failed?",predecessor);
+		}
+		info->earlywork_pred = predecessor;
+	} else {
+		logmsg(nn,2,"node %p does not take early work.",predecessor);
+	}
+	return 0;
+}
+
+static int supernode_earlywork_register(struct nn_node *self, struct nn_graph *nn, struct nn_early_work *work)
+{
+	struct supernode_info_new *info = self->opaque;
+	if (info == NULL) return errlog(nn,"Oops: no supernode info available");
+	info->next_earlywork = work;
+	return 0;
+}
+
 struct nn_node_ops nn_ops_for_Supernode_8x8p8to8_d32 = {
 	.execute = supernode_execute_hvx,
 	.check = supernode_check,
 	.ctor = node_alloc_common,
 	.dtor = supernode_dtor,
-	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT | NN_NODE_FLAG_OUTPUT_ACCEPTS_PREPARATION,
+	.earlywork_note_pred = supernode_earlywork_note_pred,
+	.earlywork_register = supernode_earlywork_register,
 };
 
 struct nn_node_ops nn_ops_for_Supernode_8x8p32to8_d32 = {
@@ -4230,7 +6387,9 @@ struct nn_node_ops nn_ops_for_Supernode_8x8p32to8_d32 = {
 	.check = supernode_check,
 	.ctor = node_alloc_common,
 	.dtor = supernode_dtor,
-	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT | NN_NODE_FLAG_OUTPUT_ACCEPTS_PREPARATION,
+	.earlywork_note_pred = supernode_earlywork_note_pred,
+	.earlywork_register = supernode_earlywork_register,
 };
 
 
@@ -4267,7 +6426,7 @@ static void dwise_supernode_execute_conv_work(struct nn_graph *nn, void *vinfo)
 {
     struct workitem *work = vinfo;
     struct nn_node *self = work->self;
-    struct supernode_info *info = self->opaque;
+    struct supernode_info_new *info = self->opaque;
 
     int32_t start_line = work->start_line;
     int32_t stop_line = work->stop_line;
@@ -4403,14 +6562,14 @@ static void dwise_supernode_execute_conv_work(struct nn_graph *nn, void *vinfo)
 	nn_atomic_add64(&info->cycles,my_cycles);
 	logmsg(nn,2,"min=%d(%d) max=%d(%d) cycles=%lld",minmax.words[32],info->minval,minmax.words[0],info->maxval,my_cycles);
 done:
-	nn_sem_post(work->donesem);
+	nn_checkpoint_arrival(nn,self,&info->alldone_checkpoint);
 }
 
 static void dwise_supernode_execute_hvx_work(struct nn_graph *nn, void * vinfo)
 {
     struct workitem *work = vinfo;
     struct nn_node *self = work->self;
-    struct supernode_info *info = self->opaque;
+    struct supernode_info_new *info = self->opaque;
 
     // initial prefetch 
     l2fetch_v( work->input + work->start_line*info->stride_height*info->in_next_row,
@@ -4419,14 +6578,18 @@ static void dwise_supernode_execute_hvx_work(struct nn_graph *nn, void * vinfo)
     dwise_supernode_execute_conv_work(nn, work);
 }
 
+#if 0
 /*
   push the work on the vector queue
  */
-int dwise_supernode_execute_workitem_vector_dispatch(struct workitem *work, struct nn_node *node, struct nn_graph *nn)
+//int dwise_supernode_execute_workitem_vector_dispatch(struct workitem *work, struct nn_node *node, struct nn_graph *nn)
+static void dwise_supernode_execute_workitem_vector_dispatch(struct nn_graph *nn, void *vinfo)
 {
+	struct workitem *work = vinfo;
         nn_os_work_for_vector(nn, dwise_supernode_execute_hvx_work, work);
         return 0;
 }
+#endif
 
 /*
   shuffle the weight so they are serialized and pad 3taps to 4
@@ -4552,30 +6715,30 @@ int dwise_supernode_execute_workitem_check_for_retry(struct workitem *work, stru
 	 *  x_app = x_intermed * info->prod_level_size  + info->out_minval
 	 */
 
-        struct supernode_info *info = node->opaque;
+        struct supernode_info_new *info = node->opaque;
 
         int needs_retry = 0;
         int fixed_flags = 3;				// for adjust_minmax_for_zero_with_constraints
         float ominval = info->out_minval;	// for interpreting minval/maxval
 
 
-        if( !info->maxval_precalculated){
+        if (!info->maxval_precalculated) {
             logmsg(nn,1,"in check for retry max %d ", info->maxval);
             float app_maxval = info->maxval * info->prod_level_size + ominval;
 
-            if( app_maxval > info->out_maxval ){
+            if (app_maxval > info->out_maxval) {
             	// need to increase it
-            	info->out_maxval = to_next_power_of_two( fmaxf(app_maxval, 0x1.0p-4f));
+            	info->out_maxval = round_up_quarter_octave( fmaxf(app_maxval, 0x1.0p-4f));
         		logmsg(nn,2,"maxval retry out_minval=%f out_maxval=%f maxval=%d (%f).",
         				info->out_minval,info->out_maxval,info->maxval,app_maxval);
                 needs_retry = 1;
             }
             fixed_flags &= ~2;	// bit 1->0  (max not fixed)
         }
-        if( !info->minval_precalculated){
-        	if( info->minval < 0 ){		// need to move min
+        if (!info->minval_precalculated) {
+        	if (info->minval < 0) {		// need to move min
         		float app_minval = info->minval * info->prod_level_size + ominval;
-            	info->out_minval = to_next_power_of_two( fminf(app_minval, -0x1.0p-8f));
+            	info->out_minval = round_up_quarter_octave( fminf(app_minval, -0x1.0p-8f));
         		logmsg(nn,2,"minval retry out_minval=%f out_maxval=%f minval=%d (%f).",
         				info->out_minval,info->out_maxval,info->minval,app_minval);
                 needs_retry = 1;
@@ -4583,10 +6746,10 @@ int dwise_supernode_execute_workitem_check_for_retry(struct workitem *work, stru
             fixed_flags &= ~1;	// bit 0->0  (min not fixed)
         }
         // correct the endpoints for a proper zero
-        if( needs_retry){
+        if (needs_retry){
     		// restore 'fixed' endpoints to original spec (in case they were tweaked by previous endpoint corrs)
-    		if( fixed_flags & 1) info->out_minval = info->out_minval_spec;
-    		if( fixed_flags & 2) info->out_maxval = info->out_maxval_spec;
+    		if (fixed_flags & 1) info->out_minval = info->out_minval_spec;
+    		if (fixed_flags & 2) info->out_maxval = info->out_maxval_spec;
         	adjust_minmax_for_zero_with_constraints( &info->out_minval, &info->out_maxval, fixed_flags);
         	info->needs_retry = 1;
         }
@@ -4603,17 +6766,20 @@ static int dwise_supernode_recalculate_strategy(struct nn_node *self, struct nn_
 {
 	/* Pad Zap */
 	//struct nn_node *self = vinfo;
-	struct supernode_info *info = self->opaque;
+	struct supernode_info_new *info = self->opaque;
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *filt_tensor = self->inputs[1];
-	const struct tensor *min_in_tensor = self->inputs[2];
-	const struct tensor *max_in_tensor = self->inputs[3];
+	//const struct tensor *min_in_tensor = self->inputs[2];
+	//const struct tensor *max_in_tensor = self->inputs[3];
 	//const struct tensor *min_filt_tensor = self->inputs[4];
 	//const struct tensor *max_filt_tensor = self->inputs[5];
 	const struct tensor *stride_tensor = self->inputs[6];
 	struct tensor *out_tensor = self->outputs[0];
 	struct tensor *out_min = self->outputs[1];
 	struct tensor *out_max = self->outputs[2];
+
+
+	info->in_shape = in_tensor->shape;
 
 	int32_t in_batches = in_tensor->shape.batches;
 	int32_t in_width = in_tensor->shape.width;
@@ -4623,8 +6789,8 @@ static int dwise_supernode_recalculate_strategy(struct nn_node *self, struct nn_
 	int32_t in_right_pad = in_tensor->format.width_pad[1];
 	int32_t in_depth_before_pad = in_tensor->format.depth_pad[0];
 	int32_t in_depth_after_pad = in_tensor->format.depth_pad[1];
-	//int32_t in_top_pad = in_tensor->format.height_pad[0];
-	//int32_t in_bottom_pad = in_tensor->format.height_pad[1];
+	int32_t in_top_pad = in_tensor->format.height_pad[0];
+	int32_t in_bottom_pad = in_tensor->format.height_pad[1];
 
 	int32_t filt_batches = filt_tensor->shape.filt_batches;
 	int32_t filt_height = filt_tensor->shape.filt_height;
@@ -4637,49 +6803,18 @@ static int dwise_supernode_recalculate_strategy(struct nn_node *self, struct nn_
 
 	int32_t out_batches = in_batches;
 	int32_t out_depth = filt_depth*filt_batches;
-	int32_t out_width = nn_pad_compute_outsize(in_width,filt_width,stride_width,self->padding);
-	int32_t out_height = nn_pad_compute_outsize(in_height,filt_height,stride_height,self->padding);
 
-	int32_t required_w_before = nn_pad_compute_before(in_width,filt_width,stride_width,self->padding);
-	int32_t required_h_before = nn_pad_compute_before(in_height,filt_height,stride_height,self->padding);
-	//int32_t required_w_after = nn_pad_compute_after(in_width,filt_width,stride_width,self->padding);
-	int32_t required_h_after = nn_pad_compute_after(in_height,filt_height,stride_height,self->padding);
-	//uint32_t recip_shamt = 0;
-	//uint32_t recip_val;
+	/* Find output size, amount of padding required in each direction by the padding type, filter size, and stride */
+	int32_t required_w_before, required_h_before, required_h_after;
 
-	//uint8_t *in = in_tensor->data;
-	//uint8_t *filt = filt_tensor->data;
-	//uint8_t *bias = bias_tensor->data;
-	//int32_t *bias32_ptr = bias_tensor->data;
-	//uint8_t *out = out_tensor->data;
-	uint8_t *out_data_start;
-
-	float in_max_float = tensor_get_float(max_in_tensor,0);
-	float in_min_float = tensor_get_float(min_in_tensor,0);
-	//float filt_max_float = tensor_get_float(max_filt_tensor,0);
-	//float filt_min_float = tensor_get_float(min_filt_tensor,0);
-	//float bias_min_float = tensor_get_float(bias_min_tensor,0);
-	//float bias_max_float = tensor_get_float(bias_max_tensor,0);
-	//float out_min_float = info->out_minval;
-	//float out_max_float = info->out_maxval;
-
-	int32_t input_offset = quantize_uint8(0.0f,in_min_float,in_max_float);
-	//int32_t filt_offset = quantize_uint8(0.0f,filt_min_float,filt_max_float);
-	//int32_t bias_offset = quantize_uint(0.0f,bias_min_float,bias_max_float);
-
-	float in_level_size = (in_max_float - in_min_float) / 255;
-	float filt_level_size = info->weights_level_size;
-	//float bias_level_size = (bias_max_float - bias_min_float) / 255;
-	float prod_level_size = in_level_size * filt_level_size;
-	//float out_level_size = (out_max_float - out_min_float) / 255;
-
-	//float bias_to_prod_ratio = (bias_level_size / prod_level_size);
-	//float min_out_prod_offset = -info->out_minval / prod_level_size;
-	//float prod_to_out_ratio = prod_level_size / out_level_size;
+	int32_t out_width = nn_pad_compute_outsize_and_padbefore(in_width,filt_width,stride_width,self->padding, &required_w_before);
+	int32_t out_height = nn_pad_compute_outsize_and_pad(in_height,filt_height,stride_height,self->padding, &required_h_before, &required_h_after );
 
 	int32_t in_depth_total = in_depth + in_depth_before_pad + in_depth_after_pad;
 	int32_t in_width_total = in_width + in_left_pad + in_right_pad;
-	//int32_t in_height_total = in_height + in_top_pad + in_bottom_pad;
+	int32_t in_height_total = in_height + in_top_pad + in_bottom_pad;
+
+	int32_t input_batch_size = in_height_total * in_width_total * in_depth_total;
 
 	int32_t out_left_pad; //poss pad 1,3,4
 	if(self->padding == NN_PAD_VALID) out_left_pad = in_left_pad/stride_width;	/* dwise 3x3 conv pads same for VALID */	/* FIXME: adjust for stride */
@@ -4701,27 +6836,21 @@ static int dwise_supernode_recalculate_strategy(struct nn_node *self, struct nn_
 	/*
 	 * Set up work items
 	 */
-	struct workitem waitwork;
-	struct workitem zapwork;
-	struct workitem work;
+	struct workitem work = {0};
+	//struct workitem waitwork = work;
+	struct workitem startwork = work;
 
-	uint32_t max_valid_val = (info->out_maxval - info->out_minval) / prod_level_size;
-	if (max_valid_val == 0) max_valid_val = 1;
-	//int32_t min_valid_val = 0;
-	logmsg(nn,1,"out_maxval=%f out_minval=%f in_max_float=%f in_min_float=%f in_level_size=%f filt_level_size=%f prod_level_size=%f max_valid_val=%d",info->out_maxval,info->out_minval,in_max_float,in_min_float,in_level_size,filt_level_size,prod_level_size,max_valid_val);
-
-	info->prod_level_size = prod_level_size;
 	info->minval = 0;
 	info->maxval = 0;
 
-	info->in_offset = input_offset;
 	info->in_width = in_width_total;
 	info->in_depth = in_depth_total;
 	info->in_next_d32 = in_width_total * 32;
 	info->in_next_row = in_width_total * in_depth_total;
 
 	info->out_width = out_width_total;
-	info->out_depth = out_depth_total;
+	info->out_depth_total = out_depth_total;
+	info->out_depth_valid = out_depth_total;
 	info->out_height = out_height;
 	info->out_next_d32 = out_width_total * 32;
 	info->out_next_row = out_width_total * out_depth_total;
@@ -4729,31 +6858,20 @@ static int dwise_supernode_recalculate_strategy(struct nn_node *self, struct nn_
 	info->stride_height = stride_height;
 	info->stride_width = stride_width;
 
+	// find input range, output scaling and limits
+	if( fill_info_minmax_basics(nn,self,info) !=0 ) return -1;
+	logmsg(nn,1,"out_maxval=%f out_minval=%f in_max_float=%f in_min_float=%f in_level_size=%f filt_level_size=%f prod_level_size=%f max_valid_val=%d",
+			info->out_maxval,info->out_minval,info->in_max_float,info->in_min_float,info->prod_level_size/info->weights_level_size,
+			info->weights_level_size,info->prod_level_size,info->max_valid_val);
+
 	supernode_softreset_work_items(self,nn,info);
 
-        int b;
+        int ib, ob;
 
 	int bias32 = (self->node_type == OP_DepthwiseSupernode_8x8p32to8_d32);
 	fill_bias_buf(nn,self,info,bias32,0);
 
-  for (b = 0; b < in_batches; b++) {
-	//info->input_base = in + (in_top_pad - required_h_before)*info->in_next_row;
-	info->input_base = tensor_location_d32(in_tensor,b, -required_h_before,-in_left_pad,0);
-	info->in_height = in_height + required_h_before + required_h_after;
-	info->weights_base = info->weights;
-
-	info->filt_height = 3;
-	info->filt_width = 3;
-
-	info->in_left_skip = in_left_pad - (out_left_pad * stride_width + required_w_before);
-
-	info->recip_shamt = 0;
-	while ((0x7f80000000ULL / (max_valid_val << info->recip_shamt)) > 0x7FFFFFFFULL) {
-		logmsg(nn,1,"Warning: have to increase shift amount (%d++)",info->recip_shamt);
-		info->recip_shamt++;
-	}
-	info->recip_val = 0x7f80000000ULL / (max_valid_val << info->recip_shamt);
-	logmsg(nn,1,"max_valid_val=%x recip_shamt=%d recip_val=%x",max_valid_val,info->recip_shamt,info->recip_val);
+	logmsg(nn,1,"max_valid_val=%x recip_shamt=%d recip_val=%x",info->max_valid_val,info->recip_shamt,info->recip_val);
 
 	logmsg(nn,2,"Out tensor: %d x %d|%d|%d x %d|%d|%d x %d|%d|%d",
 		out_batches,
@@ -4769,7 +6887,11 @@ static int dwise_supernode_recalculate_strategy(struct nn_node *self, struct nn_
 		return errlog(nn,"output tensor prep fail (%p).  data_size(%d)>max_size(%d)",
 		       out_tensor, out_tensor->data_size, out_tensor->max_size);
 	}
-	out_data_start = tensor_location_d32(out_tensor,b,0,-out_left_pad,0);
+
+	info->filt_height = 3;
+	info->filt_width = 3;
+	info->in_left_skip = in_left_pad - (out_left_pad * stride_width + required_w_before);
+
 	if (tensor_out_prepare_normal(out_min,1,1,1,1,NN_TYPE_FLOAT) != 0) {
 		return errlog(nn,"min out prep fail");
 	}
@@ -4778,6 +6900,33 @@ static int dwise_supernode_recalculate_strategy(struct nn_node *self, struct nn_
 	}
 	tensor_set_float(out_min,0,info->out_minval);
 	tensor_set_float(out_max,0,info->out_maxval);
+
+	int32_t batchstart_idx = 0;
+	info->startup_info.batch_start_offset = 0;
+
+	int32_t inner_batches;
+	int32_t outer_batches;
+	int32_t weights_fit;
+#ifdef V66
+	weights_fit = ((info->weight_batch_size) <= nn->vtcm_size);
+#else
+	weights_fit = 1;
+#endif
+	if (likely(weights_fit)) {
+		outer_batches = 1;
+		inner_batches = in_batches;
+	} else {
+		outer_batches = in_batches;
+		inner_batches = 1;
+	}
+
+	info->in_height = in_height + required_h_before + required_h_after;
+	info->weights_base = info->weights;
+	info->in_next_batch = input_batch_size;
+  for (ob = 0; ob < outer_batches; ob++) {
+	//info->input_base = in + (in_top_pad - required_h_before)*info->in_next_row;
+	//info->input_base = tensor_location_bhw_d32(in_tensor,b, -required_h_before,-in_left_pad);
+	work.weights = info->weights;
 
 	/*
 	 * Preparing the work list
@@ -4791,46 +6940,83 @@ static int dwise_supernode_recalculate_strategy(struct nn_node *self, struct nn_
 	 * This means that vector work needs to be passed to nn_os_work_for_vector
 	 */
 
-	waitwork.execute = supernode_execute_workitem_join_some;
+	//waitwork.execute = supernode_execute_workitem_join_some;
 
-	zapwork.info = info;
-	zapwork.self = self;
+	/* add_batch_startup will add the offsets appropriately, so here always use the base pointer */
+	startwork.info = info;
+	startwork.self = self;
 
-	zapwork.zap_left = (uint8_t *)info->input_base;
-	zapwork.zap_right = zapwork.zap_left + (in_left_pad + in_width)*32;
-	zapwork.zap_left_size = in_left_pad;
-	zapwork.zap_right_size = in_right_pad;
-	zapwork.zap_top = (uint8_t *)info->input_base;
-	zapwork.zap_top_size = info->in_next_row * required_h_before;
-	zapwork.zap_bot = (uint8_t *)info->input_base 
-			+ (required_h_before+in_height)*info->in_next_row;
-	zapwork.zap_bot_size = info->in_next_row * (required_h_after+1); //add extra row along bottom for corner case
-	zapwork.zap_rl_depths = in_depth_total / 32;
-	zapwork.zap_height = required_h_before+in_height+required_h_after;
-	zapwork.zap_value = input_offset;
-	logmsg(nn,1,"dwise supernode zapping pad");
+	startwork.zap_left = tensor_location_bhw_d32(in_tensor,0,-required_h_before,-in_left_pad);
+	startwork.zap_right = startwork.zap_left + (in_left_pad + in_width)*32;
+	startwork.zap_left_size = in_left_pad;
+	startwork.zap_right_size = in_right_pad;
+	startwork.zap_top = tensor_location_bhw_d32(in_tensor,0,-required_h_before,-in_left_pad);
+	startwork.zap_top_size = info->in_next_row * required_h_before;
+	startwork.zap_bot = tensor_location_bhw_d32(in_tensor,0,in_height,-in_left_pad); 
+	startwork.zap_bot_size = info->in_next_row * (required_h_after+1); //add extra row along bottom for corner case
+	startwork.zap_rl_depths = in_depth_total / 32;
+	startwork.zap_height = required_h_before+in_height+required_h_after;
+	startwork.zap_value = info->in_offset;
 
+	//logmsg(nn,1,"dwise supernode zapping pad");
+
+#if 0 // don't use vtcm for dwconv weights
 	// copy wieghts into vtcm if v65 or above
 	int32_t inner_weight_chunks = info->out_depth/32;
          
 	logmsg(nn,1,"dwise supernode d32 size %ld chunks %ld od %ld", info->weight_batch_size,inner_weight_chunks, info->out_depth);
 	supernode_weights(self,nn,info,	0, info->weights,info->weight_batch_size,inner_weight_chunks, 0);
+#else
+	// prefetch weights
+	//supernode_add_l2fetch(self,nn,info,info->weights,info->weight_batch_size/32,info->out_depth);
+#endif
 
-	supernode_add_padding_zap(self,nn,info,zapwork,0,required_h_before,required_w_before);
+#ifdef V66
+	if (weights_fit) {
+		startwork.copy_in = info->weights_base;
+		startwork.copy_out = nn->vtcm_ptr;
+		startwork.copy_size = info->weight_batch_size * info->n_weight_batches;
+		work.weights = nn->vtcm_ptr;
+	} else {
+		startwork.pf_inp = info->weights;
+		startwork.pf_width = startwork.pf_stride = info->weight_batch_size * info->n_weight_batches;
+		startwork.pf_height = 1;
+	}
+#else
+	startwork.pf_inp = info->weights;
+	startwork.pf_width = startwork.pf_stride = info->weight_batch_size * info->n_weight_batches;
+	startwork.pf_height = 1;
+#endif
+
+	//supernode_add_padding_zap(self,nn,info,zapwork,0,required_h_before,required_w_before);
 
 	work.info = info;
 	work.self = self;
-	work.execute = dwise_supernode_execute_workitem_vector_dispatch; 
-	work.input = info->input_base;
-	work.output = out_data_start;
+	//work.execute = dwise_supernode_execute_workitem_vector_dispatch; 
+	work.new_execute = dwise_supernode_execute_hvx_work;
 	work.biases = info->biasbuf;
-	work.weights = supernode_filtbuf_location(nn,info,0,info->weights,info->weight_batch_size*(info->out_depth/32));
+	//work.weights = supernode_filtbuf_location(nn,info,0,info->weights,info->weight_batch_size*(info->out_depth/32));
 
 	int32_t inner_act_rows = (out_height + NUM_THREADS - 1)/NUM_THREADS;
 	int32_t outer_act_iters = (out_height + inner_act_rows - 1)/ inner_act_rows;
-	int32_t semaphore_count = 0;
 	int or;
 
+	/* If we have a large # of batches, make each work item a larger piece of work */
+	if (inner_batches > NUM_THREADS*4) {
+		inner_act_rows = out_height;
+		outer_act_iters = 1;
+	}
+
+	info->startup_info.wakeup_items = outer_act_iters*inner_batches;
+	startwork.join_iters = outer_act_iters*inner_batches;
+	if (ob > 0) info->work_items[batchstart_idx].next_startup_offset = info->n_work_items - batchstart_idx - 1;
+	if (ob > 0) logmsg(nn,2,"next startup offset @ %d == %d",batchstart_idx,info->work_items[batchstart_idx].next_startup_offset);
+	int NOW_BATCHES=inner_batches;
+
+	batchstart_idx = supernode_add_batch_startup(self,nn,info,startwork,ob*inner_batches*input_batch_size,required_h_before,required_w_before,NOW_BATCHES);
+	logmsg(nn,2,"Adding batch startup: off=%d batchstart_idx=%d",ob*inner_batches*input_batch_size,batchstart_idx);
+     for (ib = 0; ib < inner_batches; ib++) {
+        int b = ob*inner_batches+ib;
 	for(or = 0; or < outer_act_iters; or++) {
 		int start_row = or * inner_act_rows;
 		int n_rows = Q6_R_min_RR(out_height-start_row,inner_act_rows);
@@ -4838,21 +7024,21 @@ static int dwise_supernode_recalculate_strategy(struct nn_node *self, struct nn_
 		work.start_line = start_row;
 		work.stop_line = start_row + n_rows;
 
-		work.donesem = &info->semaphores[0];
+		work.donesem = NULL;
+		work.output = tensor_location_bhw_d32(out_tensor,b,0,-out_left_pad);
+		work.input = tensor_location_bhw_d32(in_tensor,b,-required_h_before,-in_left_pad);
 
-		semaphore_count++;
+		logmsg(nn,2,"Adding work item: start_row=%d",start_row);
 		supernode_add_work_item(self,nn,info,work);
 	}
-
-	waitwork.join_iters = semaphore_count;
-	waitwork.donesem = &info->semaphores[0];
-	supernode_add_work_item(self,nn,info,waitwork);
+     }
   } // batch iter
-	work.execute = dwise_supernode_execute_workitem_check_for_retry;
-	supernode_add_work_item(self,nn,info,work);
+	//work.execute = dwise_supernode_execute_workitem_check_for_retry;
+	//supernode_add_work_item(self,nn,info,work);
 	/*
 	 * We've calculated the strategy, mark that the work is done. Hopefully it sticks!
 	 */
+	supernode_compile_worklist(nn,info,self);
 	info->needs_retry = 0;
 	info->strategy_valid = 1;
 	return 0;
@@ -4883,7 +7069,7 @@ static int dwise_supernode_execute(struct nn_node *self, struct nn_graph *nn)
 	if (filt_batches != 1) return errlog(nn,"FIXME: support depth expansion");
 	if (in_left_pad < 1) return errlog(nn,"Need at least 1 left pad");//EJP for SAME, valid needs no pad
 
-        struct supernode_info *nodeinfo = self->opaque;
+        struct supernode_info_new *nodeinfo = self->opaque;
         struct tensor *out = self->outputs[0];
         struct tensor *out_min = self->outputs[1];
         struct tensor *out_max = self->outputs[2];
@@ -4943,7 +7129,7 @@ static int dwise_supernode_check(struct nn_node *self, struct nn_graph *nn)
         float specified_minval = tensor_get_float(self->inputs[10],0);
         float specified_maxval = tensor_get_float(self->inputs[11],0);
 
-	struct supernode_info *info;
+	struct supernode_info_new *info;
 	float weights_scale;
 	int i,b;
 	logmsg(nn,2,"weights: (%d,%d,%d,%d-->%d)",filt_batches,filt_height,filt_width,filt_depth,filt_depth_roundup);
@@ -4957,28 +7143,19 @@ static int dwise_supernode_check(struct nn_node *self, struct nn_graph *nn)
 		nn_free(info);
 		return errlog(nn,"memalign");
 	}
-	info->weight_batch_size = 4 * filt_height * filt_depth_roundup * 32;
+	info->weight_batch_size = weights_size;
+	info->n_weight_batches = 1;
 	if ((info->biasbuf = nn_memalign(128,out_depth*sizeof(int32_t))) == NULL) {
 		nn_free(info->weights);
 		nn_free(info);
 		return errlog(nn,"memalign");
 	}
-        if ((info->semaphores = nn_calloc(1,sizeof(nn_sem_t))) == NULL) {
-                nn_free(info->biasbuf);
-                nn_free(info->weights);
-                nn_free(info);
-                return errlog(nn,"alloc semaphores");
-        }
 	if ((info->gemsumb = nn_memalign(128,out_depth*sizeof(int32_t))) == NULL) {
                 nn_free(info->biasbuf);
                 nn_free(info->weights);
-                nn_free(info->semaphores);
 		nn_free(info);
 		return errlog(nn,"memalign");
 	}
-        for (i = 0; i < 1; i++) {
-                nn_sem_init(&info->semaphores[i],0);
-        }
 
 	self->opaque = info;
 	info->filt_offset = filt_offset;
@@ -4999,6 +7176,7 @@ static int dwise_supernode_check(struct nn_node *self, struct nn_graph *nn)
 
 
 	info->weights_level_size =  (filt_max_float - filt_min_float) / (255.0f * weights_scale);
+        info->weight_scale_factor = 1.0;
 	logmsg(nn,1,"weights_scale=%f  weights_level_size=%f",weights_scale,info->weights_level_size);
 
 	for (b = 0; b < filt_batches; b++) {
@@ -5026,11 +7204,10 @@ static int dwise_supernode_check(struct nn_node *self, struct nn_graph *nn)
 
 static int dwise_supernode_dtor(struct nn_node *self, struct nn_graph *nn)
 {
-	struct supernode_info *info = self->opaque;
+	struct supernode_info_new *info = self->opaque;
 	if (info) {
 		supernode_reset_work_items(self,nn,info);
 		nn_free(info->gemsumb);
-		nn_free(info->semaphores);
 		nn_free(info->biasbuf);
 		nn_free(info->weights);
 		nn_free(info);
@@ -5088,7 +7265,7 @@ const unsigned char copy3to4_cntrl[128] __attribute__ ((aligned (128))) = {
 void shortin_zapslice_depth4(struct nn_graph *nn, void * vinfo)
 {
   struct workitem *zapwork = vinfo;
-  struct supernode_info *info = zapwork->info;
+  struct supernode_info_new *info = zapwork->info;
   struct nn_node *self = zapwork->self;
   const struct tensor *in_tensor = self->inputs[0];
   int32_t in_image_depth =  in_tensor->shape.depth;  //raw input tensor
@@ -5137,7 +7314,7 @@ void shortin_zapslice_depth4(struct nn_graph *nn, void * vinfo)
 static void shortin_convert_image_Nto4(void * vinfo)
 {
     struct workitem *zapwork = vinfo;
-    struct supernode_info *info = zapwork->info;
+    struct supernode_info_new *info = zapwork->info;
     struct nn_node *self = zapwork->self;
     const struct tensor *in_tensor = self->inputs[0];
     int32_t in_image_depth =  in_tensor->shape.depth;  //raw input tensor
@@ -5156,7 +7333,7 @@ static void shortin_convert_image_Nto4(void * vinfo)
 static void shortin_supernode_execute_zap_right(void * vinfo)
 {
     struct workitem *zapwork = vinfo;
-    struct supernode_info *info = zapwork->info;
+    struct supernode_info_new *info = zapwork->info;
     int i;
     uint8_t * ptr = zapwork->zap_right;
      
@@ -5170,7 +7347,7 @@ static void shortin_supernode_execute_zap_right(void * vinfo)
 static void shortin_supernode_execute_zap_left(void * vinfo)
 {
     struct workitem *zapwork = vinfo;
-    struct supernode_info *info = zapwork->info;
+    struct supernode_info_new *info = zapwork->info;
     int i;
     uint8_t * ptr = zapwork->zap_left;
     for(i=0; i < zapwork->zap_height; i++)
@@ -5183,7 +7360,7 @@ static void shortin_supernode_execute_zap_left(void * vinfo)
 static void shortin_supernode_execute_zap_top(void * vinfo)
 {
     struct workitem *zapwork = vinfo;
-    //struct supernode_info *info = zapwork->info;
+    //struct supernode_info_new *info = zapwork->info;
     uint8_t * ptr = zapwork->zap_top;
     vmemset_asm(ptr, zapwork->zap_value, zapwork->zap_top_size);
     return;
@@ -5191,7 +7368,7 @@ static void shortin_supernode_execute_zap_top(void * vinfo)
 static void shortin_supernode_execute_zap_bot(void * vinfo)
 {
     struct workitem *zapwork = vinfo;
-    //struct supernode_info *info = zapwork->info;
+    //struct supernode_info_new *info = zapwork->info;
     uint8_t * ptr = zapwork->zap_bot;
     vmemset_asm(ptr, zapwork->zap_value, zapwork->zap_bot_size);
     return;
@@ -5202,7 +7379,7 @@ static int shortin_supernode_prepare_input(struct nn_graph *nn, void *vwork)
 {
 	struct workitem *work = vwork;
 	//struct nn_node *self = work->self;
-	//struct supernode_info *info = work->info;
+	//struct supernode_info_new *info = work->info;
 
         //int32_t * integral_buf = info->suma_int_tmp;
         //int32_t * suma_buf = info->suma_buf;
@@ -5233,7 +7410,7 @@ static int shortin_supernode_prepare_input(struct nn_graph *nn, void *vwork)
 
 static void shortin_prepare_indata(struct workitem *zapwork, int32_t ypos, int32_t nlines, int ibatch)
 {
-    struct supernode_info *info = zapwork->info;
+    struct supernode_info_new *info = zapwork->info;
     struct nn_node *self = zapwork->self;
     const struct tensor *in_tensor = self->inputs[0];
 
@@ -5279,7 +7456,7 @@ static void shortin_prepare_indata(struct workitem *zapwork, int32_t ypos, int32
 
 static void shortin_prefetch_input(struct workitem *zapwork, int32_t ypos, int32_t nlines)
 {
-    struct supernode_info *info = zapwork->info;
+    struct supernode_info_new *info = zapwork->info;
     struct nn_node *self = zapwork->self;
     const struct tensor *in_tensor = self->inputs[0];
 
@@ -5314,7 +7491,7 @@ static void shortin_supernode_execute_hvx_slice(struct nn_graph *nn, void *vwork
 {
     struct workitem *work = vwork;
     //struct nn_node *self = work->self;
-    struct supernode_info *info = work->info;
+    struct supernode_info_new *info = work->info;
     
     union {
         HVX_Vector vec[4];
@@ -5331,7 +7508,6 @@ static void shortin_supernode_execute_hvx_slice(struct nn_graph *nn, void *vwork
     int32_t start_line = work->start_line;
     int32_t stop_line  = work->stop_line;
 
-
     int32_t ibatch = work->batch_index;
 
     const uint8_t *input = work->input + in_next_row*stride_height*start_line;
@@ -5339,15 +7515,21 @@ static void shortin_supernode_execute_hvx_slice(struct nn_graph *nn, void *vwork
     uint8_t *output_batch =  work->output + info->out_next_batch * ibatch;
     //uint8_t *output = output_batch + info->out_next_row*start_line;
 
-    int32_t  t_min = info->minval;
-    int32_t  t_max = info->maxval;
     int32_t  proc_rows = work->num_lines;
     int32_t  pf_offset = Q6_R_max_RR(filt_height-stride_height, 0);
 
     int32_t n_lines = Q6_R_min_RR(stop_line-start_line, proc_rows);
     int32_t n_in_rows = (n_lines-1)*stride_height + filt_height; 
+#if 1
+    int32_t path223 = (info->stride_width == 2 && stride_height == 2 && info->filt_width == 3);
+    inconv2d_t conv = (info->stride_width == 1) ? &inconv2dbbb_s1_v60_asm : 
+                                                  (path223) ? &inconv2dbbb332_v60_asm : &inconv2dbbb_v60_asm;
+#else
     inconv2d_t conv = (info->stride_width == 1) ? &inconv2dbbb_s1_v60_asm : &inconv2dbbb_v60_asm;
+#endif
     int32_t out_row, d;
+    minmax.vec[1] = Q6_V_vsplat_R(0x7FFFFFFF);
+    minmax.vec[0] = Q6_V_vnot_V(minmax.vec[1]);
 
     // prefetch initial activations
     shortin_prefetch_input(work, start_line*stride_height, n_in_rows);
@@ -5408,10 +7590,10 @@ static void shortin_supernode_execute_hvx_slice(struct nn_graph *nn, void *vwork
         int32_t next_n_in_rows = (next_n_lines-1)*stride_height + filt_height; 
 
         /* do conv2d */
-        for (d = 0; d < info->out_depth; d+=info->weight_batch_size) {
+        for (d = 0; d < info->out_depth_valid; d+=info->weight_batch_size) {
 
-            if (next_n_lines > 0 && (d+info->weight_batch_size) >= info->out_depth) {
-                shortin_prefetch_input(work, (start_line+proc_rows)*stride_height + pf_offset, next_n_in_rows-pf_offset);
+            if (next_n_lines > 0 && (d+info->weight_batch_size) >= info->out_depth_valid) {
+                shortin_prefetch_input(work, (out_row+proc_rows)*stride_height + pf_offset, next_n_in_rows-pf_offset);
             }
 #if 0
             logmsg(nn,2,"d=%d input=%p-->%p weights=%p-->%p filter_count=%d output=%p//%p out_next_row=%d biasbuf=%p recip_val=%x num_lines=%d filt_width=%d filt_height=%d in_depth=%d stride=%08x",
@@ -5482,8 +7664,8 @@ static void shortin_supernode_execute_hvx_slice(struct nn_graph *nn, void *vwork
                 minmax.words[96+24+0],minmax.words[96+24+1],minmax.words[96+24+2],minmax.words[96+24+3],
                 minmax.words[96+28+0],minmax.words[96+28+1],minmax.words[96+28+2],minmax.words[96+28+3]);
 #endif
-            t_min = Q6_R_min_RR(t_min,minmax.words[32]);
-            t_max = Q6_R_max_RR(t_max,minmax.words[0]);
+            //t_min = Q6_R_min_RR(t_min,minmax.words[32]);
+            //t_max = Q6_R_max_RR(t_max,minmax.words[0]);
         }
 
         input  += proc_rows*stride_height*in_next_row;
@@ -5491,9 +7673,10 @@ static void shortin_supernode_execute_hvx_slice(struct nn_graph *nn, void *vwork
         n_lines   = next_n_lines;
         n_in_rows = next_n_in_rows;
     }
+    gvrmaxmin(minmax.words);
+    nn_atomic_min(&info->minval,minmax.words[32]);
+    nn_atomic_max(&info->maxval,minmax.words[ 0]);
     
-    nn_atomic_min(&info->minval,t_min);
-    nn_atomic_max(&info->maxval,t_max);
     nn_os_bufstack_push(&info->bufstack,integral_buf);
     nn_sem_post(work->donesem);
 }
@@ -5510,14 +7693,14 @@ static int shortin_supernode_execute_everything(struct nn_graph *nn, void *vself
 	/* Since this can recurse, rewind our scratch allocator */
 	nn_scratch_reset(nn);
 	struct nn_node *self = vself;
-	struct supernode_info *info = self->opaque;
+	struct supernode_info_new *info = self->opaque;
 	struct workitem input_work = {0};	// klockwork
 	struct workitem filtwork[NUM_THREADS];
 	//struct workitem zapwork;
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *filt_tensor = self->inputs[1];
-	const struct tensor *min_in_tensor = self->inputs[2];
-	const struct tensor *max_in_tensor = self->inputs[3];
+	//const struct tensor *min_in_tensor = self->inputs[2];
+	//const struct tensor *max_in_tensor = self->inputs[3];
 	//const struct tensor *min_filt_tensor = self->inputs[4];
 	//const struct tensor *max_filt_tensor = self->inputs[5];
 	const struct tensor *stride_tensor = self->inputs[6];
@@ -5528,6 +7711,7 @@ static int shortin_supernode_execute_everything(struct nn_graph *nn, void *vself
 	struct tensor *out_min_tensor = self->outputs[1];
 	struct tensor *out_max_tensor = self->outputs[2];
 
+	info->in_shape = in_tensor->shape;
 	/*
 	 * Since the input is not in D32 format, it doesn't have padding and stuff
 	 */
@@ -5556,9 +7740,13 @@ static int shortin_supernode_execute_everything(struct nn_graph *nn, void *vself
 	 */
 	int32_t out_batches = in_batches;
 	int32_t out_depth = filt_batches;
-	int32_t out_width = nn_pad_compute_outsize(in_width,filt_width,stride_width,self->padding);
+
+	/* Find output size, amount of padding required in each direction by the padding type, filter size, and stride */
+	int32_t required_w_before, required_h_before, required_h_after;
+	int32_t out_width = nn_pad_compute_outsize_and_padbefore(in_width,filt_width,stride_width,self->padding, &required_w_before);
 	int32_t out_width_pad = roundup(out_width, 4);
-	int32_t out_height = nn_pad_compute_outsize(in_height,filt_height,stride_height,self->padding);
+	int32_t out_height = nn_pad_compute_outsize_and_pad(in_height,filt_height,stride_height,self->padding, &required_h_before, &required_h_after);
+	required_w_before += LPAD;
 
 	int32_t out_left_pad = 4;
 	int32_t out_right_pad = out_width_pad-out_width;
@@ -5571,7 +7759,8 @@ static int shortin_supernode_execute_everything(struct nn_graph *nn, void *vself
 	int32_t out_width_total = out_width + out_left_pad + out_right_pad;
 	int32_t out_height_total = out_height + out_top_pad + out_bottom_pad;
 	info->out_width = out_width_total - out_left_pad;
-	info->out_depth = out_depth_total;
+	info->out_depth_valid = out_depth_total;
+	info->out_depth_total = out_depth_total;
 	info->out_height = out_height;
 	info->out_next_d32 = out_width_total * 32;
 	info->out_next_row = out_width_total * out_depth_total;
@@ -5583,15 +7772,7 @@ static int shortin_supernode_execute_everything(struct nn_graph *nn, void *vself
 
 	info->out_next_batch = info->out_next_row * out_height_total;
 
-	/*
-	 * How much padding is required?
-	 */
-	int32_t required_w_before = nn_pad_compute_before(in_width,filt_width,stride_width,self->padding);
-	int32_t required_h_before = nn_pad_compute_before(in_height,filt_height,stride_height,self->padding);
-	//int32_t required_w_after = nn_pad_compute_after(in_width,filt_width,stride_width,self->padding);
-	int32_t required_h_after = nn_pad_compute_after(in_height,filt_height,stride_height,self->padding);
 
-	required_w_before += LPAD;
 
 	//printf(" %ld, %ld\n", required_h_before, required_w_before);
 
@@ -5623,77 +7804,36 @@ static int shortin_supernode_execute_everything(struct nn_graph *nn, void *vself
 	info->suma_start= 1;
 	logmsg(nn,2,"scratch=%p input_base=%p next_in_width=%d in_height=%d required_w_before=%d",in,info->input_base,next_in_width,info->in_height,required_w_before);
 
-	//uint8_t *filt = filt_tensor->data;
-	//uint8_t *bias = bias_tensor->data;
-	//int32_t *bias32_ptr = bias_tensor->data;
-	//uint8_t *out = out_tensor->data;
-	//uint8_t * out_data_start =  out + out_top_pad * info->out_next_row + out_left_pad * out_depth_total;
+	// disallow gain > 1.0
+	// NOTE: this may cause fill_info_minmax_basics
+	// to expand the output range.
+	info->recip_shamt_must_be_zero =1;
 
-	float in_max_float = tensor_get_float(max_in_tensor,0);
-	float in_min_float = tensor_get_float(min_in_tensor,0);
-	//float filt_max_float = tensor_get_float(max_filt_tensor,0);
-	//float filt_min_float = tensor_get_float(min_filt_tensor,0);
-	//float bias_min_float = tensor_get_float(bias_min_tensor,0);
-	//float bias_max_float = tensor_get_float(bias_max_tensor,0);
-	float out_min_float = info->out_minval;
-	float out_max_float = info->out_maxval;
-
-	int32_t input_offset = quantize_uint8(0.0f,in_min_float,in_max_float);
-	//int32_t filt_offset = quantize_uint8(0.0f,filt_min_float,filt_max_float);
-	//int32_t bias_offset = quantize_uint(0.0f,bias_min_float,bias_max_float);
-	//printf("bias_offset = %ld\n", bias_offset);
-
-	float in_level_size = (in_max_float - in_min_float) / 255;
-	float filt_level_size = info->weights_level_size;
-	//float bias_level_size = (bias_max_float - bias_min_float) / 255;
-	float prod_level_size = in_level_size * filt_level_size;
-	//float out_level_size = (out_max_float - out_min_float) / 255;
-
-	info->prod_level_size = prod_level_size;
-	info->max_valid_val = (out_max_float - out_min_float) / prod_level_size;
-	info->min_valid_val = 0;
-
-	info->in_max_float = in_max_float;
-	info->in_min_float = in_min_float;
-
-	info->in_offset = input_offset;
+	// find input range, output scaling & range
+	if( fill_info_minmax_basics(nn,self,info) != 0) return -1;
 
 	//float bias_to_prod_ratio = (bias_level_size / prod_level_size);
 	float min_out_prod_offset;
-	min_out_prod_offset = -info->out_minval / prod_level_size;
+	min_out_prod_offset = -info->out_minval / info->prod_level_size;
 	//float prod_to_out_ratio = prod_level_size / out_level_size;
 
 	info->weights_base = info->weights;
 	info->raw_input = in_tensor->data;
 
-	//int32_t input_batch_size;
-	//int32_t output_batch_size;
-
-	//int i;
-	//int b;  //assume batches = 1 for now
-	//int32_t tmpval32;
-	//int32_t recip_shift = 4;
-	//uint32_t gemsumb_val;
-
 	info->minval = 0;
 	info->maxval = 0;
-
-	int32_t maxsum = fast_roundf((info->out_maxval - info->out_minval) / prod_level_size);// same a supernode
-
-	info->recip_val = 0x7f80000000ULL / maxsum;	 //same a supernode
-	info->recip_shamt = 0;
-
 	/* Put more assumption checks here */
 	if (in_depth > 4) return errlog(nn,"Make this code work for input depth > 4"); 
 	if ((stride_width > 4)) return errlog(nn,"Add support for stride > 4");
 
-	if (tensor_out_prepare_padded_d32(out_tensor,
+	int fail = 0;
+	if ((fail = tensor_out_prepare_padded_d32(out_tensor,
 		out_batches,
 		out_height,out_top_pad,out_bottom_pad,
 		out_width,out_left_pad,out_right_pad,
 		out_depth,out_depth_before_pad,out_depth_after_pad,
-		NN_TYPE_QUINT8) != 0) {
-		return errlog(nn,"output tensor prep fail");
+		NN_TYPE_QUINT8)) != 0) {
+		return errlog(nn,"output tensor prep fail: %d", fail);
 	}
 	if (tensor_out_prepare_normal(out_min_tensor,1,1,1,1,NN_TYPE_FLOAT) != 0) {
 		return errlog(nn,"minout prep fail");
@@ -5713,40 +7853,8 @@ static int shortin_supernode_execute_everything(struct nn_graph *nn, void *vself
 	 * We will need to recompute the bias buffer any time the input offset changes
 	 */
 	int bias32 = (self->node_type == OP_InputSupernode_8x8p32to8_outd32);
-#if 0
-	if (!bias32) {
-		if (bias_max_float > 0x1p30f * prod_level_size) return errlog(nn,"bias too big");
-		if (-bias_min_float > 0x1.0p30f * prod_level_size) return errlog(nn,"bias too big");
-		for (i = 0; i < filt_batches; i++) {
-			int32_t biasval = bias[i];
-			float bias_fval = (biasval - bias_offset) * bias_to_prod_ratio;
-			bias_fval += min_out_prod_offset;
-			gemsumb_val = input_offset*info->gemsumb[i];
-			tmpval32 = fast_roundf(bias_fval);
-			info->biasbuf[i] = tmpval32 + gemsumb_val;
-			logmsg(nn,4,"biasbuf[%d] = %d",i,info->biasbuf[i]);
-		}
-	} else {
-		logmsg(nn,1,"Depth32 Bias");
-		bias_offset = 0;
-		bias_to_prod_ratio *= 0x1.0p-24f;
-		for (i = 0; i < filt_batches; i++) {
-			int32_t biasval = bias32_ptr[i];
-			float bias_fval = (biasval - bias_offset) * bias_to_prod_ratio;
-			bias_fval += min_out_prod_offset;
-			gemsumb_val = input_offset*info->gemsumb[i];
-			tmpval32 = fast_roundf(bias_fval);
-			info->biasbuf[i] = tmpval32 + gemsumb_val;
-		}
-	}
-	for (i = filt_batches; i < out_depth_total; i++) {
-		info->biasbuf[i] = input_offset*info->gemsumb[i] + min_out_prod_offset;
-		logmsg(nn,4,"biasbuf[%d] = %d",i,info->biasbuf[i]);
-	}
-#else
 	fill_bias_buf(nn,self,info,bias32,0);
-#endif
-        
+
 	nn_sem_t donesem;
 
 	nn_sem_init(&donesem,0);
@@ -5774,7 +7882,7 @@ static int shortin_supernode_execute_everything(struct nn_graph *nn, void *vself
 	input_work.info = info;
 	input_work.self = self;
 	input_work.input = info->input_base;
-	input_work.output = tensor_location_d32(out_tensor,0,0,0,0); //point to line 0, depth 0, elem 0 
+	input_work.output = tensor_location_bhw_d32(out_tensor,0,0,0); //point to line 0, depth 0, elem 0
 	input_work.weights = info->weights;
 	input_work.biases = info->biasbuf;
 //	input_work.start_line = 0;
@@ -5827,11 +7935,12 @@ static int shortin_supernode_execute_everything(struct nn_graph *nn, void *vself
 	int need_redo = 0;
 	int fixed_flags = 3;				// parm for adjust_minmax_for_zero_with_constraints
 	float ominval = info->out_minval;	// for transforming minval,maxval to app range
+	float prod_level_size = info->prod_level_size;
 	
 	if( !info->maxval_precalculated){
 		if( info->maxval > info->max_valid_val){
 			float app_maxval = info->maxval * prod_level_size + ominval;
-			info->out_maxval = to_next_power_of_two( fmaxf( app_maxval, 0x1.0p-4f));
+			info->out_maxval = round_up_quarter_octave( fmaxf( app_maxval, 0x1.0p-4f));
 
 			logmsg(nn,1,"Maxval too small (%x > %x), retrying... prod_level_size=%f new outmax = %f (>= %f)",
 					info->maxval,info->max_valid_val,prod_level_size,info->out_maxval, app_maxval);
@@ -5843,7 +7952,7 @@ static int shortin_supernode_execute_everything(struct nn_graph *nn, void *vself
 	if( !info->minval_precalculated){
 		if( info->minval < info->min_valid_val){		// i.e. if < 0 ..
 			float app_minval = info->minval * prod_level_size + ominval;
-			info->out_minval = to_next_power_of_two( fminf( app_minval, -0x1.0p-8f));
+			info->out_minval = round_up_quarter_octave( fminf( app_minval, -0x1.0p-8f));
 
 			logmsg(nn,1,"Minval too large (%x < %x), retrying... prod_level_size=%f new outmin = %f (<= %f)",
 					info->minval,info->min_valid_val,prod_level_size,info->out_minval, app_minval);
@@ -5859,6 +7968,10 @@ static int shortin_supernode_execute_everything(struct nn_graph *nn, void *vself
 		if( fixed_flags & 2) info->out_maxval = info->out_maxval_spec;
 		adjust_minmax_for_zero_with_constraints( & info->out_minval, &info->out_maxval, fixed_flags);
 		logmsg(nn,1, "adjusted output range: %f ... %f", info->out_minval, info->out_maxval );
+	}else if( info->recip_shamt > 0){
+		// it *seems* we got it right, but the scaling value needed was >=1, so it's out of reach.
+		// Should only be possible with constrained output min/max which are too small for the input ranges.
+		return errlog(nn,"requires final_scale=%.4f, not supported", flt_ldexp( (float)info->recip_val, info->recip_shamt-31));
 	}
 	return need_redo;
 }
@@ -5871,10 +7984,14 @@ static int shortin_supernode_execute_everything(struct nn_graph *nn, void *vself
 static int shortin_supernode_execute_call(struct nn_node *self, struct nn_graph *nn)
 {
 	//return nn_os_vector_call(nn,shortin_supernode_execute_everything,self);
-	while(1){
+	int count = 0;
+	while(count < 3){
 		int res = shortin_supernode_execute_everything(nn,self);
 		if( res <= 0) return res;
+		++ count;
 	}
+	logmsg(nn,0,"Extreme recursion detected in shortin_supernode, problem finding min/max?");
+	return -1;
 }
 
 //special rearrangement of weights insert filt offset in gaps
@@ -5924,7 +8041,7 @@ static void shortin_filt_sumb(uint8_t * filt_trans, int out_depth, int filter_co
 
 static int shortin_supernode_check(struct nn_node *self, struct nn_graph *nn)
 {
-	struct supernode_info *info = self->opaque;
+	struct supernode_info_new *info = self->opaque;
 	if (self->n_inputs != 12) return errlog(nn,"supernode wrong # inputs... now need min/max with inf for self-detecting");
 	if (self->n_outputs != 3) return errlog(nn,"supernode wrong # outputs");
 	const struct tensor *in_tensor = self->inputs[0];
@@ -5961,6 +8078,7 @@ static int shortin_supernode_check(struct nn_node *self, struct nn_graph *nn)
 	logmsg(nn,2,"estimating input %dx%dx%d, growing scratch to %d",input_height,input_width,input_depth,input_size*6);
 	//nn_scratch_grow(nn,input_size*6+input_height*input_width*4*SHORTIN_WORKITEMS);
 	nn_scratch_grow(nn,input_size*6+input_height*input_width*4*NUM_THREADS);
+
 
 	/* At check time or ctor time, we need to allocate all the intermediate storage we will need */
 
@@ -5999,6 +8117,7 @@ static int shortin_supernode_check(struct nn_node *self, struct nn_graph *nn)
 	logmsg(nn,2,"filt_elements=%d in_depth=%d out_depth=%d filt_batches=%d",
 		filt_elements,in_depth,out_depth,filt_batches);
         shortin_rearrange_weights_Ndto4(filt, filt_elements, in_depth, filt_batches, out_depth, info->weights, filt_offset);
+        info->weight_scale_factor = 1.f;
 	/* Precalculate gemsumb */
         shortin_filt_sumb(info->weights, out_depth, filt_elements, info->gemsumb);
         info->weights_level_size = filt_level_size;
@@ -6029,7 +8148,7 @@ static int shortin_supernode_check(struct nn_node *self, struct nn_graph *nn)
 
 static int shortin_supernode_dtor(struct nn_node *self, struct nn_graph *nn)
 {
-	struct supernode_info *info = self->opaque;
+	struct supernode_info_new *info = self->opaque;
 	if (info != NULL) {
 		supernode_reset_work_items(self,nn,info);
 		nn_free(info->minmax_buf);

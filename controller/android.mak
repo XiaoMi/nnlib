@@ -15,7 +15,7 @@ hexagon_controller_lib_DLLS += libcdsprpc
 hexagon_controller_lib_LD_FLAGS += -llog
 
 libhexagon_controller_QAICIDLS += $(hexagon_controller_lib_QAICIDLS)
-libhexagon_controller_C_SRCS += $(hexagon_controller_lib_C_SRCS)
+libhexagon_controller_C_SRCS += $(hexagon_controller_lib_C_SRCS) controller/config
 libhexagon_controller_DLLS += $(hexagon_controller_lib_DLLS)
 libhexagon_controller_LIBS += $(hexagon_controller_lib_LIBS)
 libhexagon_controller_LD_FLAGS += $(hexagon_controller_lib_LD_FLAGS)

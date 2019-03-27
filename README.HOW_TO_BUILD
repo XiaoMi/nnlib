@@ -1,18 +1,35 @@
+Here's how we are able to build Hexagon NN for MACE.
 
-Here's how I'm able to build this.
+Note that in order to run code on target, you have to follow the SDK instructions for installing a testsig.
+Try the "calculator" or other examples in the SDK to make sure you can execute on the DSP.
 
-Note that you have to follow the SDK instructions for installing a testsig.  
-Try the "calculator" or other example in the SDK to make sure you can execute on the DSP.
-
-0) Download and install the Hexagon SDK 3.3 (3.2 may also work)
+0) Download and install the Hexagon SDK 3.4.3 (other versions may also work)
 
 1) Source the Hexagon SDK setup_sdk_env.sh script.
 
-2) make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv81_v60
+2) Build the Hexagon NN dynamic library
 
-3) make tree VERBOSE=1 V=android_Release
+  For SD820: make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v60
+  For SD660: make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v60
+  For SD835: make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v60
+  For SD845: (best performance): make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v65 V65=1
+  For SD845: (Don't use V65 code): make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v65
+  For SD670: (best performance): make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v65 V65=1
+  For SD670: (Don't use V65 code): make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v65
+  For SD855: make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v66 V66=1
+  For SD855: (Don't use V66 code): make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v66
+
+3) Build the Hexagon NN controller(for MACE)
+
+  For armeabi-v7a: make tree VERBOSE=1 V=android_Release CDSP_FLAG=1
+  For arm64-v8a:   make tree VERBOSE=1 V=android_Release_aarch64 CDSP_FLAG=1
 
 4) adb root ; adb remount
 
-5) adb push hexagon_Release_dynamic_toolv81_v60/ship/libhexagon_nn_skel.so /system/vendor/lib/rfsa/adsp/
+5) cp interface/ops.def /path_to_mace/third_party/nnlib/ops.h
+   cp android_Release/ship/libhexagon_controller.so /path_to_mace/third_party/nnlib/
+   or
+   cp android_Release_aarch64/ship/libhexagon_controller.so /path_to_mace/third_party/nnlib/
 
+6) adb push hexagon_Release_dynamic_toolv83_v6x/ship/libhexagon_nn_skel.so /system/vendor/lib/rfsa/adsp/
+	 (Replace with the actual V= path that gets created from the appropriate option from above)

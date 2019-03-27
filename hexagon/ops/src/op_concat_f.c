@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -66,7 +66,6 @@ static int concat_do_execute(
 	const struct tensor *t;
 	struct tensor *out_tensor = self->outputs[0];
 	int concat_dim, i,k;
-	uint32_t j;
 
 	logmsg(nn,2,"concat execute. self=%p ",self);
 	concat_dim = tensor_get_int32(dim_tensor,0);
@@ -129,17 +128,27 @@ static int concat_do_execute(
 	}
 
 	// copy
+	struct nn_memcpy_manager mcman;
+	nn_mcmanager_init(nn, &mcman );
 
 	for (i = 0; i < n_input_tensors; i++) {
 		t = input_tensors[i];
 		in_data = t->data;
 		int input_dim = t->shape.dimension[concat_dim];
 		uint32_t copylen = input_dim  * inner_size;
-		for( j = 0; j < outer_count; j++){
-			memcpy(out_data + out_stride * j, in_data + copylen * j, copylen);
-		}
+
+		nn_mcmanager_vmemcpy_2d(nn, &mcman,
+				copylen, outer_count,	// width, height of rectangle
+				out_data, out_stride, 	// output ptr, stride
+				in_data, copylen );		// input ptr, stride
+
+		//for( int j = 0; j < outer_count; j++){
+		//	memcpy(out_data + out_stride * j, in_data + copylen * j, copylen);
+		//}
 		out_data += copylen;
 	}
+	nn_mcmanager_wait( nn, &mcman);
+
 	logmsg(nn,2,"concat %p done",self);
 	return 0;
 }

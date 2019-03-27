@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -43,6 +43,53 @@
 #include <nn_graph.h>
 #include <string.h>
 #include <quantize.h>
+#include "hvx_inlines.h"
+
+#define VELEM(elem_size)  (sizeof(HVX_Vector) / elem_size)
+
+
+// find the min/max of all values in arr[0..n]
+// Result is at minmaxp (which must be vector-aligned and have room for 32*i32:
+//   minmaxp[0] = minval
+//   minmaxp[1[ = ~maxval
+
+static void
+find_min_max_int32( int32_t const *arr, int n, int32_t * minmaxp )
+{
+	int nvec = n/ (unsigned)VELEM(sizeof(int32_t));
+	int residue_elements = n % (unsigned)VELEM(sizeof(int32_t));
+
+	HVX_Vector vec_in_max_val = Q6_V_vsplat_R(INT32_MIN);
+	HVX_Vector vec_in_min_val = Q6_V_vsplat_R(INT32_MAX);
+	HVX_Vector* pVec_inval = (HVX_Vector*) arr;
+	HVX_Vector tmp_val;
+	for( int i = 0; i < nvec; i++)
+	{
+		tmp_val = *pVec_inval++;
+		vec_in_max_val = Q6_Vw_vmax_VwVw(vec_in_max_val, tmp_val);
+		vec_in_min_val = Q6_Vw_vmin_VwVw(vec_in_min_val, tmp_val);
+	}
+	if(residue_elements > 0)
+	{
+		HVX_VectorPred residue_elements_mask = Q6_Q_vsetq_R(residue_elements * sizeof(int32_t));
+		tmp_val = *pVec_inval;
+		vec_in_max_val = Q6_Vw_vmax_VwVw(vec_in_max_val, Q6_V_vmux_QVV(residue_elements_mask, tmp_val, vec_in_max_val));
+		vec_in_min_val = Q6_Vw_vmin_VwVw(vec_in_min_val, Q6_V_vmux_QVV(residue_elements_mask, tmp_val, vec_in_min_val));
+	}
+	// combine min and ~max
+	HVX_VectorPair rshuff = Q6_W_vshuff_VVR( Q6_V_vnot_V(vec_in_max_val), vec_in_min_val, 4);
+	vec_in_min_val = Q6_Vw_vmin_VwVw( Q6_V_hi_W(rshuff),Q6_V_lo_W(rshuff) );
+	// now we have 16 of { min, ~max }
+	int txn = 4;
+	for( int  i = 0; i < 4; i++){
+		txn *= 2;	// 8,16,32,64
+		rshuff = Q6_W_vshuff_VVR( vec_in_min_val, vec_in_min_val, txn);
+		vec_in_min_val = Q6_Vw_vmin_VwVw( Q6_V_hi_W(rshuff),Q6_V_lo_W(rshuff) );
+	}
+	*(HVX_Vector *)minmaxp = vec_in_min_val;
+}
+
+
 
 static int do_autorequantize_execute(struct nn_node *self, struct nn_graph *nn)
 {
@@ -55,7 +102,7 @@ static int do_autorequantize_execute(struct nn_node *self, struct nn_graph *nn)
 	size_t elements = tensor_element_count(in_tensor);
 	const int32_t *in_data = in_tensor->data;
 	uint8_t *out_data = out_tensor->data;
-	uint32_t i;
+
 	float in_min = tensor_get_float(in_min_tensor,0);
 	float in_max = tensor_get_float(in_max_tensor,0);
 	float out_min;
@@ -65,7 +112,7 @@ static int do_autorequantize_execute(struct nn_node *self, struct nn_graph *nn)
 	int32_t in_max_val;
 	int32_t in_min_val;
 	int32_t inval;
-	float in_level_size = (in_max - in_min) / 4294967296.0f/*0x1.0p32f*/;
+	float in_level_size = (in_max - in_min) * (1.0f/ 4294967296.0f)/*0x1.0p-32f*/;
 
 	/* Assert min and max are size 1,1,1,1 ? */
 
@@ -79,13 +126,25 @@ static int do_autorequantize_execute(struct nn_node *self, struct nn_graph *nn)
 	}
 
 	/* Find min and max quantized 32 bit val */
-	in_max_val = INT32_MIN;
-	in_min_val = INT32_MAX;
-	for (i = 0; i < elements; i++) {
-		inval = in_data[i];
-		if (inval > in_max_val) in_max_val = inval;
-		if (inval < in_min_val) in_min_val = inval;
-	}
+
+	//following hvx version code used to optimize the "for loop" for performance benifits
+	// for (i = 0; i < elements; i++) {
+	// 	inval = in_data[i];
+	// 	if (inval > in_max_val) in_max_val = inval;
+	// 	if (inval < in_min_val) in_min_val = inval;
+	// }
+
+	const uint32_t  log2VLEN = 5;
+	uint32_t elements_vector_iterations = elements >> log2VLEN;
+	inval = 0;
+	l2fetch(in_data, 128, 128, elements_vector_iterations + 1);
+	union { HVX_Vector as_v; int32_t as_i32[32];} minmax_union;
+	find_min_max_int32( in_data, elements, & minmax_union.as_i32[0] );
+	Q6_dcfetch_A(&minmax_union);
+
+	in_max_val = max_i32(~minmax_union.as_i32[1], 0);
+	in_min_val = min_i32(minmax_union.as_i32[0], 0);
+
 	/* Make sure min val <= 0.0 in floaty land */
 	out_min = in_level_size * (float)in_min_val;
 	out_max = in_level_size * (float)in_max_val;
@@ -96,23 +155,8 @@ static int do_autorequantize_execute(struct nn_node *self, struct nn_graph *nn)
 		out_min,out_max);
 
 	/* Requantize with new range */
-	/* For elements < 128, HVX code seem to have issue, for now fall back to reference C code */
-	if(elements < 128) {
-		for (i = 0; i < elements; i++) {
-			/* FIXME: in HVX we will need to do this in fixed point... */
-			out_data[i] = quantize_uint8(
-				in_level_size* (float)in_data[i],out_min,out_max);
-		}
-	} else {
-		float gain = recip_stepsize*in_level_size;
-		int gaini = (int) (gain*2147483648.0f/*0x1.0p31f*/+0.5f);
-		/* 
-		 * Since out min is not necessarily in_min, we need to make 
-		 * sure we have exactly the right offset
-		 */
-		int offseti = out_min / in_level_size;
-		quantize_asm(in_data, offseti, gaini, out_data, elements);
-	}
+	nn_requantize_i32_to_qu8_hvx( out_data, in_data, elements, in_level_size, out_min, out_max);
+
 	tensor_set_single_float(out_min_tensor,out_min);
 	tensor_set_single_float(out_max_tensor,out_max);
 
@@ -140,16 +184,15 @@ static int do_requantize_execute(struct nn_node *self, struct nn_graph *nn)
 	float in_max = tensor_get_float(in_max_tensor,0);
 	float out_min = tensor_get_float(min_val_tensor,0);
 	float out_max = tensor_get_float(max_val_tensor,0);
-	float in_level_size = (in_max - in_min) / 4294967296.0f/*0x1.0p32f*/;
+	float in_level_size = (in_max - in_min) * (1.0f/ 4294967296.0f)/*0x1.0p-32f*/;
+
 	float recip_stepsize;
 	float stepsize;
 
 	/* Assert min and max are size 1,1,1,1 ? */
 
 	logmsg(nn,2,"autorequantize execute. self=%p ",self);
-	logmsg(nn,2,"autorequantize in min/max=%f/%f ",
-		tensor_get_float(in_min_tensor,0),
-		tensor_get_float(in_max_tensor,0));
+	logmsg(nn,2,"autorequantize in min/max=%f/%f ", in_min, in_max);
 
 	if( tensor_out_prepare_normal_fromshape( out_tensor, &in_tensor->shape, NN_TYPE_QUINT8)!= 0 ){
 		return errlog(nn,"out too small");
@@ -188,6 +231,232 @@ static int do_requantize_execute(struct nn_node *self, struct nn_graph *nn)
 	logmsg(nn,2,"requantize %p done",self);
 	return 0;
 }
+static void scale_32_to_16( int16_t * outp, int32_t const * inp, int num, int32_t gain, int rsh );
+
+//
+// requant i32->i16 based on actual range of data.
+// output range is always symmetrical.
+//
+static int do_autorequantize_16_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	const struct tensor *in_tensor = self->inputs[0];
+	const struct tensor *in_min_tensor = self->inputs[1];
+	const struct tensor *in_max_tensor = self->inputs[2];
+	struct tensor *out_tensor = self->outputs[0];
+	struct tensor *out_min_tensor = self->outputs[1];
+	struct tensor *out_max_tensor = self->outputs[2];
+	size_t elements = tensor_element_count(in_tensor);
+	const int32_t *in_data = in_tensor->data;
+	int16_t *out_data = out_tensor->data;
+
+	float in_min = tensor_get_float(in_min_tensor,0);
+	float in_max = tensor_get_float(in_max_tensor,0);
+	float out_min;
+	float out_max;
+	int32_t in_max_val;
+	int32_t in_min_val;
+
+	float in_level_size = (in_max - in_min) * (1.0f/ 4294967296.0f)/*0x1.0p-32f*/;
+
+	/* Assert min and max are size 1,1,1,1 ? */
+
+	logmsg(nn,2,"autorequantize_16 execute. self=%p ",self);
+
+	if( tensor_out_prepare_normal_fromshape(out_tensor, &in_tensor->shape, NN_TYPE_QINT16)!=0){
+		return errlog(nn,"out too small");
+	}
+
+	/* Find min and max quantized 32 bit val */
+
+	const uint32_t  log2VLEN = 5;
+	uint32_t elements_vector_iterations = elements >> log2VLEN;
+	l2fetch(in_data, 128, 128, elements_vector_iterations + 1);
+	union { HVX_Vector as_v; int32_t as_i32[32];} minmax_union;
+	find_min_max_int32( in_data, elements, & minmax_union.as_i32[0] );
+	Q6_dcfetch_A(&minmax_union);
+
+	in_max_val = max_i32(~minmax_union.as_i32[1], 2);	// ensure range isn't 0:0
+	in_min_val = min_i32(minmax_union.as_i32[0], 0);
+
+	// make symmetric range
+	out_max = in_level_size * (float)max_i32(in_max_val, -in_min_val);
+	out_min = -out_max;
+
+	// determine scaling...
+	float out_level_size = out_max * (float)(1.0/32768.0);
+	int32_t scalefac;
+	float scale_by = in_level_size/out_level_size;
+	int rsh;
+	// since we are deciding the output range, we can enlarge it if
+	// the actual data range is really small.
+	// The output range will not be smaller than the input range/64k;
+	// i.e. the out_level_size must be >= in_level_size
+	if( scale_by >= 1.0f ){		// force to 1.0f
+		out_max = in_level_size * 32768.0f;
+		out_min = -out_max;
+		scalefac = 0x7fffffff;		// select 'unity scale'
+		rsh = 0;
+	}else{
+
+		// determine scaling, as xout = xin*scalefac/(2^(31+rsh))
+		// (eqv. to xout = xin*scale_by)
+		// where
+		//     rsh = -24 ..15 (but normally >= 0)
+		//	    0 < scalefac < 0x7FFFFFFF
+		//       (but normally scalefac >= 0x40000000, except when needed to keep rsh <= 15)
+		//
+		int expo = flt_getexp(scale_by);	 // <= 0, >=-16 since scale_by < 1.0f , >= 1/64k
+		rsh = min_i32(-expo, 15);
+		scalefac = roundf_i32( flt_ldexp( scale_by, rsh+31));	// should be <= 0x7fffff80
+		// so e.g, 0.5 maps to rsh = 0,  scalefac = 0x40000000
+		//         0.375 maps to rsh = 1, scalefac =0x60000000
+	}
+
+	scale_32_to_16( out_data, in_data, elements, scalefac, rsh);
+
+
+	tensor_set_single_float(out_min_tensor,out_min);
+	tensor_set_single_float(out_max_tensor,out_max);
+
+	logmsg(nn,2,"autorequantize_16 out min/max=%f/%f ",
+		tensor_get_float(out_min_tensor,0),
+		tensor_get_float(out_max_tensor,0));
+	logmsg(nn,2,"autorequantize_16 %p done",self);
+	return 0;
+}
+
+//
+// requantize i32->i16 based on indicated output range
+//  inputs 1,2 represent the range of the i32
+//  inputs 3,4 represent the desired range of the i16 output;
+//   this is expanded as needed to make it symmetric.
+
+static int do_requantize_16_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	const struct tensor *in_tensor = self->inputs[0];
+	const struct tensor *in_min_tensor = self->inputs[1];
+	const struct tensor *in_max_tensor = self->inputs[2];
+	const struct tensor *min_val_tensor = self->inputs[3];
+	const struct tensor *max_val_tensor = self->inputs[4];
+	struct tensor *out_tensor = self->outputs[0];
+	struct tensor *out_min_tensor = self->outputs[1];
+	struct tensor *out_max_tensor = self->outputs[2];
+	size_t elements = tensor_element_count(in_tensor);
+	const int32_t *in_data = in_tensor->data;
+	int16_t *out_data = out_tensor->data;
+	float in_min = tensor_get_float(in_min_tensor,0);
+	float in_max = tensor_get_float(in_max_tensor,0);
+	float out_min = tensor_get_float(min_val_tensor,0);
+	float out_max = tensor_get_float(max_val_tensor,0);
+	float in_level_size = (in_max - in_min) * (1.0f/ 4294967296.0f)/*0x1.0p-32f*/;
+	/* Assert min and max are size 1,1,1,1 ? */
+
+	logmsg(nn,2,"requantize_16 execute. self=%p ",self);
+	logmsg(nn,2,"requantize_16 in min/max=%f/%f ",in_min, in_max );
+
+	if( tensor_out_prepare_normal_fromshape( out_tensor, &in_tensor->shape, NN_TYPE_QINT16)!= 0 ){
+		return errlog(nn,"out too small");
+	}
+	out_max = fmaxf( (float)(1./2048.),fmaxf( out_max, -out_min)) ;
+	out_min = -out_max;
+	float out_level_size = out_max * (float)(1.0/32768.0);
+	float scale_by = in_level_size/out_level_size;
+
+	// scaling is done, usually, by:
+	// (1) multiply using fractional 32-bit mul (scale value <2^31, implied /2^31)
+	// (2) right-shift by rsh= 0..15, round, truncate to i16 range.
+	//
+	// Ideally the scale factor in (1) is normalized; to avoid a shift > 15 in (2), we allow
+	// it to be denormalized.
+	// If the overall scale factor is >= 1, we can't use this approach; instead we have rsh < 0 and
+	// (1) clip the 32-bit value to a 'safe' range
+	// (2) << the value by (4-rsh) bits
+	// (3) as (1) above
+	// (4) right-shift by 2, round, truncate to i16 range
+	//
+	if( ! flt_isfinite(scale_by) || scale_by < 0x1.0p-29f  || scale_by >= 0x1.0p24f) {
+		return errlog(nn,"scale ratio for 32->16 is not reasonable");
+	}
+	int expo = flt_getexp(scale_by);
+	int rsh = min_i32(-expo, 15);
+	int32_t scalefac = roundf_i32( flt_ldexp( scale_by, rsh+31));	// should be <= 0x7fffff80
+	// so e.g, 0.5 maps to rsh = 0,  scalefac = 0x40000000
+	//         0.375 maps to rsh = 1, scalefac =0x60000000
+
+	scale_32_to_16( out_data, in_data, elements, scalefac, rsh);
+	tensor_set_single_float(out_min_tensor,out_min);
+	tensor_set_single_float(out_max_tensor,out_max);
+
+	logmsg(nn,2,"requantize_16 out min/max=%f/%f ",
+		tensor_get_float(out_min_tensor,0),
+		tensor_get_float(out_max_tensor,0));
+	logmsg(nn,2,"requantize_16 %p done",self);
+	return 0;
+}
+
+//
+// scale n 'int32' to 'int16' using vector ops.  The scaling
+// done by  'gain' * 2^-(31+rsh); gain must be >1, <= 0x7fffffff
+// and rsh must be in range -24..15
+//
+// -- input, output pointers must be vec-aligned
+//
+// When rsh is >= 0, this is done by:
+//    (1) frac mul by gain/2^31
+//    (2) >>rsh ,round, truncate to i16 range
+// When rsh < 0, done by:
+//    (1) clip value to range to avoid overflow at (2)
+//    (2)  << by (4-rsh)
+//    (3) frac mul by gain/2^31
+//    (4) >>4, round, truncate to i16 range.
+//
+static void
+scale_32_to_16( int16_t * outp, int32_t const * inp, int num, int32_t gain, int rsh )
+{
+	HVX_Vector vgain = Q6_V_vsplat_R( gain );
+	int nv32 = (num+31)/32u;		// # of vecs to read
+	int nv64 = nv32>>1;		// # of full 2->1 operations
+
+	HVX_Vector const * vinp = (HVX_Vector const*)inp;
+	HVX_Vector *voutp = (HVX_Vector *)outp;
+
+	if( rsh >= 0 ){
+		for( int i = 0; i < nv64; i++){
+			HVX_Vector v0 = q6op_Vw_vmpy_VwVw_s1_rnd_sat( vinp[0], vgain);
+			HVX_Vector v1 = q6op_Vw_vmpy_VwVw_s1_rnd_sat( vinp[1], vgain);
+			*voutp =Q6_Vh_vdeal_Vh( Q6_Vh_vasr_VwVwR_rnd_sat( v1,v0, rsh));
+			vinp += 2;
+			voutp += 1;
+		}
+		if( nv32&1){
+			HVX_Vector v0 = q6op_Vw_vmpy_VwVw_s1_rnd_sat( vinp[0], vgain);
+			*voutp = Q6_Vh_vdeal_Vh(Q6_Vh_vasr_VwVwR_rnd_sat( v0,v0, rsh));
+
+		}
+	}else{
+		int lshamt = 4-rsh;		// this is 5..28
+		int maxin = ((unsigned)0x80000000 >> lshamt) - 1;	// upper limit for pre-clip
+		HVX_Vector v_max = Q6_V_vsplat_R( maxin);
+		HVX_Vector v_min = Q6_V_vnot_V(v_max);		// lower-limit for pre-clip
+		for( int i = 0; i < nv64; i++){
+			HVX_Vector v0 = Q6_Vw_vmax_VwVw( Q6_Vw_vmin_VwVw( vinp[0], v_max), v_min );
+			HVX_Vector v1 = Q6_Vw_vmax_VwVw( Q6_Vw_vmin_VwVw( vinp[1], v_max), v_min );
+			v0 = q6op_Vw_vmpy_VwVw_s1_rnd_sat( Q6_Vw_vasl_VwR(v0,lshamt), vgain);
+			v1 = q6op_Vw_vmpy_VwVw_s1_rnd_sat( Q6_Vw_vasl_VwR(v1,lshamt), vgain);
+			*voutp =Q6_Vh_vdeal_Vh( Q6_Vh_vasr_VwVwR_rnd_sat( v1,v0, 4));
+			vinp += 2;
+			voutp += 1;
+		}
+		if( nv32&1){
+			HVX_Vector v0 = Q6_Vw_vmax_VwVw( Q6_Vw_vmin_VwVw( vinp[0], v_max), v_min );
+			v0 = q6op_Vw_vmpy_VwVw_s1_rnd_sat( Q6_Vw_vasl_VwR(v0,lshamt), vgain);
+			*voutp =Q6_Vh_vdeal_Vh( Q6_Vh_vasr_VwVwR_rnd_sat( v0,v0, 4));
+		}
+	}
+}
+
+
+
 
 static int do_requantrange_execute(struct nn_node *self, struct nn_graph *nn)
 {
@@ -206,7 +475,7 @@ static int do_requantrange_execute(struct nn_node *self, struct nn_graph *nn)
 	int32_t in_max_val;
 	int32_t in_min_val;
 	int32_t inval;
-	float in_level_size = (in_max - in_min) / 4294967296.0f/*0x1.0p32f*/;
+	float in_level_size = (in_max - in_min) * (1.0f/ 4294967296.0f)/*0x1.0p-32f*/;
 
 	/* Assert min and max are size 1,1,1,1 ? */
 
@@ -216,17 +485,17 @@ static int do_requantrange_execute(struct nn_node *self, struct nn_graph *nn)
 		tensor_get_float(in_max_tensor,0));
 
 	/* Find min and max quantized 32 bit val */
-	in_max_val = INT32_MIN;
-	in_min_val = INT32_MAX;
+	/* start from 0 */
+	in_max_val = 0;
+	in_min_val = 0;
 	for (i = 0; i < elements; i++) {
 		inval = in_data[i];
 		if (inval > in_max_val) in_max_val = inval;
 		if (inval < in_min_val) in_min_val = inval;
 	}
-	/* Make sure min val <= 0.0 in floaty land */
+
 	out_min = in_level_size * (float)in_min_val;
 	out_max = in_level_size * (float)in_max_val;
-	if (out_min > 0.0f) out_min = 0.0f;
 
 	tensor_set_single_float(out_min_tensor,out_min);
 	tensor_set_single_float(out_max_tensor,out_max);
@@ -241,6 +510,8 @@ static int do_requantrange_execute(struct nn_node *self, struct nn_graph *nn)
 struct tdata {
 	int (*f)(struct nn_node *self, struct nn_graph *nn);
 	int retval;
+
+
 	struct nn_node *self;
 	nn_sem_t donesem;
 };
@@ -278,6 +549,15 @@ static int requantrange_execute(struct nn_node *self, struct nn_graph *nn)
 static int autorequantize_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	return launcher(self,nn,do_autorequantize_execute);
+}
+
+static int autorequantize_16_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	return launcher(self,nn,do_autorequantize_16_execute);
+}
+static int requantize_16_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	return launcher(self,nn,do_requantize_16_execute);
 }
 
 
@@ -338,6 +618,31 @@ struct nn_node_ops nn_ops_for_QuantizeDownAndShrinkRange_32to8_ref = {
 	.dtor = node_free_common,
 };
 
+
+//
+// QuantizeDownAndShrinkRange_32to16:
+// convert 32-bit quantized to 16-bit quantized, checking the actual
+// range of values to find the output range.
+//
+//  input 0:   qi32 tensor
+//  input 1,2:  scalar float, input min & max
+//
+//  output 0:   qi16 tensor
+//  output 1,2:  scalar float, output min & max
+//
+struct nn_node_ops nn_ops_for_QuantizeDownAndShrinkRange_32to16 = {
+	.execute = autorequantize_16_execute,
+	.check = autorequantize_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};
+
+struct nn_node_ops nn_ops_for_QuantizeDownAndShrinkRange_32to16_ref = {
+	.execute = autorequantize_16_execute,
+	.check = autorequantize_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};
 //
 // Requantize_32to8:
 // convert 32-bit quantized to 8-bit quantized, relying on
@@ -350,7 +655,7 @@ struct nn_node_ops nn_ops_for_QuantizeDownAndShrinkRange_32to8_ref = {
 //  input 3,4:  scalar float, output min & max
 //
 //  output 0:   qu8 tensor
-//  output 1,2:  scalar float, input min & max
+//  output 1,2:  scalar float, output min & max
 //
 struct nn_node_ops nn_ops_for_Requantize_32to8 = {
 	.execute = requantize_execute,
@@ -361,6 +666,32 @@ struct nn_node_ops nn_ops_for_Requantize_32to8 = {
 
 struct nn_node_ops nn_ops_for_Requantize_32to8_ref = {
 	.execute = requantize_execute,
+	.check = requantize_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};
+
+// Requantize_32to16:
+// convert 32-bit quantized to 16-bit quantized, relying on
+// supplied range (inputs 3 & 4) to determine range.
+// If necessary, the indicated range is expanded to make it
+// symmetric
+//
+//  input 0:   qi32 tensor
+//  input 1,2:  scalar float, input min & max
+//  input 3,4:  scalar float, output min & max
+//
+//  output 0:   qu8 tensor
+//  output 1,2:  scalar float, output min & max
+struct nn_node_ops nn_ops_for_Requantize_32to16 = {
+	.execute = requantize_16_execute,
+	.check = requantize_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};
+
+struct nn_node_ops nn_ops_for_Requantize_32to16_ref = {
+	.execute = requantize_16_execute,
 	.check = requantize_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
@@ -383,6 +714,7 @@ struct nn_node_ops nn_ops_for_RequantizationRange_32 = {
 	.check = requantrange_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.flags = NN_NODE_FLAG_CLS_REQUANTRANGE,
 };
 
 struct nn_node_ops nn_ops_for_RequantizationRange_32_ref = {

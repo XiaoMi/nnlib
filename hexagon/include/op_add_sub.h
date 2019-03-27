@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -171,25 +171,9 @@ static inline void q##NAME##_hvx(\
 		   Output => hi(outval2) = [96, 97, 98, ... 127] */ \
 		OUT2 = Q6_W_vshuff_VVR(Q6_V_hi_W(outval1_lin), Q6_V_hi_W(outval2_lin), -4);\
 
+
+
 #define CREATE_OP_ADD_SUB(NAME, OPNAME, OPERATOR) \
-static inline int32_t NAME##_helper(int32_t a, int32_t b, void *unused) { \
-	return a OPERATOR b;\
-}\
-\
-static int NAME##_int32_execute(struct nn_node *self, struct nn_graph *nn)\
-{\
-	return broadcast_elementwise_execute_int32(self,nn,NAME##_helper,NULL);\
-}\
-\
-static int NAME##_int32_check(struct nn_node *self, struct nn_graph *nn)\
-{\
-	logmsg(nn,2,"##NAME node %p",self);\
-	if (self->n_inputs != 2) return errlog(nn,"wrong # inputs");\
-	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");\
-	logmsg(nn,2,"##NAME %p check OK",self);\
-	return 0;\
-}\
-\
 struct NAME##_info {\
 	int a_offset;\
 	int b_offset;\
@@ -363,6 +347,10 @@ static int NAME##_q8_execute_hvx(struct nn_node *self, struct nn_graph *nn) \
 	nn_os_work_for_vector(nn, q##NAME##_thread_process, &td);\
 	nn_sem_wait(&td.donesem);\
 \
+	if(td.opt_flag == 2) {\
+		return -1;\
+	}\
+\
 	if(td.opt_flag == 1) {\
 		retval = 0;\
 	}\
@@ -382,13 +370,6 @@ static int NAME##_q8_check(struct nn_node *self, struct nn_graph *nn)\
 	logmsg(nn,2,"##NAME %p check OK",self);\
 	return 0;\
 }\
-\
-struct nn_node_ops nn_ops_for_##OPNAME##_int32 = {\
-	.execute = NAME##_int32_execute,\
-	.check = NAME##_int32_check,\
-	.ctor = node_alloc_common,\
-	.dtor = node_free_common,\
-};\
 \
 struct nn_node_ops nn_ops_for_Quantized##OPNAME##_8p8to32 = {\
 	.execute = NAME##_q8_execute_hvx,\

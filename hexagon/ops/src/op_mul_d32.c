@@ -53,13 +53,6 @@
 #include <quantize.h>
 #include <math.h>
 
-// If HVX_WITH_BYTEMASKED_STORE is defined, byte-masked stores (in intrinsics) will be used,
-// to avoid writing to any bytes which are in the depth-padding or width-padding regions.
-// Requires 8.x compiler.
-#ifdef HEXAGON_COMPILER_GE_8_0
-#define HVX_WITH_BYTEMASKED_STORE
-#endif
-
 // scaling parms
 // those with [*] are a dependent on the output range;
 // the others only on the input range.
@@ -190,10 +183,8 @@ struct  core_mul_d32_parms {
 	int32_t d32_stride_B;	// used only when combining depth segs.
 	uint8_t* pout;
 	int32_t row_stride_out;
-	uint16_t d_lo, d_hi;			// depth range
-// note that d_srcB_lo is always the same as d_lo when using the hvx code; when using the reference
-// code, it may differ and the operation may need to gather from two source segments.
-	uint16_t d_srcB_lo;
+	uint16_t  d_here;			// depth in current op; 1..32
+
 
 	struct op_scaling_parms osp;
 	int16_t * minmax;		// store min/max here if not null.
@@ -201,7 +192,7 @@ struct  core_mul_d32_parms {
 	nn_sem_t donesem;
 };
 void core_mul_d32_reference( struct core_mul_d32_parms const * );
-void core_mul_d32_reference_skewd32( struct core_mul_d32_parms const * );
+
 void core_mul_d32_hvx( struct core_mul_d32_parms const *);
 static void core_oper_thread( struct nn_graph *nn, void * prmsv );
 
@@ -232,10 +223,20 @@ static int mul_d32_execute_common(struct nn_node *self, struct nn_graph *nn, int
 	logmsg(nn,2,"mul_d32 execute. self=%p ",self);
 
 
-	int compat_flags = check_compatible_elementwise_d32( nn, "mul_d32", tensorA, tensorB, compat_ALL);
+	int compat_flags = check_compatible_elementwise_d32( nn, "mul_d32", tensorA, tensorB, compat_ALL| compat_AtoB);
 
 	if(compat_flags<0) return compat_flags;
 
+	int toggleAB = 0;
+	// it may be that A is broadcasting onto B
+	// in which case we need to swap A,B (and arrange
+	// for the min/max to be swapped)
+	if( compat_flags & compat_AtoB){
+		toggleAB = 1;
+		const struct tensor * t = tensorA;
+		tensorA = tensorB;
+		tensorB = t;
+	}
 	//logmsg(nn,0,"mul_d32 compat_flags = %X", compat_flags);
 
 	struct shape out_shape = tensorA->shape;
@@ -256,10 +257,10 @@ static int mul_d32_execute_common(struct nn_node *self, struct nn_graph *nn, int
 		float rstp = 255.0f/(in_max-in_min);
 		all_in_scale *= rstp;
 		int zv = saturate_u8(roundf_i32(-rstp*in_min));
-		opscales->zeroval[i] = zv;
+		opscales->zeroval[i^toggleAB] = zv;
 		if( zv != 0) is_zero_min = 0;
-		inmin[i] = fminf(in_min,0.0f);
-		inmax[i] = fmaxf(in_max,0.0f);
+		inmin[i^toggleAB] = fminf(in_min,0.0f);
+		inmax[i^toggleAB] = fmaxf(in_max,0.0f);
 	}
 	opscales->all_in_scale = all_in_scale;
 	opscales->all_in_scale_recip = 1.0f/all_in_scale;
@@ -291,10 +292,11 @@ static int mul_d32_execute_common(struct nn_node *self, struct nn_graph *nn, int
 	*/
 
 	// figure out the padding
+	if( tensorA->format.depth_pad[0]!= 0 || tensorB->format.depth_pad[0] != 0)return errlog(nn,"depth pad before !=0");
+
 	int out_width_pad_before = tensorA->format.width_pad[0];
-	int out_depth_pad_before = tensorA->format.depth_pad[0];
-	int inB_depth_pad_before = tensorB->format.depth_pad[0];
-	int depth_end = out_depth_pad_before + out_shape.depth;
+
+	int depth_end =  out_shape.depth;
 
 	// number of depth slices we need to do.
 	int d32_count = (unsigned)( depth_end + 31)/32;
@@ -309,7 +311,7 @@ static int mul_d32_execute_common(struct nn_node *self, struct nn_graph *nn, int
 		out_shape.batches,
 		out_shape.height, tensorA->format.height_pad[0],tensorA->format.height_pad[1],
 		out_shape.width,  tensorA->format.width_pad[0],tensorA->format.width_pad[1],
-		out_shape.depth, out_depth_pad_before, d32_count*32-depth_end,
+		out_shape.depth, 0, d32_count*32-depth_end,
 		NN_TYPE_QUINT8) != 0) {
 		return errlog(nn,"failure preparing output, max_size=%d bhwd=%d,%d,%d,%d",
 			out_tensor->max_size,out_shape.batches,out_shape.height,out_shape.width,out_shape.depth);
@@ -341,7 +343,7 @@ static int mul_d32_execute_common(struct nn_node *self, struct nn_graph *nn, int
 		uint8_t b_value_u8 = B_tensor_base_data[ tensorB->format.depth_pad[0]];	// get the value
 		float b_value = b_value_u8 * flt_div_255(inmax[1]-inmin[1])  + inmin[1];
 
-		if( fabs(b_value)> 1e-5){
+		if( fabsf(b_value)> 1e-5f){
 			int scale, offs;
 			out_min = inmin[0]*b_value;
 			out_max = inmax[0]*b_value;
@@ -382,7 +384,6 @@ static int mul_d32_execute_common(struct nn_node *self, struct nn_graph *nn, int
 			op_parms.d32_stride_B = inputB_d32_stride = new_d32_stride;
 			// the new data follows the tensorA alignment.
 			B_tensor_base_data = newdata + 32*out_width_pad_before;
-			inB_depth_pad_before = out_depth_pad_before;
 
 			// this cures all misalignments (the copied data is aligned for tensorA).
 			compat_flags &= ~compat_misalign_ALL;
@@ -425,11 +426,7 @@ static int mul_d32_execute_common(struct nn_node *self, struct nn_graph *nn, int
 	float out_max0 = out_max_all * 0.25f;
 
 	// a place for the min & max to be stored by the function
-#ifdef HVX_WITH_BYTEMASKED_STORE
-	int16_t minmax[2] __attribute__((aligned(4))) = {0};	// range of internal calc (to detect overflow).
-#else
 	int16_t minmax[2+62] __attribute__((aligned(128))) = {0};// range of internal calc (to detect overflow).
-#endif
 
 	op_parms.minmax = minmax;	// only on first pass
 	// if there are any intra-vector misalignments, use the reference implementation,
@@ -437,10 +434,7 @@ static int mul_d32_execute_common(struct nn_node *self, struct nn_graph *nn, int
 	op_parms.core_oper_funcp =
 			(!use_hvx  || ( compat_flags & compat_misalign_ALL)!= 0 )?core_mul_d32_reference
 					: core_mul_d32_hvx;
-	// if the depth is 'skewed', we need to use a special version of the reference routine.
-	if( compat_flags & compat_skewed_D ){
-		op_parms.core_oper_funcp = core_mul_d32_reference_skewd32;
-	}
+
 
 	while(1){
 		if( clean_work_units ==0){		// assume we need to set up scaling
@@ -467,21 +461,13 @@ static int mul_d32_execute_common(struct nn_node *self, struct nn_graph *nn, int
 			op_parms.ptrA = tensor_location_bhw_d32( tensorA, batch_index, 0,0);
 			op_parms.ptrB = B_tensor_base_data +  batch_index * inputB_batch_stride;
 			op_parms.pout = tensor_location_bhw_d32( out_tensor, batch_index, 0,0);
-			op_parms.d_lo = out_depth_pad_before;
-			op_parms.d_srcB_lo = inB_depth_pad_before;
 		}else{
 			op_parms.ptrA += inputA_d32_stride;	// move to next depth slice
 			op_parms.pout += output_d32_stride;
-			// d_lo advances to the start of next slice; d_srcB_lo advances by the same amount.
-			int d_srcB_lo = op_parms.d_srcB_lo + (32-op_parms.d_lo);
-			if( d_srcB_lo >= 32){
-				d_srcB_lo -= 32;
-				op_parms.ptrB += inputB_d32_stride;
-			}
-			op_parms.d_lo = 0;
+			op_parms.ptrB += inputB_d32_stride;
 		}
 
-		op_parms.d_hi = min_i32( depth_end - 32*depth_index, 32); 		// [dlo,dhi) is the depth range.
+		op_parms.d_here = min_i32( depth_end - 32*depth_index, 32); 		// depth in current slice
 		l2pref( op_parms.ptrA, op_parms.height, op_parms.width*32, op_parms.row_stride_A );
 		if (do_side_b_prefetch)
 			l2pref( op_parms.ptrB, op_parms.height, op_parms.width*32, op_parms.row_stride_B );
@@ -544,46 +530,6 @@ core_oper_thread( struct nn_graph *nn, void * prmsv )
 	nn_sem_post(&prms->donesem);
 }
 
-// this is a version of core_mul_d32_reference which can handle
-// the case where the source bytes are split across two d32 segments.
-// it works by making a copy of the core_mul_d32_parms so it can
-// run two sub-operations.
-// Note that not all slices will be split.
-void
-core_mul_d32_reference_skewd32( struct core_mul_d32_parms const * prms )
-{
-	int dlo = prms->d_lo;
-	int depth = prms->d_hi - dlo;
-	if( depth + prms->d_srcB_lo <=32 ){	// this one is not split
-		core_mul_d32_reference(prms);
-		return;
-	}
-	int16_t * mmp = prms->minmax;
-	struct core_mul_d32_parms prms2 = *prms;	// make a copy
-	int dfirst = (32-prms->d_srcB_lo);		// do this first
-	prms2.d_hi = dlo + dfirst;				// this is the reduced amount...
-
-	core_mul_d32_reference( &prms2);		// run that
-
-	prms2.ptrB += prms2.d32_stride_B;		// advance to next segment of B
-	prms2.d_srcB_lo = 0;
-	prms2.d_lo = dlo + dfirst;				// advance output & A
-	prms2.d_hi = prms->d_hi;
-
-	int16_t minmax2[2];
-	if( mmp != NULL){
-		// divert the second minmax to local array
-		prms2.minmax = &minmax2[0];
-	}
-
-	core_mul_d32_reference( &prms2);		// run the second one.
-	if(mmp != NULL){
-		// merge the range from local array.
-		mmp[0] = max_i32( mmp[0], minmax2[0]);
-		mmp[1] = max_i32( mmp[1], minmax2[1]);
-	}
-}
-
 
 
 // reference for the 'core' op.
@@ -604,12 +550,8 @@ core_mul_d32_reference( struct core_mul_d32_parms const * prms )
 	int32_t row_stride_B = prms->row_stride_B;
 	uint8_t* pout = prms->pout;
 	int32_t row_stride_out = prms->row_stride_out;
-	// we don't care about alignment here, so just bump all the pointers by dlo
-	int dlo = prms->d_lo;
-	int depth = prms->d_hi - dlo;
-	ptrA += dlo;
-	ptrB += prms->d_srcB_lo;
-	pout += dlo;
+	int depth = prms->d_here;
+
 
 	int za = prms->osp.zeroval[0];
 	int zb = prms->osp.zeroval[1];
@@ -668,8 +610,7 @@ core_mul_d32_reference( struct core_mul_d32_parms const * prms )
 // .. where each product is u8*u8 -> u16, and all the +/- are mod 64K.
 // This eliminates the need to zero-extend anything
 //
-// when 'minmax' is not null, we need it to aligned at a multple of 4
-// (or a multiple of 128, if not HVX_WITH_BYTEMASKED_STORE)
+// when 'minmax' is not null, we need it to aligned at a multiple of 128
 
 //--------------- inlines---------------
 static inline HVX_VectorPair first_multiply( HVX_Vector vinA, HVX_Vector vinB, int32_t za, int32_t zb, int32_t mulbias){
@@ -700,15 +641,6 @@ static inline HVX_Vector second_multiply( HVX_VectorPair vin, int32_t post_scale
 	return Q6_Vub_vasr_VhVhR_rnd_sat( p1, p0, rsh);
 }
 
-#ifdef HVX_WITH_BYTEMASKED_STORE
-#define BYTEMASKED_STORE q6op_vstcc_QAV
-#else
-// this is done as an inline to avoid warnings about unused 'cond' variables
-static inline  void BYTEMASKED_STORE(  HVX_VectorPred qunused, HVX_Vector *addr, HVX_Vector v )
-{
-	*addr = v;
-}
-#endif
 //-----------------------------------------
 void
 core_mul_d32_hvx( struct core_mul_d32_parms const * prms )
@@ -723,9 +655,7 @@ core_mul_d32_hvx( struct core_mul_d32_parms const * prms )
 	uint8_t* pout = prms->pout;
 	int32_t row_stride_out = prms->row_stride_out;
 
-	int dlo = prms->d_lo;
-	int dhi = prms->d_hi;
-	HVX_VectorPred qmask1 = hvx_make_d32_range_mask( dlo, dhi );
+	HVX_VectorPred qmask1 = hvx_make_d32_range_mask( 0, prms->d_here );
 
 
 	int iht,iwd;
@@ -774,24 +704,18 @@ core_mul_d32_hvx( struct core_mul_d32_parms const * prms )
 			//
 			// start up..
 			//
-			HVX_VectorPred qmask = Q6_Q_and_QQn( qmask1, Q6_Q_vsetq_R(wpad_bytes));
 			HVX_VectorPair vtmp = first_multiply( *vinpA ++, *vinpB++, za,zb, mul_bias );
 
 			// loop (zero times or more)
 			for( iwd = 0; iwd < nvecw; iwd++ ){
 				HVX_Vector vout = second_multiply( vtmp, post_scale, adj_bias, post_rsh);
 				vtmp = first_multiply( *vinpA ++, *vinpB++, za,zb, mul_bias );
-				BYTEMASKED_STORE( qmask, voutp++, vout);
-				qmask= qmask1;
+				*voutp++= vout;
 			}
 			//
 			// last one
 			//
-			{
-				qmask = Q6_Q_and_QQ( qmask, q6op_Q_vsetq2_R(wlen));
-				HVX_Vector vout = second_multiply( vtmp, post_scale, adj_bias, post_rsh);
-				BYTEMASKED_STORE( qmask, voutp, vout);
-			}
+			*voutp = second_multiply( vtmp, post_scale, adj_bias, post_rsh);
 
 			vinpA_0 = (HVX_Vector const *)(  (char const *)vinpA_0 + row_stride_A);
 			vinpB_0 = (HVX_Vector const *)(  (char const *)vinpB_0 + row_stride_B);
@@ -838,8 +762,7 @@ core_mul_d32_hvx( struct core_mul_d32_parms const * prms )
 				HVX_Vector vout = second_multiply( vtmp, post_scale, adj_bias, post_rsh);
 				vinA =  Q6_V_vmux_QVV( qmask1, *vinpA++, vza);	// apply 'general' mask
 				vtmp = first_multiply( vinA, *vinpB++, za,zb, mul_bias );
-				BYTEMASKED_STORE( qmask, voutp++, vout);
-				qmask= qmask1;
+				*voutp++ = vout;
 			}
 			// now, before last min/max op, trim any trailing edge
 			// (when nvecw=0, vtmp has already had left masking applied)
@@ -851,9 +774,7 @@ core_mul_d32_hvx( struct core_mul_d32_parms const * prms )
 				vmin = Q6_Vh_vmin_VhVh( vmin, Q6_Vh_vmin_VhVh(vt1,vt0));
 				vmax = Q6_Vh_vmax_VhVh( vmax, Q6_Vh_vmax_VhVh(vt1,vt0));
 
-				qmask = Q6_Q_and_QQ( qmask, qnright);
-				HVX_Vector vout = second_multiply(  vtmp, post_scale, adj_bias, post_rsh);
-				BYTEMASKED_STORE( qmask, voutp, vout);
+				*voutp = second_multiply(  vtmp, post_scale, adj_bias, post_rsh);
 			}
 			vinpA_0 = (HVX_Vector const *)(  (char const *)vinpA_0 + row_stride_A);
 			vinpB_0 = (HVX_Vector const *)(  (char const *)vinpB_0 + row_stride_B);
@@ -876,15 +797,8 @@ core_mul_d32_hvx( struct core_mul_d32_parms const * prms )
 				vmax = Q6_Vh_vmax_VhVh( Q6_V_hi_W(sh), Q6_V_lo_W(sh));
 			}
 			// now all 32  4-byte lanes have the same (~min,max).
-#ifdef HVX_WITH_BYTEMASKED_STORE
-			// we can store any 4 byte lane to minmax pointer
-			int offs = (size_t)prms->minmax & 127;
-			HVX_Vector * vminmaxp = (HVX_Vector *)((char*)prms->minmax - offs);
-			HVX_VectorPred qmsk = Q6_Q_and_QQn( q6op_Q_vsetq2_R(offs+4), Q6_Q_vsetq_R(offs));
-			q6op_vstcc_QAV( qmsk, vminmaxp, vmax);
-#else
+
 			*(HVX_Vector *)prms->minmax = vmax;
-#endif
 		}
 	}
 }

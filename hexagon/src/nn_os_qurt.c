@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -35,76 +35,184 @@
 
 #ifdef USE_OS_QURT
 
-#include "dspCV_hvx.h"
 #include <qurt.h>
 #include <nn_graph.h>
+#include <HAP_power.h>
+
+#define DEFAULT_MAIN_PRIORITY   0xC0
+#define MIN_MAIN_PRIORITY       0xBB
+#define MAX_MAIN_PRIORITY       0xC5
+
+// Set default worker thread priority to be lower (i.e. a higher number) than FastRPC threads, which are by default 0xC0
+static const unsigned short DEFAULT_WORKER_PRIORITY = 0xD0;
+#define MIN_WORKER_PRIORITY 0xC8
+#define MAX_WORKER_PRIORITY 0xD8
+
 
 #if !defined(HEXAGON_V65) && !defined(HEXAGON_V66)
+// include nothing
 #else
 #include <HAP_vtcm_mgr.h>
 #endif
-int nn_os_vtcm_acquire(struct nn_graph *nn)
-{
-#if !defined(HEXAGON_V65) && !defined(HEXAGON_V66)
-	/* Just return 0 */
-#else
-// FIXME: query how much VTCM
+
+
+
+#if defined(HEXAGON_V66)
+
+// FIXME: when SDK updates, this will populate
+void* HAP_request_async_VTCM(unsigned int size,
+                             unsigned int single_page_flag,
+                             unsigned int timeout_us);
+#endif
+
+
 #define VTCM_AMT (256*1024)
-	int use_single_page = 1;
-	void *ptr = HAP_request_VTCM(VTCM_AMT,use_single_page);
-	if (ptr != NULL) {
-		nn->vtcm_size = VTCM_AMT;
-		nn->vtcm_ptr = ptr;
+int nn_os_vtcm_fake_acquire(struct nn_graph *nn)
+{
+	logmsg(nn,1,"couldn't acquire VTCM");
+	if (unlikely(nn->fake_vtcm_ptr == NULL)) {
+		if ((nn->fake_vtcm_ptr = nn_memalign(128,VTCM_AMT)) == NULL) {
+			return errlog(nn,"Oops, can't memalign fake VTCM");
+		}
+	}
+	nn->vtcm_ptr = nn->fake_vtcm_ptr;
+	nn->vtcm_size = VTCM_AMT;
+	return 0;
+}
+extern int VTCM_User_Req;
+
+
+// NOTE: This function sets nn->vtcm_size under the assumption that it will be later allocated before use
+//  Violation of this assumption may cause bugs elsewhere.
+int nn_os_vtcm_choose_size(struct nn_graph *nn)
+{
+	nn->vtcm_size = VTCM_User_Req;
+
+#if defined(HEXAGON_V66) || defined(HEXAGON_V65)
+	if (nn->vtcm_size==-1) {
+		// Query available VTCM, and warn if we're getting less than expected.
+		unsigned int avail_block_size, max_page_size, num_pages, arch_page_size, arch_page_count;
+		if (HAP_query_avail_VTCM(&avail_block_size, &max_page_size, &num_pages)) {
+			// Should this be fatal?
+			logmsg(nn,1,"ERROR: Could not query available VTCM from Qurt");
+		}
+		if (HAP_query_total_VTCM(&arch_page_size, &arch_page_count)) {
+			// Should this be fatal?
+			logmsg(nn,1,"ERROR: Could not query VTCM architecture from Qurt");
+		}
+		if (arch_page_count != 1) {
+			logmsg(nn,1,"WARN: Architectural VTCM page-count %u!=1 (%u,%u,%u,%u)", arch_page_count, avail_block_size, max_page_size, num_pages, arch_page_size);
+		}
+		if (arch_page_size != max_page_size) {
+			logmsg(nn,1, "WARN: Max VTCM page available is less than architectural.  Maybe other users? (%u < %u)", max_page_size, arch_page_size);
+		}
+		logmsg(nn,1,"VTCM request: %u of %u", max_page_size, arch_page_size*arch_page_count);
+		nn->vtcm_size = max_page_size;
+	}
+#else  // V60
+	if (nn->vtcm_size==-1) {
+		nn->vtcm_size = 0;
 	}
 #endif
 	return 0;
 }
+
+int nn_os_vtcm_acquire(struct nn_graph *nn)
+{
+	int use_single_page = 1;
+
+	nn_os_vtcm_choose_size(nn);
+
+	if (nn->vtcm_size == 0) {
+		return nn_os_vtcm_fake_acquire(nn);
+	}
+
+#if defined(HEXAGON_V66)
+    void *ptr;
+    qurt_arch_version_t av;
+    qurt_sysenv_get_arch_version(&av);
+    if(av.arch_version == 0x00002866) { //check if running on ViperTooth
+        logmsg(nn, 2, "Runing on QCS405, will not use asynchronous VTCM request");
+        ptr = HAP_request_VTCM(nn->vtcm_size, 0);
+    } 
+    else {
+	    unsigned int timeout_us = 500*1000;
+	    ptr = HAP_request_async_VTCM(nn->vtcm_size, use_single_page, timeout_us);
+    }
+#elif defined(HEXAGON_V65)
+	void *ptr = HAP_request_VTCM(nn->vtcm_size,use_single_page);
+#else  // V60, etc.
+	void *ptr = NULL;
+	(void)(use_single_page);
+#endif
+	if (ptr != NULL) {
+		nn->vtcm_ptr = ptr;
+	} else {
+		return nn_os_vtcm_fake_acquire(nn);
+	}
+
+	return 0;
+}
+
+
 
 int nn_os_vtcm_release(struct nn_graph *nn)
 {
 #if !defined(HEXAGON_V65) && !defined(HEXAGON_V66)
 	return 0;
 #else
-	HAP_release_VTCM(nn->vtcm_ptr);
+	/* If we really have VTCM, release it. */
+	if (nn->vtcm_ptr && (nn->vtcm_ptr != nn->fake_vtcm_ptr)) {
+		HAP_release_VTCM(nn->vtcm_ptr);
+	}
 	nn->vtcm_ptr = NULL;
 	nn->vtcm_size = 0;
 #endif
 	return 0;
 }
 
-
 int nn_os_vector_acquire()
 {
-	int wait_for_context = 1;
-        if (dspCV_hvx_lock(DSPCV_HVX_MODE_128B, wait_for_context) < 0) {
-		return 0;
-	}
-	return 0;
+    int ret = qurt_hvx_lock(QURT_HVX_MODE_128B);
+    if (ret != 0) return errlog(NULL,"Can't lock HVX context ret=%x",ret);
+    return 0;
 }
-
 
 void nn_os_vector_release(int idx)
 {
-	dspCV_hvx_unlock();
+    if (qurt_hvx_unlock() != 0) {
+        errlog(NULL,"couldn't unlock hvx\n");
+    }
 }
 
 void nn_os_hvx_power_on(struct nn_graph *nn)
 {
-	if (dspCV_hvx_power_on() != 0) {
-		errlog(nn,"couldn't power on hvx\n");
+    HAP_power_request_t request;
+    request.type = HAP_power_set_HVX;
+    request.hvx.power_up = TRUE;
+    int ret = HAP_power_set((void*)nn, &request);
+	if (ret != 0) {
+		errlog(nn,"couldn't power on hvx ret=%x\n",ret);
 	}
 }
 
 void nn_os_hvx_power_off(struct nn_graph *nn)
 {
-	dspCV_hvx_power_off();
+    HAP_power_request_t request;
+    request.type = HAP_power_set_HVX;
+    request.hvx.power_up = FALSE;
+    int ret = HAP_power_set((void*)nn, &request);
+    if (ret != 0) {
+        errlog(nn,"couldn't power off hvx ret=%x\n",ret);
+    }
 }
 
+#if 0
 nn_pipe_t *nn_pipe_alloc(struct nn_graph *nn, uint32_t pipe_elements)
 {
 	qurt_pipe_attr_t pattr;
 	nn_pipe_t *ret;
-	const unsigned int PIPESIZE_ELEMENTS = 4;
+	const unsigned int PIPESIZE_ELEMENTS = 128;
 	const unsigned int PIPESIZE_BYTES = PIPESIZE_ELEMENTS * 8;
 	qurt_pipe_attr_init(&pattr);
 	qurt_pipe_attr_set_buffer(&pattr,nn_malloc(PIPESIZE_BYTES));
@@ -112,6 +220,7 @@ nn_pipe_t *nn_pipe_alloc(struct nn_graph *nn, uint32_t pipe_elements)
 	qurt_pipe_create(&ret,&pattr);
 	return ret;
 }
+#endif
 
 struct qurt_startup {
 	void *(*f)(void *);
@@ -127,6 +236,14 @@ static void __attribute__((unused)) qurt_wrap(void *p)
 	nn_sem_post(&st->sem);
 	f(arg);
 	qurt_thread_exit(0);
+}
+
+static unsigned short get_qurt_worker_priority(int nn_priority) {
+	unsigned short os_priority = (unsigned short) (((int) DEFAULT_WORKER_PRIORITY) + nn_priority);
+	// cap priority to safe ranges, lower value is higher priority
+	if (os_priority < MIN_WORKER_PRIORITY) os_priority = MIN_WORKER_PRIORITY;
+	else if (os_priority > MAX_WORKER_PRIORITY) os_priority = MAX_WORKER_PRIORITY;
+	return os_priority;
 }
 
 int nn_thread_create(
@@ -146,11 +263,29 @@ int nn_thread_create(
 	st.arg = arg;
 	snprintf(name,16,"nn_%x",cycles);
 	qurt_thread_attr_set_name(&myattrs,name);
-	qurt_thread_attr_set_priority(&myattrs,QURT_THREAD_ATTR_PRIORITY_DEFAULT/2);
+	qurt_thread_attr_set_priority(&myattrs, get_qurt_worker_priority(nn->priority));
 	ret = qurt_thread_create(tid,&myattrs,qurt_wrap,&st);
 	if (ret != 0) return errlog(nn,"Can't create qurt thread ret=%x",ret);
 	nn_sem_wait(&st.sem);
 	return ret;
+}
+
+int nn_os_get_main_thread_priority(int nn_priority) {
+	int os_priority = ((int) DEFAULT_MAIN_PRIORITY) + nn_priority;
+	// cap priority to safe ranges, lower value is higher priority
+	if (os_priority < MIN_MAIN_PRIORITY) os_priority = MIN_MAIN_PRIORITY;
+	else if (os_priority > MAX_MAIN_PRIORITY) os_priority = MAX_MAIN_PRIORITY;
+	return os_priority;
+}
+
+int nn_os_get_current_thread_priority(int *priority) {
+	qurt_thread_t id = qurt_thread_get_id();
+	*priority = qurt_thread_get_priority(id);
+	return 0;
+}
+int nn_os_set_current_thread_priority(int priority) {
+	qurt_thread_t id = qurt_thread_get_id();
+	return qurt_thread_set_priority(id, (unsigned short) priority);
 }
 
 /* depending on config, get pcycles or PMU events */

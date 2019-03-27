@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -64,7 +64,7 @@ static int neg_f_check(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-struct nn_node_ops nn_ops_for_Neg_f = {
+struct nn_node_ops nn_ops_for_Neg_f_ref = {
 	.execute = neg_f_execute,
 	.check = neg_f_check,
 	.ctor = node_alloc_common,

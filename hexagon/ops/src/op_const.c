@@ -42,6 +42,7 @@
 
 #include <nn_graph.h>
 #include <stdlib.h>
+#include "nn_const_prep_share.h"
 
 static int const_execute(struct nn_node *self, struct nn_graph *nn)
 {
@@ -104,6 +105,7 @@ struct nn_node *hexagon_nn_empty_const_ctor(
 	outdefs[0].max_sizes[3] = depth;
 	outdefs[0].elementsize = data_len/allsize;
 	self->n_inputs = 0;
+	self->noderefhash = 0;
 	self->n_outputs = 1;
 	self->outputs = &const_tensor->self;
 	self->output_defs = outdefs;
@@ -172,8 +174,11 @@ static struct nn_node *const_ctor(
 static int const_dtor(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,9,"const node %p dtor id=%x",self,self->node_id);
+	if( self->opaque != NULL )
+		nn_cpshare_decref( nn, self->opaque);
 	tensor_free(self->outputs[0]);
 	nn_free(self->output_defs);
+	del_node_from_hash(nn,self->node_id, self);
 	nn_free(self);
 	return 0;
 }

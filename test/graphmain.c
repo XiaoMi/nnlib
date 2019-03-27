@@ -39,6 +39,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <hexagon_nn.h>
 //#define DEBUG_TEST_NEW_EXECUTE
 #ifdef DEBUG_TEST_NEW_EXECUTE
@@ -49,11 +50,7 @@
 
 #define OUTPUT_ELEMENTS 1024
 #define BATCHES 1
-#ifdef SNPE_TEST
-	#define HEIGHT 224
-#else
-	#define HEIGHT 299
-#endif
+#define HEIGHT 299
 #define WIDTH HEIGHT
 #define DEPTH 3
 
@@ -425,19 +422,26 @@ void graph_perfdump(uint32_t id)
 	//graph_get_all_perf(id);
 }
 
-
-// Define the correct event_names[] array for our arch
-#if defined(V66)
+#define PMU_EVENT_NAMES pmu_events_v66
 #include "pmu_v66.h"
-#else
-#if defined(CDSP_FLAG)
+#undef PMU_EVENT_NAMES
+#define PMU_EVENT_NAMES pmu_events_v65
 #include "pmu_v65_cdsp.h"
-#else
+#undef PMU_EVENT_NAMES
+#define PMU_EVENT_NAMES pmu_events_v60
 #include "pmu_adsp.h"
-#endif // CDSP_FLAG
-#endif // V66
+#undef PMU_EVENT_NAMES
 
-#define N_EVENTS (sizeof(event_names)/sizeof(event_names[0]))
+const char **PMU_EVENT_ARRAYS[] = {
+                pmu_events_v60,
+                pmu_events_v65,
+                pmu_events_v66,
+};
+const int PMU_MAX_EVENTS[] = {
+                (sizeof(pmu_events_v60)/sizeof(pmu_events_v60[0])),
+                (sizeof(pmu_events_v65)/sizeof(pmu_events_v65[0])),
+                (sizeof(pmu_events_v66)/sizeof(pmu_events_v66[0])),
+};
 
 #define MAX_PERF_OUTPUT_SIZE 4096
 
@@ -455,12 +459,19 @@ int graph_get_all_perf(uint32_t id,
 	hexagon_nn_perfinfo info[MAX_NODES];
 	int i,j;
 	int err;
+#if defined(V66)
+	int pmu_set = 2;
+#elif defined(CDSP_FLAG)
+	int pmu_set = 1;
+#else
+	int pmu_set = 0;
+#endif
 	printf("Getting all performance counter information\n");
 	if ((input = calloc(1,height*width*depth*elementsize)) == NULL) {
 		printf("malloc fail\n");
 		return -1;
 	}
-	if ((counters = malloc(N_EVENTS*MAX_NODES*sizeof(uint64_t))) == NULL) {
+	if ((counters = malloc(PMU_MAX_EVENTS[pmu_set]*MAX_NODES*sizeof(uint64_t))) == NULL) {
 		printf("malloc fail\n");
 		return -1;
 	}
@@ -483,8 +494,8 @@ int graph_get_all_perf(uint32_t id,
 			output,
 			MAX_PERF_OUTPUT_SIZE,
 			&out_data_size);
-	for (i = 0; i < N_EVENTS; i++) {
-		if (0 == strcmp("", event_names[i]))
+	for (i = 0; i < PMU_MAX_EVENTS[pmu_set]; i++) {
+		if (0 == strcmp("", PMU_EVENT_ARRAYS[pmu_set][i]))
 			continue;
 		hexagon_nn_reset_perfinfo(id,i);
 		printf("executing for event 0x%02x...\n",i);
@@ -515,27 +526,27 @@ int graph_get_all_perf(uint32_t id,
 		}
 	}
 	printf(",,");
-	for (i = 0; i < N_EVENTS; i++) {
-		if (0 == strcmp("", event_names[i]))
+	for (i = 0; i < PMU_MAX_EVENTS[pmu_set]; i++) {
+		if (0 == strcmp("", PMU_EVENT_ARRAYS[pmu_set][i]))
 			continue;
 		printf("0x%x,",i);
 	}
 	printf("\n");
 	printf("OPNAME,NAME,");
-	for (i = 0; i < N_EVENTS; i++) {
-		if (0 == strcmp("", event_names[i]))
+	for (i = 0; i < PMU_MAX_EVENTS[pmu_set]; i++) {
+		if (0 == strcmp("", PMU_EVENT_ARRAYS[pmu_set][i]))
 			continue;
-		printf("%s,",event_names[i]);
+		printf("%s,",PMU_EVENT_ARRAYS[pmu_set][i]);
 	}
 	printf("\n");
 	for (j = 0; j < n_nodes; j++) {
 		uint32_t node_id = info[j].node_id;
 		if (strcmp("?",info_id2name(node_id))==0) continue;
 		printf("%s,%s,",info_id2opname(node_id),info_id2name(node_id));
-		for (i = 0; i < N_EVENTS; i++) {
-			if (0 == strcmp("", event_names[i]))
+		for (i = 0; i < PMU_MAX_EVENTS[pmu_set]; i++) {
+			if (0 == strcmp("", PMU_EVENT_ARRAYS[pmu_set][i]))
 			continue;
-			printf("%lld,",counters[i*MAX_NODES+j]);
+			printf("%llu,",(long long unsigned int) counters[i*MAX_NODES+j]);
 		}
 		printf("\n");
 	}
@@ -560,6 +571,7 @@ int graph_get_a_perf(uint32_t id,
 	hexagon_nn_perfinfo info[MAX_NODES];
 	int j;
 	int err;
+	int pmu_set = 0;  // Hardcoded to v60 PMUs for now
 	printf("Getting all performance counter information\n");
 	memset(info,0,sizeof(info));
 	if ((input = calloc(1,height*width*depth*elementsize)) == NULL) {
@@ -594,7 +606,7 @@ int graph_get_a_perf(uint32_t id,
 		printf("perf info failure\n");
 		exit(1);
 	}
-	printf("OPNAME,NAME,%s\n",event_names[event]);
+	printf("OPNAME,NAME,%s\n",PMU_EVENT_ARRAYS[pmu_set][event]);
 	for (j = 0; j < n_nodes; j++) {
 		uint32_t node_id = info[j].node_id;
 		printf("%s,%s,%lld\n",

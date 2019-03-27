@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -49,6 +49,9 @@ static int prelu_execute(struct nn_node *self, struct nn_graph *nn)
 		* in_tensor->shape.depth;
 	size_t bytes = elements * sizeof(float);
 	size_t alpha_depth = in_alpha_tensor->shape.depth;
+	if (nn_scratch_grow(nn,sizeof(float)*alpha_depth)){
+		return errlog(nn,"failed to get scratch");
+	}
 	float *alpha = nn->scratch; 
 	const float *in_data = in_tensor->data;
 	float *out_data = out_tensor->data;

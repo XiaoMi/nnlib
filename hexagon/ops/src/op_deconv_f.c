@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -38,6 +38,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+
+static inline int32_t Minimum( int32_t a, int32_t b) { return a < b? a: b;}
 
 static int deconv_f_execute_ref(struct nn_node *self, struct nn_graph *nn)
 {
@@ -126,21 +128,30 @@ static int deconv_f_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	for (batch = 0; batch < out_batches; batch++) {
 	  for (out_y = 0; out_y < out_height; out_y++) {
 	    in_y_base = out_y + adj_y;
+	    // range of filter to use on this row: all the 0 <= fy < filt_height but
+	    //   (1) (out_y-fy)% stride_height must be 0
+	    //   (2) in_y_base - fy   must be >= 0  			   		 => fy < in_y_base+1
+	    //   (3) (in_y_base-fy)/stride_height must be < in_height      => fy > in_y_base - in_height*stride_height
+	    int32_t fy0 = out_y % stride_height;										// first fy to meet (1)
+	    int32_t fylim = Minimum(in_y_base+1,filt_height);							// fy < fylim for (2)
+	    int32_t dely = (in_y_base - in_height*stride_height) - fy0;					// should be < 0 for (3)
+	    if( dely >= 0) fy0 += stride_height*(dely/stride_height+1 );				// increase fy0 to meet (3)
+
 	    for (out_x = 0; out_x < out_width; out_x++) {
 	      in_x_base = out_x + adj_x;
+	      int32_t fx0 = out_x % stride_width;
+	      int32_t fxlim = Minimum(in_x_base+1,filt_width);
+	      int32_t delx = (in_x_base - in_width*stride_width) - fx0;
+	      if( delx >= 0) fx0 += stride_width*(delx/stride_width+1 );
 	      outstripe = out+out_depth*(out_x+out_width*(out_y+(out_height*batch)));
 	      for (out_z = 0; out_z < out_depth; out_z++) {
 	        sum = 0.0f;
-	        for (filt_y = 0; filt_y < filt_height; filt_y++) {
-	          if ((out_y - filt_y) % stride_height) continue;
+	        // only the filt_y where (filt_y-out_y) is a multiple of stride_height and  0 <= in_y < in_height
+	        for (filt_y = fy0; filt_y < fylim; filt_y += stride_height) {
 	          in_y = (in_y_base - filt_y) / stride_height;
-	          if (in_y >= in_height) continue;
-	          if (in_y < 0) continue;
-	          for (filt_x = 0; filt_x < filt_width; filt_x++) {
-	            if ((in_x_base - filt_x) % stride_width) continue;
+		      // only the filt_x where (filt_x-out_x) is a multiple of stride_width and 0 <= in_x < in_width
+	          for (filt_x = fx0; filt_x < fxlim; filt_x += stride_width) {
 	            in_x = (in_x_base - filt_x) / stride_width;
-	            if (in_x >= in_width) continue;
-	            if (in_x < 0) continue;
 	            instripe = in+in_depth*(in_x
                       +in_width*(in_y+in_height*batch));
 	            filtstripe = filt+(out_z + out_depth*filt_depth*(filt_x

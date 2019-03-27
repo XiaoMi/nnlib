@@ -33,7 +33,9 @@
  *
  */
 
+#if defined(__hexagon__)
 #include "hexagon_types.h"
+#endif
 #include "hvx_hexagon_protos.h"
 #include "hvx_inlines.h"
 

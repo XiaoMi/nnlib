@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -41,6 +41,7 @@
 
 static inline string handle_option_string(const char *arg) { return arg; }
 static inline int handle_option_int(const char *arg) { return atoi(arg); }
+static inline float handle_option_float(const char *arg) { return atof(arg); }
 
 int do_option(struct options *options, int argc, const char **argv, int i) {
 #define DEF_OPTION(NAME,TYPE,DEFAULT,...) \

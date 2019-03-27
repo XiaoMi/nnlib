@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -47,6 +47,7 @@
 #ifdef __hexagon__
 #include "hexagon_protos.h"
 #endif
+#include <nn_graph_builtin.h>
 
 ///////////////////////////////////////////////////////////
 //  min/max inline functions
@@ -141,7 +142,16 @@ static inline __attribute__((unused,always_inline)) uint32_t roundf_u32( float v
 	return (val < 0.5f)?0 : (uint32_t)( val + 0.5f);
 #endif
 }
-
+// equivalent to isfinite(float x), but no function call
+// false if x is +/- inf, or NaN; true otherwise
+static inline __attribute__((unused,always_inline)) int flt_isfinite( float x )
+{
+	union {
+		float f;
+		int32_t u32;
+	} uu = { x };
+	return ((uu.u32>>23) & 0xFF) != 0xFF;
+}
 
 ///////////////////////
 // Some utilities for replacing frexpf and ldexpf, on hexagon these
@@ -173,7 +183,7 @@ int flt_getexp( float x)
 // Results are not valid if x is 0, denormal, or inf/nan
 //
 static inline __attribute__((unused,always_inline))
-int flt_getfrac( float x)
+float flt_getfrac( float x)
 {
 	union {
 		float f;
@@ -225,6 +235,33 @@ int ceiling_log2( unsigned val )
     return 32 - __builtin_clz(val-1);
 }
 
+// this would not be needed if hexagon-clang implemented __builtin_bswap32 properly
+// instead of falling back to a generic expansion.
+static inline uint32_t __attribute__((always_inline)) byteswap_u32 ( uint32_t x){
+#ifndef __hexagon__
+	return __builtin_bswap32( x );
+#else
+	return Q6_R_swiz_R(x);
+#endif
+}
+
+//
+// x * (float)(1./255) is faster than, but not as accurate as,
+//  x /255.0f
+// because the former has two sources of error (rounding 1/255 and rounding the multiply;
+// and it happens that 1/255. falls almost halfway between two float values)
+// This function gives a result using multiply/add which is as accurate as x/255.0f
+// it's just k1*x + k2*x where k1,k2 add up accurately to 1/255.
+// And we use force use of fma to prevent the larger term from being rounded before they are added.
+//
+static inline float flt_div_255( float x)
+{
+#ifdef __hexagon__
+	return  Q6_R_sfmpyacc_RR(-0xF.EFEFFp-36f * x, x, 0x8.08081p-11f );
+#else
+	return (0x8.08081p-11f * x)  +  ( (-0xF.EFEFFp-36f) * x);
+#endif
+}
 
 static inline uint8_t quantize_uint8(float val, float minval, float maxval)
 {
@@ -234,6 +271,24 @@ static inline uint8_t quantize_uint8(float val, float minval, float maxval)
 	float value_f = (val - minval) * resize_amt;
 	int32_t value_i = roundf(value_f);
 	return saturate_u8( value_i);
+}
+
+// this converts a min and max to level_size and 'zero'.
+static inline int get_qu8_level_size_zero( float minval, float maxval, float * levsize_p)
+{
+    float level_size = flt_div_255( maxval-minval );
+    int zeroval = roundf_i32( -minval/level_size);
+    *levsize_p = level_size;
+    return saturate_u8( zeroval );
+}
+
+static inline uint16_t quantize_uint16(float val, float minval, float maxval)
+{
+	float range = fmaxf(0.0001f, maxval - minval);
+	float resize_amt = 65535.0f / range;
+	float value_f = (val - minval) * resize_amt;
+	int32_t value_i = roundf(value_f);
+	return saturate_u16(value_i);
 }
 
 static inline int32_t quantize_uint(float val, float minval, float maxval)
@@ -257,23 +312,85 @@ static inline int32_t quantize_int(float val, float minval, float maxval)
 	return value_i;
 }
 
+// find the range of an array of floats, in such a way that NaN values get noticed
+// NOTE: the 'min_out' is always <=0:  min(0.0, .. all inputs.. )
+//   and max_out is >=0:     max(0.0, .. all inputs ... )
 //
-// x * (float)(1./255) is faster than, but not as accurate as,
-//  x /255.0f
-// because the former has two sources of error (rounding 1/255 and rounding the multiply;
-// and it happens that 1/255. falls almost halfway between two float values)
-// This function gives a result using multiply/add which is as accurate as x/255.0f
-// it's just k1*x + k2*x where k1,k2 add up accurately to 1/255.
-// And we use force use of fma to prevent the larger term from being rounded before they are added.
+// if there are any '+nan', then max_out will be a +nan;
+//    otherwise if there are any +inf, max_out will be +inf
+// if there are any '-nan', then min_out will be a +nan;
+//    otherwise if there are any -inf, min_out will be +inf
 //
-static inline float flt_div_255( float x)
+// Method is
+//  (1) map the image of a float to an int:
+//  (2) find the max of 'signed' ints; this will discard the -ves and give the largest >0 value
+//     and the max of 'unsigned' starting at 0x80000000; this will discard the +ves and give most -ve vlaue
+//  (3) convert results back to float
+//
+// return is 1 if inf or max were found; 0 otherwise.
+//
+static inline int __attribute__((unused))
+find_range_of_floats( float const * arr, int n, float * min_out, float *max_out)
 {
-#ifdef __hexagon__
-	return  Q6_R_sfmpyacc_RR(-0xF.EFEFFp-36f * x, x, 0x8.08081p-11f );
-#else
-	return (0x8.08081p-11f * x)  +  ( (-0xF.EFEFFp-36f) * x);
-#endif
+	uint32_t all_min_code = 0x80000000;
+	int32_t all_max_code = 0;
+	for(int i = 0; i < n ; i++){
+		union { float f; uint32_t u32; } uu = { arr[i] };
+		all_min_code = max_u32( all_min_code, uu.u32);	// only <0 values will be included here
+		all_max_code = max_i32( all_max_code, uu.u32);				// only > 0 values will be included here.
+	}
+	union { uint32_t u32; float f; } umin = { all_min_code }, umax = { (uint32_t) all_max_code };
+	*min_out = umin.f;
+	*max_out = umax.f;
+	uint32_t exp_test = max_u32( all_max_code, all_min_code & 0x7fffffff);
+	return exp_test >= 0x7f800000;
 }
+
+
+//
+// operations for carefully rounding floats...
+//
+// flt_round_up_4eps rounds the value upwards (away from 0) if needed to reach
+// the next higher value which has 2 zeros in the lsbs (i.e. a multiple of 4x its own epsilon).
+// Has no effect unless the exponent field is <= 0xFE;
+//  this is to avoid 'rounding' things from NaN to zero; it's still possible
+//  to round from just-below-infinity to infinity;
+//
+static inline float
+flt_round_up_4eps( float x)
+{
+	union {
+		float f;
+		uint32_t u32;
+	} uu = { x };
+	if( (uu.u32 <<1) < 0xFF000000u ){		// is safe...
+		uu.u32 = (uu.u32 + 3) & ~(uint32_t)3;	// round it up.
+	}
+	return uu.f;
+}
+//
+// flt_round_near_4eps rounds the value to the nearest value which has 2 zeros in the lsbs
+// (i.e. a multiple of 4x its own epsilon). If the 2 lsbs are 10, it will round 110 up and 010
+// down.
+// Has no effect unless the exponent field is <= 0xFE;
+//  this is to avoid 'rounding' things from NaN to zero; it's still possible
+//  to round from just-below-infinity to infinity;
+//
+static inline float
+flt_round_near_4eps( float x)
+{
+	union {
+		float f;
+		uint32_t u32;
+	} uu = { x };
+	if( (uu.u32 <<1) < 0xFF000000u ){		// is safe...
+		uint32_t rnd = (uu.u32 & 4)? 2:1;
+		uu.u32 = (uu.u32 + rnd) & ~(uint32_t)3;
+	}
+	return uu.f;
+}
+
+
 
 static inline void quantize_adjust_range(float *out_min, float *out_max, float *out_stepsize, float *out_recip_stepsize, float in_min, float in_max)
 {
@@ -314,7 +431,21 @@ static inline void quantize_adjust_range(float *out_min, float *out_max, float *
 	*out_stepsize = flt_div_255(range);
 	*out_recip_stepsize = recip_stepsize;
 }
+// check if range is basically sane  (no inf/nan; min <=0, max >= 0, max > min
+// returns -1 if error, 0, if ok
 
+static inline int
+check_range_is_sane( float min_in, float max_in)
+{
+
+	if( !flt_isfinite(min_in) || !flt_isfinite(max_in)
+	 || min_in >0.0f || max_in < 0.0f || max_in-min_in < 1e-8f ) return -1;
+	return 0;
+}
+// this is like quantize_adjust_range but it also checks if supplied min, max are sane
+// if so: adjust range and return 0; if not, return -1 (and don't store any results).
+
+int quantize_adjust_range_and_check( float *out_min, float *out_max, float *out_stepsize, float *out_recip_stepsize, float in_min, float in_max);
 
 //
 // This adjusts a min .. max range
@@ -342,6 +473,7 @@ static inline void quantize_adjust_range(float *out_min, float *out_max, float *
 //
 
 int adjust_minmax_for_zero( float *min_p, float *max_p );
+int adjust_minmax_for_zero_16b(float *min_p, float *max_p);
 
 //
 // same thing but with constraints as to which endpoints should be considered 'fixed'
@@ -349,5 +481,19 @@ int adjust_minmax_for_zero( float *min_p, float *max_p );
 //   bit 1 - maximum is fixed
 
 int adjust_minmax_for_zero_with_constraints( float *min_p, float *max_p, int constraint );
+void hvx_do_dequantize( uint8_t const * inp, float * outp, int n, int qzero, float qstep );
+
+
+//
+// requantize n 32-bit numbers to u8; equiv to
+//     outp[i] =  quantize_uint8( in_level_size* (float)inp[i],out_min,out_max);
+//
+// This uses quantize_asm for larger n, and so it must be called from a vector thread.
+// If n <= 128, or if either pointer is not aligned, it will use a scalar operation which is equivalent.
+//
+void nn_requantize_i32_to_qu8_hvx( uint8_t *outp, int32_t const * inp, int n, float in_level_size, float out_min, float out_max);
+
+// same with no hvx
+void nn_requantize_i32_to_qu8( uint8_t *outp, int32_t const * inp, int n, float in_level_size, float out_min, float out_max);
 
 #endif

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -105,24 +105,57 @@ static int mirrorpad_f_execute(struct nn_node *self, struct nn_graph *nn)
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *pads_tensor = self->inputs[1];
 	struct tensor *out_tensor = self->outputs[0];
+
+
+	if( pads_tensor->shape.depth != 2) return errlog(nn,"bad pad tensor");
+	unsigned padt_len = pads_tensor->shape.width;
+	if( padt_len> 4) padt_len = 4;		// ignore > 4
+
 	const int32_t *pads = pads_tensor->data;
-	const int32_t pad_d_before = pads[0+0];
-	const int32_t pad_d_after = pads[0+1];
-	const int32_t pad_w_before = pads[2+0];
-	const int32_t pad_w_after = pads[2+1];
-	const int32_t pad_h_before = pads[4+0];
-	const int32_t pad_h_after = pads[4+1];
-	const int32_t pad_b_before = pads[6+0];
-	const int32_t pad_b_after = pads[6+1];
+	const uint32_t element_size = sizeof(float);
+
+	// exract the pads, based on w dimension; ensure all are >=0 and
+	//
+	unsigned padby[4*2] = {0,0, 0,0, 0,0, 0,0};
+	for( int i = 0; i < (int)padt_len*2; i++ ){
+		int p = pads[i];
+		if( p < 0) return errlog(nn,"pad bad tensor");
+		padby[i] = p;
+	}
+	// find the new shape; validate sanity
+	struct shape out_shape;
+	uint32_t new_shape_count = 1;
+	for( int i =0; i < 4; i++){
+		unsigned p_before = padby[2*i];
+		unsigned p_after = padby[2*i+1];
+		unsigned old_dim = in_tensor->shape.dimension[i];
+		uint64_t all_dim = (uint64_t)old_dim + (uint64_t)p_before + (uint64_t)p_after;
+		if( all_dim > (uint64_t)0x7FFFFFFF) return errlog(nn,"padded size overflow");
+		uint32_t new_dim = (uint32_t)all_dim;
+		out_shape.dimension[i] = new_dim;
+		new_shape_count = mulu32_sat( new_shape_count, new_dim);
+	}
+	if (new_shape_count ==0 || new_shape_count == (uint32_t)-1
+			|| mulu32_sat( new_shape_count, element_size) == (uint32_t)-1 )
+		return errlog(nn,"padded size overflow");
+
+	const int32_t pad_b_before = padby[0];
+	const int32_t pad_b_after  = padby[1];
+	const int32_t pad_h_before = padby[2];
+	const int32_t pad_h_after  = padby[3];
+	const int32_t pad_w_before = padby[4];
+	const int32_t pad_w_after  = padby[5];
+	const int32_t pad_d_before = padby[6];
+	const int32_t pad_d_after  = padby[7];
+
 	const int32_t d_in = in_tensor->shape.depth;
 	const int32_t w_in = in_tensor->shape.width;
 	const int32_t h_in = in_tensor->shape.height;
 	const int32_t b_in = in_tensor->shape.batches;
-	const int32_t d_out = d_in + pad_d_before + pad_d_after;
-	const int32_t w_out = w_in + pad_w_before + pad_w_after;
-	const int32_t h_out = h_in + pad_h_before + pad_h_after;
-	const int32_t b_out = b_in + pad_b_before + pad_b_after;
-	const uint32_t element_size = sizeof(float);
+	const int32_t d_out = out_shape.depth;
+	const int32_t w_out = out_shape.width;
+	const int32_t h_out = out_shape.height;
+	const int32_t b_out = out_shape.batches;
 
 	const float *in_base = in_tensor->data;
 	float *out_base = out_tensor->data;

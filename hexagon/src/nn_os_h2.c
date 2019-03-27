@@ -71,6 +71,27 @@ void nn_os_vector_init()
 	
 }
 
+#if __HEXAGON_ARCH__ == 68
+h2_mxaccess_state_t hmxstate;
+int hmx_initted = 0;
+int nn_os_hmx_acquire()
+{
+	return h2_mxaccess_acquire(&hmxstate);
+}
+
+void nn_os_hmx_release(int idx)
+{
+	h2_mxaccess_release(&hmxstate,idx);
+}
+
+void nn_os_hmx_init()
+{
+	if (!hmx_initted) {
+		hmx_initted = 1;
+		h2_mxaccess_init(&hmxstate);
+	}
+}
+#endif
 
 uint64_t nn_os_get_perfcount(struct nn_graph *nn)
 { 
@@ -80,7 +101,11 @@ uint64_t nn_os_get_perfcount(struct nn_graph *nn)
 }
 
 
+#if __HEXAGON_ARCH__ == 68
+#define VTCM_ADDRESS 0xD8400000LL
+#else
 #define VTCM_ADDRESS 0xD8200000LL
+#endif
 
 void *nn_os_get_vtcm(struct nn_graph *nn, uint32_t *size)
 {
@@ -89,10 +114,32 @@ void *nn_os_get_vtcm(struct nn_graph *nn, uint32_t *size)
 	return (void *)VTCM_ADDRESS;
 }
 
+extern int VTCM_User_Req;
+
+int nn_os_vtcm_choose_size(struct nn_graph *nn)
+{
+	nn->vtcm_size = VTCM_User_Req;
+
+#if defined(HEXAGON_V66) || defined(HEXAGON_V65)
+	if (nn->vtcm_size==-1) {
+#if __HEXAGON_ARCH__ == 68
+		nn->vtcm_size = 4096*1024;
+#else
+		nn->vtcm_size = 256*1024;
+#endif
+		logmsg(nn,1,"VTCM request: %u of %u", nn->vtcm_size);
+	}
+#else  // V60
+	if (nn->vtcm_size==-1) {
+		nn->vtcm_size = 0;
+	}
+#endif
+	return 0;
+}
+
 int nn_os_vtcm_acquire(struct nn_graph *nn) {
 	nn->vtcm_ptr = (void *)VTCM_ADDRESS;
-	nn->vtcm_size = 256*1024;
-        return 0;
+	return 0;
 }
 
 int nn_os_vtcm_release(struct nn_graph *nn) {

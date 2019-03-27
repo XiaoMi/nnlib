@@ -760,6 +760,7 @@ struct nn_node_ops nn_ops_for_QuantizedL2Pool_8_d32 = {
 	.check = l2pool_check,
 	.ctor = node_alloc_common,
 	.dtor = l2pool_dtor,
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedL2Pool_8_d32_ref = {
@@ -767,5 +768,6 @@ struct nn_node_ops nn_ops_for_QuantizedL2Pool_8_d32_ref = {
 	.check = l2pool_check,
 	.ctor = node_alloc_common,
 	.dtor = l2pool_dtor,
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };
 

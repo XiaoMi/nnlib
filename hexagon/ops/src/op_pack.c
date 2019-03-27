@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -35,8 +35,11 @@
  */
 
 /*
- * Given a start offset and width for each dimention in the input tensor,
- * create a new output tensor with just the slice specified.
+ * Given 'n' input tensors of identical shape, pack them all together on a
+ * new dimension.
+ * The output shape is determined by finding the rightmost 1 and changing
+ * it to n, e.g.
+ * 4 of [1,1,8,128]  -> [1,4,8,128]
  * 
  */
 
@@ -58,18 +61,17 @@ static int pack_execute(struct nn_node *self, struct nn_graph *nn)
 	int out_width = width;
 	int out_height = height;
 	int out_batches = batches;
-	unsigned int total_bytes = t0->data_size;
 	char *out = out_tensor->data;
 	int i;
 	for (i = 1; i < n_inputs; i++) {
 		t = self->inputs[i];
-		if (t->shape.batches != batches) return errlog(nn,"bad shape");
-		if (t->shape.height != height) return errlog(nn,"bad shape");
-		if (t->shape.width != width) return errlog(nn,"bad shape");
-		if (t->shape.depth != depth) return errlog(nn,"bad shape");
+		if( !shape_matches( &t0->shape, &t->shape)) return errlog(nn,"bad shape");
 		if (t->data_size != t0->data_size) return errlog(nn,"bad size");
-		total_bytes += t->data_size;
 	}
+	unsigned int total_bytes = t0->data_size * n_inputs;
+
+	// FIXME: should use tensor_out_prepare functions
+	//
 	/* Check output size is OK */
 	if (out_tensor->max_size < total_bytes) return errlog(nn,"out too small");
 	/* Copy data */
@@ -79,6 +81,8 @@ static int pack_execute(struct nn_node *self, struct nn_graph *nn)
 		out += t->data_size;
 	}
 	/* Assume we want to expand least significant unity dimension */
+	// FIXME : if you have n inputs [1,5,1,128], the output shape will be [1,5,n,128]
+	// but the data ordering will be as for [n,5,1,128] (or [1,n,5,128])
 	if (out_depth == 1) out_depth = n_inputs;
 	else if (out_width == 1) out_width = n_inputs;
 	else if (out_height == 1) out_height = n_inputs;

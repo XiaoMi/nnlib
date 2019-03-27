@@ -47,9 +47,7 @@
 #include <quantize.h>
 #include <stdlib.h>
 #include <stdio.h>
-#ifndef __hexagon__
-#include <malloc.h>
-#endif
+#include <hexagon_protos.h>
 
 /* 8x8 convolution --> 32 bits, biasadd, relu, quantizedown to 8 bits  */
 
@@ -57,9 +55,6 @@
  * Input and output have ordering BHWD
  * Filter has ordering HWDB (B is # of filters)
  */
-
-#ifdef __hexagon__
-#include <hexagon_protos.h>
 
 #if 0 && defined(HEXAGON_V66)
 #define GVCONV_ASM gvconv2dbbb_v66_asm
@@ -70,7 +65,7 @@
 #define GVCONVSUM_ASM gvconvsum2dbbb_asm
 #endif
 
-#endif //__hexagon__
+#define USE_16BITS_RECIP
 
 struct tdata {
 	struct nn_node *self;
@@ -223,6 +218,10 @@ static int supernode_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	/* FIXME: if you pad depth you should adjust tmp_out_size here!!! */
 	size_t tmp_out_size = out_elements*sizeof(int32_t);
 	size_t biasbuf_size = out_depth*sizeof(int32_t);
+	size_t totalsize = ROUNDUP(tmp_out_size) + ROUNDUP(biasbuf_size);
+	if (nn_scratch_grow(nn,totalsize)){
+		return errlog(nn,"failed to get scratch");
+	}
 
 	int32_t *biasbuf = nn->scratch;
 	int32_t *tmp_out = pad_and_align(biasbuf,biasbuf_size);
@@ -246,7 +245,7 @@ static int supernode_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	 * output min/max == INT_MIN / INT_MAX * output grade size
 	 */
 
-	int is_bias32 = (self->node_type == OP_Supernode_8x8p32to8); //|| (self->node_type == OP_Supernode_8x8p32to8_ref);	// did we ditch to ref version?
+	int is_bias32 = (self->node_type == OP_Supernode_8x8p32to8) || (self->node_type == OP_Supernode_8x8p32to8_ref);	// did we ditch to ref version?
 	float bias_divisor = is_bias32 ? 0x1.0p32 : 255.0f;
 	float in_level_size = (in_max_float - in_min_float) / 255;
 	float filt_level_size = (filt_max_float - filt_min_float) / 255;
@@ -265,7 +264,11 @@ static int supernode_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	//int shr_val;
 
 	int32_t maxrange = (final_out_max_val - final_out_min_val) / out_level_size + 0.5f;
+#ifdef USE_16BITS_RECIP
 	uint32_t fixed_recip_level_size = 0x00ff0000 / maxrange;
+#else
+	uint32_t fixed_recip_level_size = ((long long)0x00ff0000<<15) / maxrange;
+#endif
 
 	/* input_offset is 0.0f quantized to in min/max */
 	/* filt_offset is 0.0f quantized to filt min/max */
@@ -283,9 +286,6 @@ static int supernode_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	logmsg(nn,2,"supernode padding %d",self->padding);
 	logmsg(nn,2,"expected out shape %dx%dx%dx%d",out_batches,out_height,out_width,out_depth);
 	if (in_depth != filt_depth) return errlog(nn,"oops, depth != depth");
-	if ((tmp_out_size + biasbuf_size + MAXPAD) > nn->scratch_size) {
-		return errlog(nn,"scratch too small (%d>%d)",tmp_out_size,nn->scratch_size);
-	}
 	if (out_size > (out_tensor->max_size)) {
 		return errlog(nn,"output too small, %d < %d",out_tensor->max_size,out_size);
 	}
@@ -372,8 +372,13 @@ static int supernode_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	for (j = 0; j < out_batches*out_height*out_width; j++) {
 	  for (i = 0; i < out_depth; i++) {
 	    sum = biasbuf[i] + tmp_out[j*out_depth+i] + minval_offset;
+#ifdef USE_16BITS_RECIP
 	    int32_t out_i = ( ((sum) * fixed_recip_level_size) + (1<<15));
 	    out_i >>= 16;
+#else
+	    int64_t out_iL = ((long long)sum) * fixed_recip_level_size + (0x40000000LL); 
+	    int32_t out_i = out_iL >> 31;
+#endif
 	    if (out_i < 0) out_i = 0;
             if (out_i > 255) out_i = 255;
 	    *out++ = out_i;
@@ -446,7 +451,7 @@ static void __attribute__((unused)) biasadd_relu_requant_execute_hvx_slice(struc
         struct tdata *info = vinfo;
         struct nn_node *self = info->self;
         int whoami = info->whoami;
-        int32_t *biasbuf = nn->scratch;
+        int32_t *biasbuf = nn->scratch;//scratch size checked in calling function
 	struct tensor *out_tensor = self->outputs[0];
         uint8_t *out = out_tensor->data;
 
@@ -550,6 +555,8 @@ static void supernode_execute_hvx_slice(struct nn_graph *nn, void * vinfo)
 	int32_t filt_width = filt_tensor->shape.filt_width;
 	int32_t filt_depth = filt_tensor->shape.filt_depth;
 
+	//printf(" filt_depth = %ld in_depth = %ld\n", filt_depth, in_depth);
+
 	int32_t stride_width = stride_tensor->shape.width;
 	int32_t stride_height = stride_tensor->shape.height;
         int     fetch_stride = stride_width;
@@ -588,6 +595,7 @@ static void supernode_execute_hvx_slice(struct nn_graph *nn, void * vinfo)
 
 	uint32_t out_elements = out_batches*out_height*out_width*out_depth;
 	//size_t out_size = out_elements;
+	//If you're changing any of the sizes here, please update the respecitive values for totalsize in supernode_execute_hvx
 	size_t tmp_out_size = out_elements*sizeof(int8_t);
 	size_t biasbuf_size = out_depth*sizeof(int32_t);
 
@@ -603,6 +611,8 @@ static void supernode_execute_hvx_slice(struct nn_graph *nn, void * vinfo)
 	int32_t pad_x = nn_pad_compute_before(out_width,filt_width,stride_width,self->padding);
 	int32_t pad_y = nn_pad_compute_before(out_height,filt_height,stride_height,self->padding);
 
+	//printf(" pad = %ld %ld\n", pad_x, pad_y);
+
 
 	/* input_offset is 0.0f quantized to in min/max */
 	/* filt_offset is 0.0f quantized to filt min/max */
@@ -611,7 +621,7 @@ static void supernode_execute_hvx_slice(struct nn_graph *nn, void * vinfo)
 	int32_t filt_offset __attribute__((unused)) = quantize_uint8(0.0f,filt_min_float,filt_max_float);
 	//int32_t bias_offset = quantize_uint(0.0f,bias_min_float,bias_max_float);
 
-	//printf(" in_offset = %d filt_offset = %d bias_offset = %d\n", input_offset, filt_offset, bias_offset);
+	//printf(" in_offset = %ld filt_offset = %ld \n", input_offset, filt_offset);
 	//int i,j;
 
 	/* intermediate buffer generation */
@@ -627,6 +637,7 @@ static void supernode_execute_hvx_slice(struct nn_graph *nn, void * vinfo)
     int shr_val;
 
 	//uint32_t out_padsize = sizeof(int32_t) * patches_pad * out_depth_pad;
+	//If you're changing any of the sizes here, please update the respecitive values for totalsize in supernode_execute_hvx
 	uint32_t max_size = 2*sizeof(int)*32; //one for each thread
 	uint32_t suma_size = patches_pad*sizeof(int);
 	uint32_t sumb_size = 2*32*sizeof(int); //one for each thread
@@ -640,13 +651,11 @@ static void supernode_execute_hvx_slice(struct nn_graph *nn, void * vinfo)
 					&& (in_width == 299)
 					&& (filt_height == 3)
 					&& (filt_width == 3));
-	// TODO HEXNN-53: causing Caffe GoogleNet (Inception v1) to crash
-	uint32_t stage_one_v1 = 0;
-//  uint32_t stage_one_v1 = ((filter_value_count_pad ==160)
-//                        && (stride_width == 2)
-//                        && (in_depth == 3)
-//                        && (filt_height == 7)
-//                        && (filt_width == 7));
+	uint32_t stage_one_v1 = 0 && ((filter_value_count_pad ==160)
+				&& (stride_width == 2)
+				&& (in_depth == 3)
+				&& (filt_height == 7)
+				&& (filt_width == 7));
     uint32_t stage_one = (stage_one_v1 || stage_one_v3);
     uint32_t skip_unpad_m = (out_depth == out_depth_pad);
     uint32_t skip_unpad_k = (filter_value_count == filter_value_count_pad);
@@ -661,7 +670,7 @@ static void supernode_execute_hvx_slice(struct nn_graph *nn, void * vinfo)
 	}
 	struct supernode_info *nodeinfo = self->opaque;
 	uint8_t * filt_pad_trans = nodeinfo->filt_pad;
-	int32_t * biasbuf = nn->scratch;
+	int32_t * biasbuf = nn->scratch;//sctrach size checked in calling function
 	uint8_t * im2col_patch_buf = pad_and_align(biasbuf,biasbuf_size);
 	int     * max_buf = pad_and_align(im2col_patch_buf,im2col_bufsize);
 	int     * im2col_sum = pad_and_align(max_buf,max_size);
@@ -843,6 +852,7 @@ static void supernode_execute_hvx_slice(struct nn_graph *nn, void * vinfo)
             	   			   /* already im2col? */
             	   			   //logmsg(nn,1,"whoami=%d in empty bad depth block");
             	   		   } else {
+					   //printf(" doing fast im2col skip_unpad = %ld\n", skip_unpad_k);
             	   			   fast_im2col_co(in_batch,  //offset computed internally
                                   in_height,   in_width,   in_depth, input_offset,
                                   im2col_buf + (start_line+delta) * stride_width * W,
@@ -919,7 +929,8 @@ static void supernode_execute_hvx_slice(struct nn_graph *nn, void * vinfo)
 	  logmsg(nn,2,"whoami=%d maxsum=%d",whoami,maxsum);
 	  /* strip out the padding from the output */
 	  if (!skip_unpad_m) {
-		  int pad_h = pad_y*out_width*out_depth_pad; //compensate im2col pad_top part
+		  //breaks googlenet4 out depth 208 could be CAFFE Padding?
+		  int pad_h = 0; //pad_y*out_width*out_depth_pad; //compensate im2col pad_top part
 		  unpad2d_bytes(out_batch+ pad_h + base_line * out_width * out_depth_pad,
                                      my_height*out_width, out_depth_pad,
 	                             &out[batch*patches*out_depth + base_line * out_width * out_depth],
@@ -1075,13 +1086,11 @@ static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 			&& (in_depth == 3)
 			&& (filt_height == 3)
 			&& (filt_width == 3));
-	// TODO HEXNN-53: causing Caffe GoogleNet (Inception v1) to crash
-	uint32_t stage_one_v1 = 0;
-//  uint32_t stage_one_v1 = ((filter_value_count_pad ==160)
-//                        && (stride_width == 2)
-//                        && (in_depth == 3)
-//                        && (filt_height == 7)
-//                        && (filt_width == 7));
+	uint32_t stage_one_v1 = 0 && ((filter_value_count_pad ==160)
+			&& (stride_width == 2)
+			&& (in_depth == 3)
+			&& (filt_height == 7)
+			&& (filt_width == 7));
     uint32_t stage_one = (stage_one_v1 || stage_one_v3);
     uint32_t bad_depth = (filter_value_count_pad != filter_value_count) || (self->padding == NN_PAD_SAME_CAFFE);
     if(stage_one || bad_depth) {
@@ -1097,6 +1106,12 @@ static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 #if 0
 	uint8_t* filt_pad_trans = self->opaque->filt_pad;
 #endif
+	//size values obtained from supernode_execute_hvx_slice
+	size_t totalsize = ROUNDUP(biasbuf_size) + ROUNDUP(im2col_bufsize) + ROUNDUP(max_size) +
+		ROUNDUP(suma_size) + ROUNDUP(sumb_size) + ROUNDUP(out_padsize) + ROUNDUP(tmp_out_size);
+	if (nn_scratch_grow(nn,totalsize)) {
+		return errlog(nn,"failed to get scratch");
+	}
 	int32_t *biasbuf = nn->scratch;
 	//uint8_t *im2col_buf = pad_and_align(biasbuf,biasbuf_size);
 	//int *max_buf = pad_and_align(im2col_buf,im2col_bufsize);
@@ -1104,14 +1119,6 @@ static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	//int *sumb = pad_and_align(suma,suma_size);
 	//int *tmp_out = pad_and_align(sumb,sumb_size);
 	//int *out_pad = pad_and_align(tmp_out,tmp_out_size);
-	uint32_t totalsize = biasbuf_size
-		+ im2col_bufsize
-		+ max_size
-		+ suma_size
-		+ sumb_size
-		+ out_padsize
-		+ tmp_out_size
-		+ ALIGN_SIZE*7;
 #if 0
 	uint32_t skip_unpad = (out_depth == out_depth_pad);
 	uint32_t skip_im2col = ((skip_unpad)
@@ -1153,9 +1160,6 @@ static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	if (in_depth != filt_depth) return errlog(nn,"oops, depth != depth");
 	if (bad_depth && (in_batches > 1)) {
 		return errlog(nn,"Batch size > 1 not supported with odd in depth for now");
-	}
-	if (totalsize > nn->scratch_size) {
-		return errlog(nn,"scratch too small (%d>%d)",totalsize,nn->scratch_size);
 	}
 	if (out_size > (out_tensor->max_size)) {
 		return errlog(nn,"output too small, %d < %d",out_tensor->max_size,out_size);
@@ -1324,6 +1328,9 @@ static int supernode_check_ref(struct nn_node *self, struct nn_graph *nn)
 	if ((info->filt_pad = nn_memalign(ALIGN_SIZE,consts_size)) == NULL) {
 		return errlog(nn,"couldn't allocate buffer for const rearrangement");
 	}
+	if (nn_scratch_grow(nn,filt_elements_pad*out_depth_pad)) {
+		return errlog(nn,"failed to get scratch");
+	}
 	vec_id = nn_os_vector_acquire();
 	pad2d(filt,filt_elements,out_depth,nn->scratch,filt_elements_pad,out_depth_pad,filt_offset);
 	transpack(nn->scratch,filt_elements_pad,out_depth_pad,info->filt_pad);
@@ -1344,7 +1351,7 @@ static int supernode_dtor(struct nn_node *self, struct nn_graph *nn)
 }
 
 #if 0
-struct nn_node_ops nn_ops_for_QuantizedConv2d_8x8to32 = {
+struct nn_node_ops //nn_ops_for_QuantizedConv2d_8x8to32 = {
 	.execute = conv2d_execute_hvx,
 	.check = conv2d_check_ref,
 	.ctor = node_alloc_common,
@@ -1374,6 +1381,14 @@ struct nn_node_ops nn_ops_for_Supernode_8x8p32to8 = {
 	.ctor = node_alloc_common,
 	.dtor = supernode_dtor,
 };
+
+struct nn_node_ops nn_ops_for_Supernode_8x8p32to8_ref = {
+	.execute = supernode_execute_ref,
+	.check = supernode_check_ref,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};
+
 
 static int dwise_unsup_nond32_execute(struct nn_node *self, struct nn_graph *nn)
 {

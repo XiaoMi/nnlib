@@ -37,7 +37,7 @@
 /*
  *
  * Now that that's out of the way, let's get to the good stuff.
- * 
+ *
  * This contains the code to append a node.
  */
 
@@ -45,7 +45,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-struct nn_node *alloc_node(uint32_t node_id, 
+struct nn_node *alloc_node(uint32_t node_id,
 	op_type operation, padding_type padding)
 {
 	struct nn_node *newnode;
@@ -59,6 +59,7 @@ struct nn_node *alloc_node(uint32_t node_id,
 	newnode->perfcounter = 0;
 	newnode->executions = 0;
 	newnode->opaque = NULL;
+	newnode->flags = 0;
 	return newnode;
 }
 
@@ -80,8 +81,8 @@ const struct nn_node *get_node(struct nn_graph *nn, uint32_t id) {
 }
 static inline int alloc_inputs(
 	struct nn_graph *nn,
-	struct nn_node *newnode, 
-	uint32_t n, 
+	struct nn_node *newnode,
+	uint32_t n,
 	const struct input *inputs)
 {
 	unsigned int tmpsize;
@@ -116,8 +117,9 @@ static inline int alloc_inputs(
 		if (source_node) {
 			const struct tensor *source_output = source_node->outputs[inputs[i].output_idx];
 			newnode->inputs[i] = source_output;
+		}
 	}
-	}
+	node_rehash_inputrefs(newnode);
 	return 0;
 }
 
@@ -133,10 +135,31 @@ static inline void free_outputs(struct nn_node *node)
 }
 
 
+static inline uint32_t compute_max_size_with_pad(
+	struct nn_graph *nn,
+	struct nn_node *newnode,
+	const struct shape *shape,
+	uint32_t elementsize,
+	uint32_t output_index)
+{
+	uint32_t b = shape->batches;
+	uint32_t h = shape->height;
+	uint32_t w = shape->width;
+	uint32_t d = shape->depth;
+	uint32_t probably_scalar_float = ((b == 1) && (h == 1) && (w == 1) && (d == 1)
+		&& (elementsize == 4) && (output_index > 0));
+	if (!probably_scalar_float && (newnode->ops->flags & NN_NODE_FLAG_D32_OUTPUT)) {
+		h = h + 8;
+		w = (w + 7) & (~3);
+		d = (d + 31) & (~31);
+	}
+	return (b*h*w*d*elementsize+127) & ~127;
+}
+
 static inline int alloc_outputs(
 	struct nn_graph *nn,
-	struct nn_node *newnode, 
-	uint32_t n, 
+	struct nn_node *newnode,
+	uint32_t n,
 	const struct output *outputs)
 {
 	int i;
@@ -163,19 +186,61 @@ static inline int alloc_outputs(
 	 * We could postpone longer, but this works pretty well.
 	 */
 	for (i = 0; i < n; i++) {
-		if ((newnode->outputs[i] = tensor_alloc(&tshape,0)) == NULL) {
+		struct tensor * out_tensor = tensor_alloc(&tshape,0);
+		newnode->outputs[i] = out_tensor;
+		if ( out_tensor == NULL) {
 			goto err_free_allocated_outputs;
 		}
 		/* EJP: now unnecessary, we keep output shape definitions separate */
-		newnode->outputs[i]->max_size = outputs[i].elementsize;
-		newnode->outputs[i]->shape.batches = outputs[i].max_sizes[0];
-		newnode->outputs[i]->shape.height = outputs[i].max_sizes[1];
-		newnode->outputs[i]->shape.width = outputs[i].max_sizes[2];
-		newnode->outputs[i]->shape.depth = outputs[i].max_sizes[3];
-		for (uint32_t j=0; j<outputs[i].rank; j++) {
-			newnode->outputs[i]->max_size *= outputs[i].max_sizes[j];
+		uint32_t rank = outputs[i].rank;
+		uint32_t elsize = outputs[i].elementsize;
+		uint32_t max_size = elsize;
+		if( rank > MAX_DIMENSIONS){
+			logmsg(nn,0,"rank %u tensor?", (unsigned)rank );
+			rank = MAX_DIMENSIONS;
+		}else{
+			// fill 'garbage' entries in max_sizes with 1
+			struct output *new_odef = &newnode->output_defs[i];
+			for( int j = rank; j < MAX_DIMENSIONS; j++){
+				new_odef->max_sizes[j] = 1;
+			}
 		}
-		if (newnode->ops->flags & NN_NODE_FLAG_D32_OUTPUT) newnode->outputs[i]->max_size *= 2;
+
+		out_tensor->shape.batches = (rank < 4) ? 1 : outputs[i].max_sizes[rank-4];
+		out_tensor->shape.height =  (rank < 3) ? 1 : outputs[i].max_sizes[rank-3];
+		out_tensor->shape.width =   (rank < 2) ? 1 : outputs[i].max_sizes[rank-2];
+		out_tensor->shape.depth =   (rank < 1) ? 1 : outputs[i].max_sizes[rank-1];
+		max_size = compute_max_size_with_pad(nn,newnode,&out_tensor->shape,elsize,i);
+#if 0
+		if( elsize > 0){
+			for (uint32_t j=0; j< rank; j++) {
+				max_size= mulu32_sat( max_size, outputs[i].max_sizes[j]);
+			}
+			if( (int32_t)max_size <= 0) {	// 0, -ve or insane dims
+				errlog(nn,"output calls for %u bytes, of elsize = %u", (unsigned) max_size, (unsigned)elsize);
+				goto err_free_allocated_outputs;
+			}
+			if (newnode->ops->flags & NN_NODE_FLAG_D32_OUTPUT) max_size *= 2;
+		}
+#endif
+		out_tensor->max_size = max_size;
+		if (max_size > 100*1024*1024) {
+			logmsg(nn,3,"Node %p id %x has large output #%d of %d bytes: max sizes [rank %d] %d,%d,%d,%d shape %d,%d,%d,%d elsize %d",
+				newnode,
+				newnode->node_id,
+				i,
+				max_size,
+				rank,
+				outputs[i].max_sizes[0],
+				outputs[i].max_sizes[1],
+				outputs[i].max_sizes[2],
+				outputs[i].max_sizes[3],
+				out_tensor->shape.batches,
+				out_tensor->shape.height,
+				out_tensor->shape.width,
+				out_tensor->shape.depth,
+				elsize);
+		}
 	}
 	return 0;
 err_free_allocated_outputs:
@@ -210,6 +275,9 @@ struct nn_node *node_alloc_common(
 		errlog(nn,"output alloc failed");
 		goto err_free_inputs;
 	}
+	if( num_outputs == 0 ){
+		newnode->flags |= NN_NODE_FLAG_RETAIN;
+	}
 	return newnode;
 err_free_inputs:
 	free_inputs(newnode);
@@ -218,31 +286,61 @@ err_free_node:
 	return NULL;
 }
 
+// this sets the noderefhash field on a node.
+// Call after changing src_id
+void node_rehash_inputrefs( struct nn_node * node)
+{
+	noderefhash_set_t hashall = 0;
+	uint32_t prev_nid = 0;
+	for( int i = 0;  i < node->n_inputs; i++ ){
+		uint32_t nid = node->input_refs[i].src_id;
+		if( nid != prev_nid){
+			hashall |= noderefhash_mask(nid);
+			prev_nid = nid;
+		}
+	}
+	node->noderefhash = hashall;
+}
 int node_free_common(struct nn_node *node, struct nn_graph *nn)
 {
 	logmsg(nn,3,"freeing node %p id=%x",node,node->node_id);
 	free_inputs(node);
 	free_outputs(node);
-	del_node_from_hash(nn,node->node_id);
+	del_node_from_hash(nn,node->node_id,node);
 	nn_free(node);
 	return 0;
 }
-
+//
+// if you have a (possibly null) opaque pointer which just needs to be free'd, this
+// can be the node dtor.
+int node_free_common_release_opaque(struct nn_node *node, struct nn_graph *nn )
+{
+	if( node->opaque != NULL ){
+		nn_free(node->opaque);
+		node->opaque = NULL;
+	}
+	return node_free_common( node, nn);
+}
 //
 // append newnode to end of linked-list
-// 'ptr' points to nn->head, or to
-// any node->next field of a node already in the list.
+// 'tail' pointer may be NULL, or may point to anything in the list.
+// So, we need to find the end, in general.
 //
-static inline void node_append(struct nn_node **head,
-							   struct nn_node **tail,
-							   struct nn_node *newnode) {
+static inline void node_append(struct nn_graph *nn, struct nn_node *newnode)
+{
+
+	struct nn_node *tmp = nn->tail;
+	struct nn_node **ptr = (tmp==NULL)? &nn->head : &tmp->next;
+
+    struct nn_node *p = *ptr;
+    while( p != NULL ){ // look for last
+        ptr = &p->next;
+        p = *ptr;
+    }
 	newnode->next = NULL;
-	if (*head == NULL) {
-		*head = newnode;
-	} else {
-		(*tail)->next = newnode;
-	}
-	*tail = newnode;
+    *ptr = newnode;
+    nn->tail = newnode;
+    nn->node_count ++;
 }
 
 int do_append_node(
@@ -258,6 +356,7 @@ int do_append_node(
 	/* Allocate new node */
 	/* Set default parameters and ops */
 	/* Call node->ctor(node) */
+	if( node_id==0) return errlog(nn,"node id cannot be 0");
 	struct nn_node *node;
 	if ((node = optab[operation]->ctor(
 		     nn,
@@ -270,35 +369,14 @@ int do_append_node(
 		     outputs)) == NULL) {
 		return errlog(nn,"node id=0x%x ctor fail",node_id);
 	}
-	node_append(&(nn->nonconst_head), &(nn->nonconst_tail), node);
+	// add the new node's class flags
+	// to the class set.
+	uint32_t class_flags = node->ops->flags & NN_NODE_FLAGS_SET;
+	nn->op_class_set |= class_flags;
+	node_append(nn,node);
 	return 0;
 }
 
-extern struct nn_node *hexagon_nn_const_ctor(
-	struct nn_graph *nn,
-	uint32_t node_id,
-	uint32_t batches,
-	uint32_t height,
-	uint32_t width,
-	uint32_t depth,
-	const uint8_t *data,
-	uint32_t data_len);
-
-extern struct nn_node *hexagon_nn_empty_const_ctor(
-	struct nn_graph *nn,
-	uint32_t node_id,
-	uint32_t batches,
-	uint32_t height,
-	uint32_t width,
-	uint32_t depth,
-	uint32_t data_len);
-
-extern int hexagon_nn_populate_const(
-	struct nn_graph *nn,
-	uint32_t node_id,
-	const uint8_t *data,
-	uint32_t data_len,
-	uint32_t target_offset);
 
 int do_append_const_node(
 	struct nn_graph *nn,
@@ -313,6 +391,7 @@ int do_append_const_node(
 	/* Allocate new node */
 	/* Set default parameters and ops */
 	/* Call node->ctor(node) */
+	if( node_id==0) return errlog(nn,"node id cannot be 0");
 	struct nn_node *node;
 	if ((node = hexagon_nn_const_ctor(
 		nn,
@@ -325,7 +404,7 @@ int do_append_const_node(
 		data_len)) == NULL) {
 		return errlog(nn,"node id=0x%x ctor fail",node_id);
 	}
-	node_append(&(nn->head), &(nn->tail), node);
+	node_append(nn,node);
 	return 0;
 }
 
@@ -338,6 +417,8 @@ int do_append_empty_const_node(
 	uint32_t depth,
 	uint32_t data_len) {
 	struct nn_node *node;
+	if( node_id ==0) return errlog(nn,"node id cannot be 0");
+
 	if ((node = hexagon_nn_empty_const_ctor(
 		     nn,
 		     node_id,
@@ -348,7 +429,7 @@ int do_append_empty_const_node(
 		     data_len)) == NULL) {
 		return errlog(nn,"node id=0x%x ctor fail",node_id);
 	}
-	node_append(&(nn->head), &(nn->tail), node);
+	node_append(nn,node);
 	return 0;
 }
 int do_populate_const_node(
@@ -379,8 +460,10 @@ int do_teardown(struct nn_graph *nn)
 	find_node_teardown(nn);
 	nn_free(nn->scratch);
 	nn_free(nn->logbuf);
+	if (nn->fake_vtcm_ptr) nn_free(nn->fake_vtcm_ptr);
 	if (nn->inputs) nn_free((void *)nn->inputs);
 	if (nn->outputs) nn_free(nn->outputs);
+	nn_batchseqstate_free( & nn->batchseq );
 	nn_free(nn);
 	return 0;
 }
@@ -472,9 +555,9 @@ void graphviz_print_node(struct nn_graph *nn, struct nn_node *node, FILE *dotfil
 {
 #ifdef SHOWY_DEBUG
 #ifdef LINUX_DEBUG
-#define SAY_GRAPH(args...) printf(args);
+#define SAY_GRAPH(...) printf(__VA_ARGS__);
 #else
-#define SAY_GRAPH(args...) fprintf(dotfile, args);
+#define SAY_GRAPH(...) fprintf(dotfile, __VA_ARGS__);
 #endif
 	if (nn == NULL || node == NULL) {
 		return;
@@ -525,7 +608,7 @@ void graphviz_print_graph(struct nn_graph *nn)
         uint64_t pcycle = nn_os_get_cycles(NULL);
 
 #ifndef LINUX_DEBUG
-        snprintf(filename, 255, "debug/%llu_%p.dot\n", pcycle, nn);
+        snprintf(filename, 255, "debug/%llu_%p.dot", pcycle, nn);
         if ((dotfile = fopen(filename, "w")) == NULL) {
                 printf("Ooops... Couldn't open file %s\n", filename);
                 return;
@@ -543,6 +626,96 @@ void graphviz_print_graph(struct nn_graph *nn)
 #ifndef LINUX_DEBUG
         fclose(dotfile);
 #endif
+#endif
+}
+
+void print_graph_to_file(struct nn_graph *nn)
+{
+	/* YAML node example:
+	   nodes:
+	     10fa0:
+	       optype: OP_INPUT
+	       outputs:
+	         - size: [1,1,1,1000]
+		   elsize: 4
+		   file: foo_104a0_0.dat
+	     104a1:
+	       optype: OP_Add_f
+	       inputs:
+	         - 104a0_0
+		 - 10010_0
+	       outputs:
+	         - size: [1,1,1,1000]
+		   elsize: 4
+		   file: foo_104a1_0.dat
+	*/
+
+#if defined(V66)
+	FILE *outfile;
+	char charbuf[512];
+	char minibuf[256];
+	int i,j,k;
+
+        if (nn == NULL) {
+                return;
+        }
+
+	snprintf(charbuf,512, "%s_graph.yaml", nn->enable_graph_print_prefix);
+	if ((outfile = fopen(charbuf, "w")) == NULL) {
+		errlog(nn,"Ooops... Couldn't open file '%s'", charbuf);
+		return;
+	} else {
+		logmsg(nn,1,"INFO: Writing '%s'", charbuf);
+	}
+
+	fputs("---\nnodes\n", outfile);
+
+	struct nn_node *node = nn->head;
+	while (node) {
+		uint32_t id = node->node_id;
+		const char *node_type_name = hexagon_nn_op_names[node->node_type];
+
+		snprintf(charbuf,512, "  %x:\n    optype: %s\n", (unsigned) id, node_type_name);
+		fputs(charbuf, outfile);
+
+		if (node->n_inputs>0) {
+			fputs("    inputs:\n", outfile);
+			for (i=0; i<node->n_inputs; i++) {
+				snprintf(charbuf,512, "      - %x_%u\n", (unsigned) node->input_refs[i].src_id, (unsigned) node->input_refs[i].output_idx);
+				fputs(charbuf, outfile);
+			}
+		}
+
+		if (node->n_outputs>0) {
+			fputs("    outputs:\n", outfile);
+			for (i=0; i<node->n_outputs; i++) {
+				// Calculate the rank-string, e.g.  "1,1,1,1000"
+				j=0;
+				struct output out = node->output_defs[i];
+				for (k=0; k<out.rank; k++) {
+					j += snprintf(minibuf+j, 256-j, "%u,", (unsigned) out.max_sizes[k]);
+				}
+				if (j) {
+					minibuf[j-1] = 0;  // Remove trailing comma, terminate string
+				} else {
+					minibuf[j] = 0;
+				}
+
+				snprintf(charbuf,512, "      - size: [%s]\n        elsize: %d\n        file: %s_%x_%u.dat\n",
+					 minibuf,
+					 (unsigned) out.elementsize,
+					 nn->enable_tensor_print_prefix,
+					 (unsigned) id,
+					 i
+					);
+				fputs(charbuf, outfile);
+			}
+		}
+
+                node = node->next;
+	}
+
+	fclose(outfile);
 #endif
 }
 

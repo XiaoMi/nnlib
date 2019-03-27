@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -88,7 +88,7 @@ static inline int output_dim(int a, int b)
  */
 
 #define CREATE_ELEMENTWISE_INLINE(NAME,INTYPE,OUTTYPE,OUTTYPECODE) \
-static inline int NAME( \
+static inline int __attribute__((always_inline)) NAME( \
 	struct nn_node *self, \
 	struct nn_graph *nn, \
 	OUTTYPE (*f)(INTYPE, INTYPE, void *), \
@@ -211,122 +211,101 @@ struct hvx_info {
 };
 
 /* Look for patterns to use HVX intrinsics version of the code and broadcast/prepare the data */
-static inline int check_prepare_hvx_opt(
+int nn_check_prepare_hvx_opt(
 		struct nn_graph *nn,
 		const struct tensor *a_tensor,
 		const struct tensor *b_tensor,
 		struct tensor *out_tensor,
 		const uint8_t *a_data,
 		const uint8_t *b_data,
-		struct hvx_info *opt_info) {
+		struct hvx_info *opt_info);
 
-	uint32_t ab, ah, aw, ad;
-	uint32_t bb, bh, bw, bd;
-	int opt_flag=0;
-	uint8_t *a_data_pad = NULL;
-	uint8_t *b_data_pad = NULL;
-	int elements, bhw, i;
-	int a_const_value = 0;
-	int b_const_value = 0;
-
-	tensor_get_shape(a_tensor,&ab,&ah,&aw,&ad);
-	tensor_get_shape(b_tensor,&bb,&bh,&bw,&bd);
-	//t2 =  nn_os_get_cycles(nn);
-
-	/* One of the operands is scalar */
-	if((ab==1)&&(ah==1)&&(aw==1)&&(ad==1))	{
-		elements = bb*bh*bw*bd;
-
-		b_data_pad = (uint8_t *)b_data;// since b_data is already aligned to 128, no need to create padded buffer
-		a_data_pad = nn->scratch;
-
-		tensor_set_shape(out_tensor,bb,bh,bw,bd);
-
-		opt_flag = 1;
-		a_const_value = a_data[0];
-	}
-	else if((bb==1)&&(bh==1)&&(bw==1)&&(bd==1))	{
-		elements = ab*ah*aw*ad;
-
-		a_data_pad = (uint8_t *)a_data;// since a_data is already aligned to 128, no need to create padded buffer
-		b_data_pad = (uint8_t *)nn->scratch;
-
-		tensor_set_shape(out_tensor,ab,ah,aw,ad);
-
-		opt_flag = 1;
-		b_const_value = b_data[0];
-	}
-
-	/* Both operands are of same dimensions */
-	else if ((ab==bb)&&(ah==bh)&&(aw==bw)&&(ad==bd))	{
-		//logmsg(nn,0,"Entering qmul asm - a=%p, b=%p, elem=%d, elem_pad=%d", a_data_pad, b_data_pad, elements, elements_pad);
-		//t3 =  nn_os_get_cycles(nn);
-		elements = ab*ah*aw*ad;
-
-		a_data_pad = (uint8_t *)a_data;// since a_data is already aligned to 128, no need to create padded buffer
-		b_data_pad = (uint8_t *)b_data;// since b_data is already aligned to 128, no need to create padded buffer
-
-		tensor_set_shape(out_tensor,ab,ah,aw,ad);
-
-		opt_flag = 1;
-	}
-
-	/* Depth matches on both operands - Broadcast elements in one operand to match dimensions of other operand */
-	else if ((bb==1)&&(bh==1)&&(bw==1)&&(bd==ad))	{
-
-		elements = ab*ah*aw*ad;
-		bhw = ab*ah*aw;
-
-		a_data_pad = (uint8_t *)a_data;// since a_data is already aligned to 128, no need to create padded buffer
-		b_data_pad = (uint8_t *)nn->scratch;
-
-		// Broadcast elements in b to match a dimensions
-		for(i=0;i<bhw;i++) {
-			vmemcpy_asm(b_data_pad,b_data,bd);
-			b_data_pad += bd;
-		}
-		b_data_pad = (uint8_t *)nn->scratch;//pad_and_align(a_data_pad, elements_pad);
-
-		tensor_set_shape(out_tensor,ab,ah,aw,ad);
-
-		opt_flag = 1;
-		//printf("Depth optimization: a: %lux%lux%lux%lu b: %lux%lux%lux%lu\n", ab,ah,aw,ad, bb,bh,bw,bd);
-
-	}
-	else if ((ab==1)&&(ah==1)&&(aw==1)&&(bd==ad))	{
-
-		elements = bb*bh*bw*bd;
-		bhw = bb*bh*bw;
-
-		b_data_pad = (uint8_t *)b_data ;// since b_data is already aligned to 128, no need to create padded buffer
-		a_data_pad = nn->scratch;
-
-		// Broadcast elements in b to match a dimensions
-		for(i=0;i<bhw;i++) {
-			vmemcpy_asm(a_data_pad,a_data,ad);
-			a_data_pad += ad;
-		}
-		a_data_pad = nn->scratch;
-
-		tensor_set_shape(out_tensor,bb,bh,bw,bd);
-
-		opt_flag = 1;
-		//printf("Depth optimization: a: %lux%lux%lux%lu b: %lux%lux%lux%lu\n", ab,ah,aw,ad, bb,bh,bw,bd);
-
-	}
-
-	if(opt_flag) {
-		opt_info->a_data_pad = a_data_pad;
-		opt_info->b_data_pad = b_data_pad;
-		opt_info->elements = elements;
-		opt_info->a_const_value = a_const_value;
-		opt_info->b_const_value = b_const_value;
-	}
-
-	return opt_flag;
+static inline int __attribute__((always_inline))
+check_prepare_hvx_opt(
+		struct nn_graph *nn,
+		const struct tensor *a_tensor,
+		const struct tensor *b_tensor,
+		struct tensor *out_tensor,
+		const uint8_t *a_data,
+		const uint8_t *b_data,
+		struct hvx_info *opt_info)
+{
+	return nn_check_prepare_hvx_opt( nn, a_tensor, b_tensor, out_tensor, a_data, b_data, opt_info);
 }
 
+#define NEW_BROADCAST
 
+#ifdef NEW_BROADCAST
+
+struct elementwise_funcs {
+	// pointers to 'work' functions for scalar mode
+	void (* op_stride_11)( void *out, void const *in1, void const *in2, int n, void *opaque);
+	void (* op_stride_10)( void *out, void const *in1, void const *in2, int n, void *opaque);
+	void (* op_rev_stride_01)( void *out, void const *in1, void const *in2, int n, void *opaque);
+	// pointers for HVX mode (any may be null)
+	void (* op_hvx_stride_11)( void *out, void const *in1, void const *in2, int n, void *opaque);
+	void (* op_hvx_stride_10)( void *out, void const *in1, void const *in2, int n, void *opaque);
+	void (* op_hvx_rev_stride_01)( void *out, void const *in1, void const *in2, int n, void *opaque);
+	uint8_t in_elbytes;		// elementsize (1 or 4)
+	uint8_t out_elbytes;	// elementsize (1 or 4)
+	uint16_t out_typecode;	// type for the output tensor
+	uint16_t minlen_hvx;	// don't use hvx if n < minlen_hvx
+	uint8_t hvx_need_align;	// if set, don't use hvx unless all pointers (except in2, for _10 and 01 cases) are aligned.
+	uint8_t scratch_elbytes;	// normally zero, see comments above nn_elementwise_with_broadcast for usage.
+};
+//
+// strategy:
+//   - if shapes are both (b,h,w,d),   make one call to op_stride_11;
+//   - if we have  (b,h,w,d) and (1,1,1,1)
+//                      make one call to op_stride_01
+//   - if we have  (b,w,h,d) and (1,1,1,d)
+//         make (b*h*w) calls to op_stride_01
+//
+//
+int nn_elementwise_with_broadcast(
+	struct nn_node *self,
+	struct nn_graph *nn,
+	struct elementwise_funcs const * functabp,
+	void *opaque);
+
+// use to make most "op_stride_11" functions
+// OPER is a function accepting two vars; can be a #define
+#define BROADCAST_STRIDE_11_FUNC( FNAME,DTYPE, OPER)\
+static void FNAME( void *out, void const *in1, void const *in2, int n, void *opaque)\
+{\
+	DTYPE * op = (DTYPE*)out;\
+	DTYPE const * inp1 = (DTYPE const *)in1;\
+	DTYPE const * inp2 = (DTYPE const *)in2;\
+	if( n > 0){\
+		DTYPE s = OPER((*inp1++),(*inp2++));\
+		for(int i = 0; i < n-1; i++){\
+			*op++ = s;\
+			s = OPER((*inp1++),(*inp2++));\
+		}\
+		*op = s;\
+	}\
+}
+// use to make most op_stride_10 funcs
+#define BROADCAST_STRIDE_10_FUNC( FNAME, DTYPE, OPER)\
+static void  FNAME( void *out, void const *in1, void const *in2, int n, void *opaque)\
+{\
+	DTYPE * op = (DTYPE*)out;\
+	DTYPE const * inp1 = (DTYPE const *)in1;\
+	DTYPE xin2 = *(DTYPE const *)in2;\
+	for( int i =0; i < n; i++) op[i] = OPER(inp1[i],xin2);\
+}
+
+// use to make most op_rev_stride_10 funcs, where needed
+#define BROADCAST_REV_STRIDE_01_FUNC( FNAME, DTYPE, OPER)\
+static void  FNAME( void *out, void const *in1, void const *in2, int n, void *opaque)\
+{\
+	DTYPE * op = (DTYPE*)out;\
+	DTYPE const * inp1 = (DTYPE const *)in1;\
+	DTYPE xin2 = *(DTYPE const *)in2;\
+	for( int i =0; i < n; i++) op[i] = OPER(xin2,inp1[i]) ;\
+}
+
+#endif
 
 #endif
 

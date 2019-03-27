@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -77,6 +77,26 @@ struct integer_acc {
 	uint8_t xmin,xmax;
 };
 
+static int execute_qinstancenorm_d32_ref(struct nn_node *self, struct nn_graph *nn)
+{
+	const struct tensor *in_tensor = self->inputs[0];
+	struct tensor *out_tensor = self->outputs[0];
+	struct tensor *out_min_tensor = self->outputs[1];
+	struct tensor *out_max_tensor = self->outputs[2];
+
+	int32_t batches = in_tensor->shape.batches;
+	int32_t width = in_tensor->shape.width;
+	int32_t height = in_tensor->shape.height;
+	int32_t depth = in_tensor->shape.depth;
+
+	if (tensor_out_prepare_d32(out_tensor,batches,height,width,depth,NN_TYPE_QUINT8) != 0) {
+		return errlog(nn,"out too small");
+	}
+	tensor_set_single_float( out_min_tensor, -6.0f );
+	tensor_set_single_float( out_max_tensor, 6.0f );
+	return errlog(nn,"FIXME: do d32 ref instance norm");
+};
+
 static int execute_qinstancenorm_ref(struct nn_node *self, struct nn_graph *nn)
 {
 	const struct tensor *in_tensor = self->inputs[0];
@@ -91,8 +111,12 @@ static int execute_qinstancenorm_ref(struct nn_node *self, struct nn_graph *nn)
 	int32_t width = in_tensor->shape.width;
 	int32_t height = in_tensor->shape.height;
 	int32_t depth = in_tensor->shape.depth;
+	size_t bytes = batches * width * height * depth;
 
 	uint32_t tmp;
+	if(nn_scratch_grow(nn,(sizeof(float) * depth * 5) + bytes )){
+		return errlog(nn,"failed to get scratch");
+	}
 
 	// work area:
 	//   sum:    struct integer_acc * [depth]
@@ -126,10 +150,10 @@ static int execute_qinstancenorm_ref(struct nn_node *self, struct nn_graph *nn)
 	//float in_level_size = (in_max-in_min)/255.0f;
 
 
-    if( tensor_out_prepare_normal( out_tensor,batches,width,height,depth, NN_TYPE_QUINT8 )!=0) {
+    if( tensor_out_prepare_normal( out_tensor,batches,height,width,depth, NN_TYPE_QUINT8 )!=0) {
     	return errlog(nn,"out too small");
     }
-	logmsg(nn,2,"set out tensor shape %dx%dx%dx%d",batches,width,height,depth);
+	logmsg(nn,2,"set out tensor shape %dx%dx%dx%d",batches,height,width,depth);
 
 
 	//
@@ -269,8 +293,12 @@ static int execute_finstancenorm(struct nn_node *self, struct nn_graph *nn)
 	int32_t width = in_tensor->shape.width;
 	int32_t height = in_tensor->shape.height;
 	int32_t depth = in_tensor->shape.depth;
+	size_t bytes = batches * width * height * depth * sizeof(float);
 
 	float tmp;
+	if(nn_scratch_grow(nn,(batches * sizeof(float) * depth * 5) + bytes )){
+		return errlog(nn,"failed to get scratch");
+	}
 	float *sum = nn->scratch;
 	float *sum_of_squares = sum + depth;
 	// followed by 2nd sum, 2nd sum of squares..
@@ -291,7 +319,7 @@ static int execute_finstancenorm(struct nn_node *self, struct nn_graph *nn)
 
 
 
-    if( tensor_out_prepare_normal( out_tensor,batches,width,height,depth, NN_TYPE_FLOAT )!=0) {
+    if( tensor_out_prepare_normal( out_tensor,batches,height,width,depth, NN_TYPE_FLOAT )!=0) {
     	return errlog(nn,"out too small");
     }
 
@@ -361,6 +389,13 @@ struct nn_node_ops nn_ops_for_QuantizedInstanceNorm_8_ref = {
 
 struct nn_node_ops nn_ops_for_QuantizedInstanceNorm_8 = {
 	.execute = execute_qinstancenorm_ref,
+	.check = check_qinstancenorm,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};
+
+struct nn_node_ops nn_ops_for_QuantizedInstanceNorm_8_d32_ref = {
+	.execute = execute_qinstancenorm_d32_ref,
 	.check = check_qinstancenorm,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,

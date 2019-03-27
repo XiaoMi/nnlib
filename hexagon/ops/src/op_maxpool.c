@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -42,6 +42,14 @@
 
 #include <nn_graph.h>
 #include <string.h>
+
+
+#ifdef HEXAGON_V66
+#define NUM_THREADS 4
+#else
+#define NUM_THREADS 2
+#endif
+
 
 #if 0
 static inline void l2fetch(void *ptr, uint32_t stride, uint32_t width, uint32_t height)
@@ -118,9 +126,9 @@ static void maxpool_execute_slice_ref(struct nn_graph *nn, void *vinfo)
 	/* foreach out batch */
 	for (batch = 0; batch < out_batches; batch++) {
 	  /* foreach out y */
-	  for (out_y = whoami; out_y < out_height; out_y+=2) {
+	  for (out_y = whoami; out_y < out_height; out_y+=NUM_THREADS) {
 	    start_y = out_y * stride_height - adj_y;
-	    next_y = (out_y + 2) * stride_height - adj_y;
+	    next_y = (out_y + NUM_THREADS) * stride_height - adj_y;
 	    end_y = start_y + window_height;
 	    if (start_y < 0) start_y = 0;
 	    if (end_y > in_height) end_y = in_height;
@@ -220,9 +228,9 @@ static void maxpool_execute_slice_asm(struct nn_graph *nn, void *vinfo)
 	/* foreach out batch */
 	for (batch = 0; batch < out_batches; batch++) {
 	  /* foreach out y */
-	  for (out_y = whoami; out_y < out_height; out_y+=2) {
+	  for (out_y = whoami; out_y < out_height; out_y+=NUM_THREADS) {
 	    start_y = out_y * stride_height - adj_y;
-	    next_y = (out_y + 2) * stride_height - adj_y;
+	    next_y = (out_y + NUM_THREADS) * stride_height - adj_y;
 	    end_y = start_y + window_height;
 	    if (start_y < 0) start_y = 0;
 	    if (end_y > in_height) end_y = in_height;
@@ -288,16 +296,12 @@ static int maxpool_execute(struct nn_node *self, struct nn_graph *nn,
 	int32_t out_depth = in_depth;
 
 
-	struct tdata worker0_info = {
-		.self = self,
-		.whoami = 0,
-	};
-	struct tdata worker1_info = {
-		.self = self,
-		.whoami = 1,
-	};
-	nn_sem_init(&worker0_info.donesem,0);
-	nn_sem_init(&worker1_info.donesem,0);
+	struct tdata workers[NUM_THREADS];
+	for (int i=0; i<NUM_THREADS; i++) {
+		workers[i].self = self;
+		workers[i].whoami = i;
+		nn_sem_init(&workers[i].donesem,0);
+	}
 
 	/* Assert min and max are size 1,1,1,1 ? */
 
@@ -316,12 +320,12 @@ static int maxpool_execute(struct nn_node *self, struct nn_graph *nn,
 
 	if (self->padding == NN_PAD_NA) return errlog(nn,"This op might pad");
 
-	nn_os_work_for_vector(nn,maxpool_execute_slice_f,&worker0_info);
-	nn_os_work_for_vector(nn,maxpool_execute_slice_f,&worker1_info);
-	//maxpool_execute_slice_f(nn,&worker_info);
-	//maxpool_execute_slice_f(nn,&my_info);
-	nn_sem_wait(&worker0_info.donesem);
-	nn_sem_wait(&worker1_info.donesem);
+	for (int i=0; i<NUM_THREADS; i++) {
+		nn_os_work_for_vector(nn,maxpool_execute_slice_f,&workers[i]);
+	}
+	for (int i=0; i<NUM_THREADS; i++) {
+		nn_sem_wait(&workers[i].donesem);
+	}
 
 	tensor_copy(out_min_tensor,in_min_tensor);
 	tensor_copy(out_max_tensor,in_max_tensor);
@@ -385,6 +389,7 @@ struct nn_node_ops nn_ops_for_QuantizedMaxPool_8 = {
 	.check = maxpool_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.flags = NN_NODE_FLAG_OUTPUT_USES_INPUT_RANGE,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedMaxPool_8_ref = {
@@ -392,6 +397,7 @@ struct nn_node_ops nn_ops_for_QuantizedMaxPool_8_ref = {
 	.check = maxpool_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.flags = NN_NODE_FLAG_OUTPUT_USES_INPUT_RANGE,
 };
 
 

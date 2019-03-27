@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -153,6 +153,7 @@ gvconv2dbbb_v60_asm:
 #define biasvec                v16    //
 #define recipvec               v15    //
 #define vrnd                   v20    //
+#define sk                     v21    //
 #define SSR        <<1:rnd:sat:shift  //simplfy mpy instruction
 /*=============================================================================*/
 
@@ -372,44 +373,51 @@ gvconv2dbbb_v60_asm:
        } {
            s0.uw       += vrmpy(y0.ub, x03x00.ub)       //[1, 3]
            s1.uw       += vrmpy(y0.ub, x13x10.ub)       //[1, 3]
-           maxe.w = vmax(maxe.w, s3.w)                  //[E, 3]
            if (!p1) ptr_sumabuf = ptr_sumabuf0          // 
        } {
            y2.w  = vmpye(s2.w, recipvec.uh)             //
-           mine.w = vmin(mine.w, s2.w)                  //see if s2 is max
-           maxe.w = vmax(maxe.w, s2.w)                  //[E, 4]
+           ptr_x0 = add(ptr_x0, in_width_32)            //[E, 7]next line ptr_y keeps going
            dcfetch(ptr_sumabuf+#0<<5)                   //fetch next suma's
        } {
            s0.uw       += vrmpy(y1.ub, x07x04.ub)       //[1, 4]
            s1.uw       += vrmpy(y1.ub, x17x14.ub)       //[1, 4]
-           mine.w = vmin(mine.w, s3.w)                  //[E, 4]see if s3 is max
            dcfetch(fetch_ptr+#0<<5)                     //fetch line 
+           ptr_x0 = sub(ptr_x0, next_outputs)           //reset data ptr to next 4
        }
 /* ---------------------------------------------------------------------------- */
        {   y2.w+= vmpyo(s2.w, recipvec.h):SSR 
            maxe.w = vmax(maxe.w, s0.w)                  //see if s0 is max
-           mine.w = vmin(mine.w, s0.w)                  //see if s0 is max
-           ptr_x0 = add(ptr_x0, in_width_32)            //[E, 7]next line ptr_y keeps going
+           p2 = cmp.gt(col_count,#-3)                   //should s1 be included ?
+           sk = s0                                      //initialize sk with s0
        } {
            y0.w  = vmpye(s0.w, recipvec.uh)             //
-           maxe.w = vmax(maxe.w, s1.w)                  // 
-           ptr_x0 = sub(ptr_x0, next_outputs)           //reset data ptr to next 4
+           mine.w = vmin(mine.w, s0.w)                  //see if s0 is min
+           if (p2) sk = s1                              //inclued s1 if needed
+           p2 = cmp.gt(col_count,#-2)                   //should s2 be included ?
        } {
            y0.w+= vmpyo(s0.w, recipvec.h):SSR           //
-           mine.w = vmin(mine.w, s1.w)                  //see if s1 is max
+           maxe.w = vmax(maxe.w, sk.w)                  //see if s1 is max
+           mine.w = vmin(mine.w, sk.w)                  //see if s1 is min
            ptr_w = memw(sp+#52<<0)                      //[P, 0]ptr_wi initialize filter pointer
        } {
            y3.w  = vmpye(s3.w, recipvec.uh)             //
+           if (p2) sk = s2                              //include s2 if needed
            ptr_x1 = ptr_x0                              //[P, 5]
            //loop1(.L_filt_height, filt_height)         //[P, 1]for(fil=0;fil<h*depth/32;fil+=1){
            lc1 = filt_height                            //allow future code movement
        } {
            y3.w+= vmpyo(s3.w, recipvec.h):SSR           //
+           maxe.w = vmax(maxe.w, sk.w)                  //see if s2 is max
+           mine.w = vmin(mine.w, sk.w)                  //see if s2 is min
+           p2 = cmp.gt(col_count,#-1)                   //should s3 be included ?
        } {
            y1.w  = vmpye(s1.w, recipvec.uh)             //
+           if (p2) sk = s3                              //include s3 if needed
            sum0 = memw(ptr_sumabuf++M0)                 //[P, 0]sum 0
        } {
            y1.w+= vmpyo(s1.w, recipvec.h):SSR           //
+           maxe.w = vmax(maxe.w, sk.w)                  //see if s2 is max
+           mine.w = vmin(mine.w, sk.w)                  //see if s3 is min
            sum1 = memw(ptr_sumabuf++M0)                 //[P, 1]sum 1
        } {
            y3.h = vpacke(y3.w, y2.w)                    //#sat8  <0, >255 

@@ -1,4 +1,3 @@
-
 /*
  * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *

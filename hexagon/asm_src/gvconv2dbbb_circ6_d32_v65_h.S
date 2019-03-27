@@ -31,6 +31,9 @@
  * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
+*/
+
+/*
   Memory
      CODESIZE 1120 bytes
      STACK     112 bytes
@@ -370,6 +373,7 @@ gvconv2dbbb_circ6_d32_v65_asm:
        s15_s12.w += vrmpy(w01.b, x51_x21.ub)             //[1, 3]acc 2,3,6,7
        x40_x10 = memd(ptr_x10+stride<<#1)                //[1, 3]load pt 1 5
        x41_x11 = memd(ptr_x11+stride<<#1)                //[1, 3]
+       p2 = cmp.ge(col_count,#0)                         //
    } {
        s04_s01.w += vrmpy(w00.b, x40_x10.ub)             //[1, 4]
        s14_s11.w += vrmpy(w01.b, x41_x11.ub)             //[1, 4]
@@ -394,6 +398,7 @@ gvconv2dbbb_circ6_d32_v65_asm:
        maxe.w = vmax(maxe.w, s00.w)                      //max accumulation
        s1_sh.w = vasl(s01.w, zshift)                     //
 //     ptr_x0 = sub(ptr_x0, adjust)                      //-=filt_height if stride_height > filt_height
+       if (!p2) s05 = s00                                //
    } {   
        s00.w = vmpye(s0_sh.w, vrecip.uh)                 //
        maxe.w = vmax(maxe.w, s01.w)                      //max accumulation
@@ -409,7 +414,7 @@ gvconv2dbbb_circ6_d32_v65_asm:
        maxe.w = vmax(maxe.w, s02.w)                      //max accumulation
        mine.w = vmin(mine.w, s02.w)                      //min accumulation
        s01.w += vmpyo(s1_sh.w, vrecip.h):SSR             //
-       p0 = cmp.eq(col_count, #0)                        //will be back at saem place just advance
+       p0 = cmp.gt(col_count, #0)                        //will be back at saem place just advance
    } {
        maxe.w = vmax(maxe.w, s03.w)                      //max accumulation
        s1_sh.w = vasl(s03.w, zshift)                     //o
@@ -469,7 +474,7 @@ gvconv2dbbb_circ6_d32_v65_asm:
    } {
        if(q2) vmem(ptr_z0+#2):nt = d054                  //store 4-7 even row
        ptr_z0 = add(ptr_z0, #192)                        //
-       if(!p0) jump   .L_width                           //next 2 rows 8 points per row
+       if (p0) jump   .L_width                           //next 2 rows 8 points per row
    }//endloop width
 /*
        ----|--54|0000 0011

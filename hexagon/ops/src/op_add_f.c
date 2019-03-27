@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -40,29 +40,67 @@
 #include <math.h>
 #include <nn_broadcast.h>
 
-static inline float add_helper(float a, float b, void *unused)
-{
-	return a+b;
-}
+
+// add vector to vector
+#define OPERATOR_ADD(X,Y) ((X)+(Y))
+BROADCAST_STRIDE_11_FUNC( add_f_stride_11, float, OPERATOR_ADD)
+// add vector to scalar
+BROADCAST_STRIDE_10_FUNC( add_f_stride_10, float, OPERATOR_ADD )
+
+
+static const struct elementwise_funcs Add_f_funcs = {
+	.op_stride_11 = add_f_stride_11,
+	.op_stride_10 = add_f_stride_10,
+	.op_rev_stride_01 = add_f_stride_10,
+	.in_elbytes = 4,
+	.out_elbytes = 4,
+	.out_typecode =  NN_TYPE_FLOAT
+};
 
 static int add_f_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return broadcast_elementwise_execute_f(self,nn,add_helper,NULL);
+	return nn_elementwise_with_broadcast( self, nn, &Add_f_funcs, NULL );
 }
 
-static int add_f_check(struct nn_node *self, struct nn_graph *nn)
+
+static int add_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"add node %p",self);
-	if (self->n_inputs != 2) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
+	int k = node_check_inputs_outputs_n( self,nn, "add_f", 2, 1);
+	if( k!= 0) return k;
 	logmsg(nn,2,"add %p check OK",self);
 	return 0;
 }
 
+/// Add int32
+
+BROADCAST_STRIDE_11_FUNC(add_int32_stride_11, int32_t, OPERATOR_ADD)
+// subtract scalar from vector
+BROADCAST_STRIDE_10_FUNC(add_int32_stride_10, int32_t, OPERATOR_ADD)
+
+static const struct elementwise_funcs Add_int32_funcs = {
+	.op_stride_11 = add_int32_stride_11,
+	.op_stride_10 = add_int32_stride_10,
+	.op_rev_stride_01 = add_int32_stride_10,	// same since + commutes
+	.in_elbytes = 4,
+	.out_elbytes = 4,
+	.out_typecode =  NN_TYPE_INT32
+};
+
+static int add_int32_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	return nn_elementwise_with_broadcast( self, nn, &Add_int32_funcs, NULL );
+}
+
 struct nn_node_ops nn_ops_for_Add_f = {
 	.execute = add_f_execute,
-	.check = add_f_check,
+	.check = add_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
 };
-
+struct nn_node_ops nn_ops_for_Add_int32 = {
+	.execute = add_int32_execute,
+	.check = add_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+};

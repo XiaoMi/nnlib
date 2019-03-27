@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -37,18 +37,41 @@
 #define NN_GRAPH_PIPE_H 1
 
 struct nn_pipe {
-	uint64_t *data;
-	nn_mutex_t mutex;
+	union {
+		struct {
+			nn_sem_t howfull;
+			volatile int recv_idx;
+		};
+		uint64_t recvidx_howfull;
+	};
+
 	nn_sem_t howempty;
-	nn_sem_t howfull;
+	nn_mutex_t mutex;
+
+	volatile int send_idx;
+	int pad;
+
+	uint64_t *data;
 	int elements;
-	int send_idx;
-	int recv_idx;
 };
 
-struct nn_pipe *nn_pipe_alloc_portable(struct nn_graph *nn, uint32_t pipe_elements);
-void nn_pipe_free_portable(struct nn_pipe *pipe);
-void nn_pipe_send_portable(struct nn_pipe *pipe, uint64_t val);
-uint64_t nn_pipe_recv_portable(struct nn_pipe *pipe);
+typedef struct nn_pipe nn_pipe_t;
+
+struct nn_pipe *nn_pipe_alloc(struct nn_graph *nn, uint32_t pipe_elements);
+void nn_pipe_free(struct nn_pipe *pipe);
+
+void nn_pipe_send_multi_slowpath(struct nn_pipe *pipe, uint64_t *data, int n_items);
+void nn_pipe_send_multi_fastpath(struct nn_pipe *pipe, uint64_t *data, int n_items);
+
+//static inline void nn_pipe_send_multi(struct nn_pipe *pipe, uint64_t *data, int n_items) { return nn_pipe_send_multi_slowpath(pipe,data,n_items); }
+static inline void nn_pipe_send_multi(struct nn_pipe *pipe, uint64_t *data, int n_items) { return nn_pipe_send_multi_fastpath(pipe,data,n_items); }
+
+static inline void nn_pipe_send(struct nn_pipe *pipe, uint64_t val) { return nn_pipe_send_multi(pipe,&val,1); }
+
+uint64_t nn_pipe_recv_slowpath(struct nn_pipe *pipe);
+uint64_t nn_pipe_recv_fastpath(struct nn_pipe *pipe);
+
+static inline uint64_t nn_pipe_recv(struct nn_pipe *pipe) { return nn_pipe_recv_fastpath(pipe); }
+//static inline uint64_t nn_pipe_recv(struct nn_pipe *pipe) { return nn_pipe_recv_slowpath(pipe); }
 
 #endif

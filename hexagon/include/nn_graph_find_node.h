@@ -44,8 +44,18 @@
 
 
 struct nn_node *find_node(struct nn_graph *nn, uint32_t node_id);
-void del_node_from_hash(struct nn_graph *nn, uint32_t node_id);
+// delete entry for (node_id, node) if it exists; if node == NULL, delete any entry for node_id.
+void del_node_from_hash(struct nn_graph *nn, uint32_t node_id, struct nn_node * node);
 void find_node_teardown(struct nn_graph *nn);
+
+
+//
+// API used at the start of prepare_graph(), to put all the nodes in the
+// hash, and check for duplicated nodes in the process.
+//
+int initialize_hash( struct nn_graph *nn);
+struct nn_node *insert_node_to_hash( struct nn_graph *nn, struct nn_node *node);
+
 
 #endif
 

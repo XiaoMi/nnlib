@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -39,15 +39,337 @@
 #include <nn_graph.h>
 #include "nn_graph_types.h"
 #include "quantize.h"
+#include "nn_string_map.h"
+
+int nn_tensor_copy(struct tensor *dst, const struct tensor *src)
+{
+	return tensor_copy_inline( dst, src);
+}
+
+//
+// thread-parallel memcpy manager
+//
+
+void
+nn_mcmanager_init(struct nn_graph *nn, struct nn_memcpy_manager *mcm )
+{
+	nn_sem_init(&mcm->done_sem,0);
+	mcm->pending = 0;
+	mcm->avglen = 32768;
+	mcm->avail_set = (1<<NN_MEMCPY_MANAGER_SLOTS)-1;
+	mcm->ready_set = 0;
+}
+static void mcmanager_work_func( struct nn_graph *nn, void * mcmv );
+static void vmemcpy_2d_general_with_prefetch( int width, int height,
+		void * dst, int d_stride,
+		void const * src, unsigned s_stride );
+
+
+// some common code for the mc_manager task buffer protocol
+// returns a bit mask for the slot, and a pointer to the
+// slot buffer to be filled in. If this fails, pointer is
+// null, slot_bit = 0; this should never happen.
+//
+typedef struct {
+	unsigned slot_bit;
+	struct nn_memcpy_manager_op *slotp;
+}  mcmanager_avail_slot;
+
+static inline mcmanager_avail_slot
+__attribute__((always_inline))
+mcmanager_get_available_slot( struct nn_graph *nn, struct nn_memcpy_manager *mcm, int defer_flag)
+{
+	// find a slot to use: remove a '1' from avail_set.
+	// pick the first available slot if defer_flag =0; last if defer_flag != 0
+	int slotno;
+	unsigned slot_bit;
+	unsigned set_old0;
+	unsigned set_old = mcm->avail_set;
+	mcmanager_avail_slot result;
+	do{
+		unsigned set = set_old & (1<<NN_MEMCPY_MANAGER_SLOTS)-1;
+		if( !defer_flag ){
+			slotno = Q6_R_ct0_R(set);
+		}else{
+			slotno = 31-Q6_R_cl0_R(set);
+		}
+		if( (unsigned)slotno>=NN_MEMCPY_MANAGER_SLOTS){
+			errlog(nn,"??? invalid avail slot in mcmanager ");
+			result.slotp = NULL;
+			result.slot_bit = 0;
+			return result;
+		}
+		slot_bit = 1 <<slotno;
+		unsigned set_new = set & ~slot_bit;
+		set_old0 = set_old;
+		set_old = __sync_val_compare_and_swap( &mcm->avail_set,set_old,set_new);
+	}while(set_old != set_old0);
+	result.slot_bit = slot_bit;
+	result.slotp =  &mcm->ops[slotno];
+	return result;
+}
+// protocol to make the slot ready once it's been filled in.
+// it's marked ready immediately, before we even check for "back-pressure".
+// it may get picked up by an already-launched thread but
+// that's OK; the thread we launch will then process an older slot.
+static inline void
+__attribute__((always_inline))
+mcmanager_make_ready_slot( struct nn_graph *nn, struct nn_memcpy_manager *mcm, mcmanager_avail_slot slotinfo )
+{
+	// set the bit in 'ready_set', atomically
+	__sync_or_and_fetch( &mcm->ready_set, slotinfo.slot_bit );
+
+	// if too many pending, wait.
+	while( mcm->pending >= NN_MEMCPY_MANAGER_MAX_THREADS ){
+		nn_sem_wait( &mcm->done_sem );
+		mcm->pending--;
+	}
+	mcm->pending ++;
+	nn_os_work_for_vector( nn, mcmanager_work_func, mcm );
+}
+
+// This is the # of l2fetch we do on vmemcpy in the
+// 'launch' thread. The rest (if any) is done in the run thread.
+//
+#define NN_MCMANAGER_VMEMCPY_L2FETCH0 1024
+
+// this executes memcpy or memset requests.
+// This is *not* safe to call in multiple threads on the same nn_memcpy_manager
+//  for copy: src != NULL
+// for fill: src == NULL, and fillval is the *4 byte* pattern to fill with
+// (it uses vmemset_32_2d_asm as the fill engine).
+//
+void
+nn_mcmanager_vmemcpy_or_set(struct nn_graph *nn, struct nn_memcpy_manager *mcm,
+	void *dst, void const * src, unsigned len, unsigned fillval )
+{
+	unsigned copy_remain = len;
+	uint8_t * dstp = (uint8_t *)dst;
+	uint8_t const * srcp = (uint8_t const *)src;
+	unsigned short_len = 1024;		// short ops are < this
+	if( src == NULL){		// memset
+		// different threshold for fills (and we can't do if it's not all the same byte)
+		short_len = (Q6_R_vsplatb_R(fillval) == fillval)? 512: 0;
+	}
+
+	while( copy_remain > 0 ){
+		if( copy_remain < short_len){
+			if( src != NULL)
+				memcpy( dstp, srcp, copy_remain );
+			else
+				memset( dstp, fillval, copy_remain);
+			return;
+		}
+		// if >= 160K, break off min( 128K,n/2) and do the rest later
+		//
+		unsigned copynow = copy_remain;
+		if( copynow > 160*1024){
+			copynow = min_u32( 128*1024, copy_remain>>1);
+			// align the end of copy dest to multiple of 256
+			uint8_t * dend = dstp + copynow;
+			unsigned extra = (size_t)dend & 255;
+			copynow -= extra;
+		}
+		// if memcpy, issue l2fetch for  at most NN_MCMANAGER_VMEMCPY_L2FETCH0
+		// (the rest is done in the work thread)
+		if( src != NULL){
+			l2fetch( srcp, 128, 128,
+					min_i32((copynow+127)>>7, NN_MCMANAGER_VMEMCPY_L2FETCH0/128u));
+		}
+		//printf("!! %p <- %p of %u (%u left)\n", dstp, srcp, copynow, copy_remain);
+		// find a slot to use:
+		// pick the first available slot if the current
+		// copy is large; and the last if it's small.
+		unsigned avglen = mcm->avglen;
+		mcm->avglen = (copynow+avglen)>>1;
+		mcmanager_avail_slot slot = mcmanager_get_available_slot( nn, mcm, copynow <= avglen);
+		// we have allocated a slot. Fill it in and mark it ready.
+
+		struct nn_memcpy_manager_op *opp = slot.slotp;
+		if(opp==NULL)		// failed to get slot
+			return;
+		opp->dst = dstp;
+		opp->src = srcp;
+		opp->len = copynow;
+		opp->val = fillval;
+		opp->rows = 0;				// select '1-d' operation.
+
+		// - protocol to make slot ready and launch work thread.
+		mcmanager_make_ready_slot( nn, mcm, slot);
+
+		dstp += copynow;
+		if(src != NULL)
+			srcp += copynow;
+		copy_remain -= copynow;
+	}
+}
+// this is like nn_mcmanager_vmemcpy_or_set but it deals with 2d memcpy and fill.
+// it's simpler since it doesn't handle small ops directly, or break up large ones.
+// if src is NULL, it's a fill and src_stride_or_fillval is the 32-bit fill value;
+// if src is not NULL, it's a 2d copy.
+void
+nn_manager_vmemcpy_or_set_2d( int width, int height, void* dst, void const * src,
+	unsigned dst_stride, unsigned src_stride_or_fillval, struct nn_graph *nn, struct nn_memcpy_manager *mcm)
+{
+	if( src != NULL && height < 2){	// it's a 1-row 2d memcpy ?
+		if( height <= 0) return;	// it's no-row memcpy.
+		height = 0;					// this will get executed as a 1d memcpy.
+		// do the early prefetch (work thread assumes this is done for 1d memcpy)
+		l2fetch( src, 128, 128,
+				min_i32((width+127)>>7, NN_MCMANAGER_VMEMCPY_L2FETCH0/128u));
+	}
+	mcmanager_avail_slot slot = mcmanager_get_available_slot( nn, mcm,0);
+	struct nn_memcpy_manager_op *opp = slot.slotp;
+	if(opp==NULL)		// failed to get slot
+		return;
+	opp->dst = dst;
+	opp->src = src;
+	opp->len = width;
+	opp->val = src_stride_or_fillval;
+	opp->rows = height;
+	opp->dst_stride = dst_stride;
+	mcmanager_make_ready_slot( nn, mcm, slot);
+}
+//
+// this is wrapper for nn_mcmanager_vmemcpy, to handle tensors
+// Returns -1 if the output is too small.
+//
+int
+nn_mcmanager_tensor_copy(struct nn_graph *nn, struct nn_memcpy_manager *mcm,
+		struct tensor *dst, const struct tensor *src)
+{
+	unsigned copy_len = src->data_size;
+	if (copy_len > dst->max_size) return -1;
+
+	if( copy_len > 0 && dst->data != src->data )
+		nn_mcmanager_vmemcpy( nn,mcm, dst->data, src->data, copy_len);
+	dst->shape = src->shape;
+	dst->format = src->format;
+	dst->data_size = copy_len;
+	return 0;
+}
+
+void
+nn_mcmanager_wait(struct nn_graph *nn, struct nn_memcpy_manager *mcm)
+{
+	while( mcm->pending > 0 ){
+		nn_sem_wait( &mcm->done_sem);
+		--mcm->pending;
+	}
+}
+
+static void
+mcmanager_work_func( struct nn_graph *nn, void * mcmv )
+{
+	struct nn_memcpy_manager *mcm = (struct nn_memcpy_manager *)mcmv;
+	//
+	// grab one bit from 'ready_set' using compare_and_swap.
+	// get the smallest bit # if more than one.
+	unsigned set_old = mcm->ready_set;
+	int slotno;
+	unsigned set_old0;
+	unsigned slot_bit=0;
+	do{
+		slotno = Q6_R_ct0_R(set_old);
+		if( slotno >= NN_MEMCPY_MANAGER_SLOTS) goto quit;	// should not happen
+		slot_bit = 1<<slotno;
+		unsigned set_new = set_old & ~slot_bit;
+		set_old0 = set_old;
+		set_old=__sync_val_compare_and_swap( &mcm->ready_set,set_old,set_new);
+	}while(set_old != set_old0);
+	// remove data (and ownership) from the op slot before
+	// starting the copy.
+	struct nn_memcpy_manager_op const *opp = &mcm->ops[slotno];
+	void * d = opp->dst;
+	void const * s = opp->src;
+	unsigned n = opp->len;
+	unsigned fillval = opp->val;
+	unsigned rows = opp->rows;
+	unsigned dst_stride = opp->dst_stride;
+	__sync_or_and_fetch( &mcm->avail_set, slot_bit);
+	if( s != NULL){
+		if( rows == 0){		// normal memcpy
+			if( n > NN_MCMANAGER_VMEMCPY_L2FETCH0){
+				l2fetch((uint8_t const*)s + NN_MCMANAGER_VMEMCPY_L2FETCH0,
+						128,128, (n-NN_MCMANAGER_VMEMCPY_L2FETCH0+127)>>7);
+			}
+			vmemcpy_asm( d,s,n );
+		}else{
+			// 2d memcpy of rows x n, with 'fillval' as src stride
+			// use a variant with built-in prefetch strategy.
+			vmemcpy_2d_general_with_prefetch( n, rows, d, dst_stride, s, fillval);
+		}
+	}else{
+		if( rows == 0)
+			vmemset_32_2d_asm(d, fillval, n, 1,0);
+		else
+			vmemset_32_2d_general_asm(d, fillval, n, rows,dst_stride);
+	}
+   quit:
+	nn_sem_post( & mcm->done_sem );
+}
+// this is like memcpy_2d_general_asm except
+// (a) it does prefetch before each pass as needed, or once before
+//     the whole thing.
+// (b) it assumes height >=2
+static void
+vmemcpy_2d_general_with_prefetch( int width, int height,
+		void * dst, int d_stride,
+		void  const * src, unsigned s_stride )
+{
+	if( width < 1) return;
+	// how much << do we need to get src & dst both multiples of 128?
+	int Kshift = 7 - Q6_R_ct0_R( (unsigned)d_stride | s_stride | 128 );
+	int K = 1<<Kshift;
+	int npasses = min_i32( K, height);	// this is the # of passes we need.
+	uint8_t * dstp = (uint8_t*)dst;
+	uint8_t const * srcp = (uint8_t*)src;
+	unsigned src_aligned_stride = s_stride << Kshift;
+	unsigned dst_aligned_stride = d_stride << Kshift;
+	unsigned width_padded = (width+127)&~127u;
+	// prefetch strategy:
+	//  (1) if src_aligned_stride is equal to (width padded up to 128), then prefetch src as a single unit and we're done
+	//  (2) otherwise issue a 2d prefetch  on first slice, and each slice which changes the base address to a new vector.
+	//
+	int need_prefetch_per_slice = 1;
+	if( src_aligned_stride == width_padded ){
+		l2fetch( srcp, 128, 128,  (height*src_aligned_stride)>>7);
+		need_prefetch_per_slice = 0;
+	}
+	size_t srcp_prev = 0;
+	int new_vec = need_prefetch_per_slice;
+
+	for( int i = 0; i < npasses; i++){
+		int hx = (height+(K-1)-i)>>Kshift;
+		if( new_vec){
+			l2fetch( srcp, src_aligned_stride, width_padded, hx );
+			srcp_prev = (size_t)srcp;
+		}
+		if( likely(hx > 1))
+			vmemcpy_2d_asm(width, hx, dstp, dst_aligned_stride, srcp, src_aligned_stride);
+		else
+			vmemcpy_asm( dstp, srcp, width);
+		srcp += s_stride;
+		dstp += d_stride;
+		new_vec = need_prefetch_per_slice? (((size_t)srcp ^ srcp_prev) & ~127u) != 0: 0;
+	}
+}
+
+int nn_tensor_out_prepare_normal_fromshape(
+		struct tensor *dst,
+		struct shape const * shp,
+		uint32_t type)
+{
+	return tensor_out_prepare_normal_fromshape_inline( dst, shp, type);
+}
 
 //
 // 'actual function' version of this inline operation.
-struct tensor_addressing
-tensor_addressing_d32_func( struct tensor const * src)
+struct tensor_addressing __attribute__((pure))
+nn_tensor_addressing_d32( struct tensor const * src)
 {
-	return tensor_addressing_d32(src);
+	return tensor_addressing_d32_inline(src);
 }
-
 //
 // check to see if tensorA and tensorB
 // (both d32) are compatible for an elementwise operation.
@@ -61,10 +383,10 @@ tensor_addressing_d32_func( struct tensor const * src)
 // If there are compatibility flags and the corresponding bits are
 // *not* in allowed_compat, this is considered an error.
 //  e.g. A.height = 20, B.height=1 is considered a mismatch if compat_broadcast_H
-// is not in the width dimension.
+// is not in allowed_compat.
 //
 // if compat_AtoB is in allowed_compat, situations where A broadcasts to B are
-// accepted, and allowed_compat will be set in the return value when this is encountered
+// accepted, and compat_AtoB will be set in the return value when this is encountered
 // (it will only be set if the A tensor is smaller than B).
 // 'mixed' cases (e.g. (1,1,3,32), (1,5,3,1) are not accepted in any case.
 //
@@ -97,10 +419,10 @@ check_compatible_elementwise_d32(
 		int allowed_compat)
 {
 	// check formats
-	if( tensA->format.layout != NN_LAYOUT_D32){
+	if( !tensor_is_d32(tensA)){
 		return errlog(nn, "%s: 1st tensor not d32", errnm);
 	}
-	if( tensB->format.layout != NN_LAYOUT_D32){
+	if( !tensor_is_d32(tensB)){
 		return errlog(nn, "%s: 2nd tensor not d32", errnm);
 	}
 	int BtoA_ok = 1;		// ok to broadcast B to A
@@ -129,7 +451,7 @@ check_compatible_elementwise_d32(
 	// check width alignment
 	if(  ((tensA->format.width_pad[0]^tensB->format.width_pad[0])&3)!=0 ){
 		compat_tags |= compat_misalign_W;
-		if( (allowed_compat & compat_misalign_W )!= 0   && (compat_tags & compat_broadcast_W)==0){
+		if( (allowed_compat & compat_misalign_W ) == 0   && (compat_tags & compat_broadcast_W)==0){
 			return errlog(nn,"%s: width misalignment not supported", errnm);
 		}
 	}
@@ -286,6 +608,7 @@ find_concat_shape(
 // This function doesn't use any HVX ops (but it uses some hexagon 64-bit ops)
 //
 //
+#if 0 ///// not currently used - add_d32 and mul_d32 don't need this now
 uint8_t const *
 construct_broadcasted_data_d32(
 		struct tensor const * tens_in,		// tensor containing data
@@ -514,6 +837,7 @@ construct_broadcasted_data_d32(
  	 return NULL;
 }
 
+#endif
 
 //
 // This utility examines a d32 tensor, which is assumed to have a shape (1,1,w,d),
@@ -777,9 +1101,14 @@ nn_find_reduction_shape(	struct nn_node *self,struct nn_graph *nn,
 			/*
 			{
 				struct shape const *insh = &self->inputs[0]->shape;
-				printf("[%d:%d:%d:%d]->[%d:%d:%d:%d] : [%d:%d:%d:%d:%d]\n",
-						(int)insh->batches, (int)insh->height, (int)insh->width, (int)insh->depth,
+				printf("[%d:%d:%d:%d] (%d,%d,%d,%d)->[%d:%d:%d:%d] (%s): [%d:%d:%d:%d:%d]\n",
+					(int)insh->batches, (int)insh->height, (int)insh->width, (int)insh->depth,
+					reduction_dims_tensor->shape.depth >= 1 ? dims[0] : 8,
+					reduction_dims_tensor->shape.depth >= 2 ? dims[1] : 8,
+					reduction_dims_tensor->shape.depth >= 3 ? dims[2] : 8,
+					reduction_dims_tensor->shape.depth >= 4 ? dims[3] : 8,
 						(int)out_shape_p->batches,(int)out_shape_p->height,(int)out_shape_p->width,(int)out_shape_p->depth,
+						self->padding == NN_PAD_VALID? "VALID" : "SAME ",
 						generic_reduction_dims[0],generic_reduction_dims[1],generic_reduction_dims[2],
 						generic_reduction_dims[3],generic_reduction_dims[4]);
 			}*/
@@ -828,5 +1157,423 @@ int nn_generic_unary_float_op( struct nn_node *self, struct nn_graph *nn,
 	return 0;
 }
 
+
+///////////////////////////////////////////////////////////////////////////////////
+
+
+//=================================================
+// Operations on "Tensor Slice" data structure
+//=====================================================
+
+//
+// descriptor for a d32 tensor 'slice' view.
+// This describes 'before'padding of the depth dimension (0..31)
+// for height, width, no padding is described; batch_stride and height_stride are used instead,
+// and the 'data' pointer is offset according to the 'left' padding in these dims.
+// 'after' padding of the depth dimension is not given explicitly (but it's depth_total-depth_pad_before - shape.depth)
+//
+// to locate a byte at b,h,w,d:
+//     dx = d+ depth_pad_before;
+//     data + batch_stride * b + height_stride * h + d32_stride * (dx/32) + w*3 + (dx%32)
+//
+// Note, if a tensor is sliced in a depth dimension, in such a way that d32 chunks are eliminated, we trim
+// depth_total to keep padding in range 0..31 at both ends
+// Example:
+//   original tensor has depth = 68, padded 0 and 28  to a total of 96
+//   -slice extracts  34..45 in depth dimension.
+//  Resulting slice will have depth = 12, depth_total = 32, depth_pad_before = 2
+// So the original tensor has 3 chunks of 32, and the new one has one (the middle of the original);
+//  - the first chunk of 32 is skipped by adding d32_stride to the data pointer.
+//
+// def is in nn_graph_types.h
+// struct tensor_slice_d32 {
+//	struct shape shape;				// batches, height, width, depth
+//	uint16_t depth_total;			// depth total including padding (mult. of 32)
+//	uint16_t depth_pad_before;		// [0..31] add this to data to reach (0,0,0,0)
+//	uint8_t * data;					// this is 32 aligned
+//	int32_t batch_stride;			// stride between batches (multiple of vector)
+//	int32_t height_stride;				// stride between rows (multiple of vector)
+//	int32_t d32_stride;				// stride between chunks (multiple of vector)
+// };
+
+
+/*
+ * make a slice from a tensor, it encompasses the whole tensor
+ */
+int tensor_slice_from_tensor_d32( struct tensor_slice_d32  *slc, const struct tensor *tens)
+{
+	if( !tensor_is_d32(tens)) return -1;
+	slc->shape = tens->shape;
+	int32_t depth_total =  tensor_d_total_d32(tens);
+	int32_t depth_pad_before = tens->format.depth_pad[0];
+	int32_t batch_stride = tensor_batch_stride_d32( tens);
+	int32_t height_stride = tensor_row_stride_d32( tens);
+	int32_t d32_stride = tensor_d32_stride_d32( tens);
+	slc->data = (uint8_t*)tens->data
+			+ height_stride * tens->format.height_pad[0]
+		    +  32 * tens->format.width_pad[0];
+	slc->depth_total = depth_total;
+	slc->depth_pad_before = depth_pad_before;
+	slc->batch_stride = batch_stride;
+	slc->height_stride = height_stride;
+	slc->d32_stride = d32_stride;
+	return 0;
+}
+
+//
+// reduce a slice along a given dimension
+// 0,1,2,3 = batches, height, width, depth
+//
+// NOTE: this function can make a new slice by slicing an existing
+// slice, OR it can work in-place on a single slice (this is faster).
+// 'in-place' slicing is selected by slc_out == slc_in, or by slc_in == NULL.
+
+// returns:
+//   0   ok
+//  -1   bad 'dim_no'
+//  -2  lo_index/newsize out of range.
+//
+int tensor_slice_on_dimension(
+		struct tensor_slice_d32 * slc_out,			// output slice
+		struct tensor_slice_d32 const * slc_in,		// input slice (can be same slice).
+		int32_t dim_no,		// dimension to slice
+		int32_t lo_index,	// start of slice (0..size-1)
+		int32_t newsize )	// new size. 1 <= newsize <= size-lo_index
+{
+	if( slc_in != NULL && slc_in != slc_out ){
+		*slc_out = *slc_in;		// copy the source slice
+	}
+	// now we just work on slc_in...
+	int min_curr_size;
+
+	if( lo_index < 0 || newsize < 1 ||
+			__builtin_sadd_overflow(lo_index,newsize,&min_curr_size)) return -2;
+
+	// min_curr_size guaranteed to be >=1, <= MAXINT)
+
+	uint32_t * nsize_p;
+	int32_t dim_stride;
+
+	switch( dim_no){
+		case 0:		// batch
+			nsize_p = &slc_out->shape.batches;
+			dim_stride = slc_out->batch_stride;
+			break;
+		case 1:		// height
+			nsize_p = &slc_out->shape.height;
+			dim_stride = slc_out->height_stride;
+			break;
+		case 2:	// width
+			nsize_p = &slc_out->shape.width;
+			dim_stride = 32;
+			break;
+		case 3:	// depth
+			{
+				if( slc_out->shape.depth < (unsigned)min_curr_size) return -2;
+				unsigned new_dpad = slc_out->depth_pad_before + lo_index;
+				unsigned reduce_d32_before = new_dpad/32;	// # of groups to cut
+				new_dpad %= 32;
+				unsigned new_dtotal = (new_dpad + newsize + 31) & ~31;	// new total size
+				slc_out->data += reduce_d32_before * slc_out->d32_stride;
+				slc_out->depth_pad_before = new_dpad;
+				slc_out->depth_total = new_dtotal;
+				slc_out->shape.depth = newsize;
+			}
+			return 0;
+
+		default:
+			return -1;
+	}
+	// generic slicing along batch, height, width dims.
+	if( *nsize_p < (unsigned)min_curr_size) return -2;
+	slc_out->data += lo_index * dim_stride;
+	*nsize_p = newsize;
+	return 0;
+}
+
+//
+// This is used to progressively make slices of src_tensor, based on a series of
+// supplied ref_shape, along a given dimension.
+//  - src_tensor and ref_shape must agree in all dims but 'slice_dim'.
+//  - the resulting slice will have the same shape as ref_shape, but will be a slice of src_tensor.
+//  - along the sliced dimension, the slice will start at the supplied value of *slicepos_p
+//  - on return, slicepos_p will be updated to the *next* position (i.e. the size of ref_shape along
+//    the slice_dim will be added to *slicepos_p).
+//
+// *** IMPORTANT ***: if called with *slicepos_p > 0, it assumes that it has previously been
+//  called with *slicepos_p = 0, and the same slc, src_tensor, and slice_dim (i.e. much of the slice
+// is  filled in by that first call, and subsequent calls rely on that).
+// (it's also ok to use different 'slc' if it's been copied from the result of a previous call).
+// If you want to start slicing at a point other than 0, call first with *slice_pos= 0, and then change *slice_pos to something
+// else and call again. This first call can be done with ref_shape = NULL, which will not affect *slice_pos.
+//
+// return values:
+//    1 normal (and no more slices possible along the dim).
+//    0 normal
+//   -1 slice_dim out of range 0..3
+//   -2 shapes don't match along non-slice dims.
+//   -3 exceeded range of slice along slice_dim
+//   -4 src_tensor is not d32
+//
+//
+int tensor_slice_progressive_d32(
+		struct tensor_slice_d32 * slc,			// output slice
+		struct tensor const * src_tensor,		// tensor
+		struct shape const * ref_shape,			// shape to match
+		int slice_dim,							// dimension to slice along
+		int *slicepos_p							// keeps track of slice.
+)
+{
+	int slicepos = *slicepos_p;
+	if( slicepos <= 0){
+		if( slicepos != 0) return -3;
+		int k = tensor_slice_from_tensor_d32( slc, src_tensor);
+		if( k!= 0) return -4;
+		if( ref_shape == NULL) return 0;		// a 'dummy' call to set up slice
+	}
+	// compare all the dims
+	int dim_mismatch = (src_tensor->shape.depth != ref_shape->depth)?8:0;
+	if(   src_tensor->shape.width != ref_shape->width) dim_mismatch |= 4;
+	if(   src_tensor->shape.height != ref_shape->height) dim_mismatch |= 2;
+	if(   src_tensor->shape.batches != ref_shape->batches) dim_mismatch |= 1;
+	int dim_sel = 1 << slice_dim;
+
+	// dim_mismatch must be either 0 or dim_sel.
+	if( (dim_mismatch|dim_sel) != dim_sel) return ( slice_dim >=0 && slice_dim <=3)?-2:-1;
+
+	int dimsize, new_dimsize, next_slicepos;
+	// get '0' position of the tensor (excluding depth_pad_before; mult of 32).
+	uint8_t * slc_data = tensor_location_bhw_d32( src_tensor,0,0,0);
+
+	switch( slice_dim){
+		case 0:			// batches
+			dimsize = src_tensor->shape.batches;
+			new_dimsize = ref_shape->batches;
+			slc->shape.batches = new_dimsize;
+			slc_data += slc->batch_stride * slicepos;
+			break;
+		case 1:			// height
+			dimsize = src_tensor->shape.height;
+			new_dimsize = ref_shape->height;
+			slc->shape.height = new_dimsize;
+			slc_data += slc->height_stride * slicepos;
+			break;
+		case 2:			// width
+			dimsize = src_tensor->shape.width;
+			new_dimsize = ref_shape->width;
+			slc->shape.width = new_dimsize;
+			slc_data += 32 * slicepos;
+			break;
+		case 3:			// depth slicing is messier...
+			{
+				dimsize = src_tensor->shape.depth;
+				new_dimsize = ref_shape->depth;
+				unsigned new_dpad_before = src_tensor->format.depth_pad[0] + slicepos;
+				unsigned advance_d32 = new_dpad_before/32;
+				new_dpad_before %= 32;
+				slc->depth_total = (new_dpad_before + new_dimsize + 31) & ~31;
+				slc->depth_pad_before = new_dpad_before;
+				slc->shape.depth = new_dimsize;
+				// adjust for d32 sections skipped, if any
+				slc_data +=  advance_d32 * slc->d32_stride;
+			}
+			break;
+		default:
+			return -1;
+	}
+
+	next_slicepos = slicepos + new_dimsize;
+	if( new_dimsize <= 0 ||  next_slicepos > dimsize) return -3;
+	slc->data = slc_data;
+	*slicepos_p= next_slicepos;
+	return (next_slicepos == dimsize)?1:0;
+}
+
+/////////////////////////////////////////////////////////////////////
+//
+// Checksumming
+//  This is fast but reasonably strong checksum algo for debugging.
+//
+//  Based on misimplemented CRC64 (for speed, only two shifts are done between inserting
+// each byte, which compromises error-burst detection, but all bits are still included in the
+//  sum)
+// Also - it's contrived so that if input consists entirely of the same byte 'k'; the checksum
+// will be 'k'. (and as a special case, a checksum of any number of 00 byte, including none, is 0)
+//
+// This is done by:
+//    - init check to 0;
+//    - xor all incoming bytes with x0 (first byte) before applying to checksum
+//    - xor final check with x0.
+//
+
+
+
+static inline uint64_t checksum_byte_add( uint64_t prev , uint8_t newbyte)
+{
+	// this should really be done 8 times per byte, to make a proper CRC
+	uint64_t newchk = Q6_P_lfs_PP( prev, 0x000000000000001BuLL);
+	newchk = Q6_P_lfs_PP( newchk, 0x000000000000001BuLL);
+	return newchk ^ newbyte;
+}
+
+// checksum of an arbitrary area of memory
+uint64_t nn_checksum_bytes( void const * p, int n)
+{
+	uint64_t chk = 0;
+	uint8_t const * rp = (uint8_t const*)p;
+	if( n > 0 ){
+		unsigned x0 = rp[0];
+		for( int i = 0; i < n; i++){
+			chk = checksum_byte_add( chk, rp[i]^ x0);
+		}
+		chk ^= x0;
+	}
+	return chk;
+}
+
+
+//
+// checksum of a flat tensor (or, all of the data in a d32 tensor including padding
+//
+uint64_t
+nn_checksum_tensor( struct tensor const * tens)
+{
+	uint64_t chk= nn_checksum_bytes(  tens->data, tens->data_size);
+	return chk;
+}
+//
+// checksum of a d32 tensor - only include the non-padding bytes,
+// and include them in the same order as the 'flat' checksum
+//
+uint64_t nn_checksum_tensor_d32 ( struct tensor const *tens)
+{
+	uint64_t check = 0;
+	struct tensor_addressing addr = tensor_addressing_d32( tens);
+
+	int b = tens->shape.batches;
+	int h = tens->shape.height;
+	int w = tens->shape.width;
+
+	int d0 = addr.d0;	// depth_before padding
+	int dall = d0 + tens->shape.depth;
+	int nd32 = addr.nd32;
+	int d32_stride = addr.d32_stride;
+	unsigned x0 = addr.data[d0];		// first byten
+
+	for(int ib = 0; ib < b; ib++){
+		for( int ih = 0; ih< h; ih++){
+			uint8_t const *p0 = addr.data + ib *addr.batch_stride + ih * addr.height_stride;
+			for( int iw = 0; iw < w; iw++){
+				uint8_t const *p = p0 + 32*iw;
+				int da = d0;
+				for( int id32 = 0; id32 < nd32; id32++){
+					int db = min_i32(32, dall-32*id32);
+					for( int id = da; id < db; id++){
+						check = checksum_byte_add( check, p[id]^x0);
+					}
+					p += d32_stride;
+					da = 0;
+				}
+			}
+		}
+	}
+	return check ^ x0;
+}
+
+// report all the outputs of a node, by checksum (where len = 4, report the  value instead)
+static void __attribute__((unused))  dump_node_output(struct nn_graph * nn, struct nn_node const *np );
+//#define DUMP_NODE_OUTPUTS
+
+void
+nn_report_node_outputs( struct nn_graph * nn, int level, struct nn_node const *np)
+{
+	int n_out = np->n_outputs;
+	logmsg(nn,level, "Outputs for node 0x%x, type %s", np->node_id, op_type_to_string_alt(np->node_type,"??"));
+	if( np->outputs == NULL ) return;
+
+#ifdef DUMP_NODE_OUTPUTS
+	if( np->node_type == OP_Supernode_8x8p8to8_d32 || np->node_type == OP_InputSupernode_8x8p8to8_outd32
+		|| np->node_type == OP_QuantizedAvgPool_8_d32 || np->node_type == OP_QuantizedMaxPool_8_d32
+		|| np->node_type == OP_QuantizedReshape )
+	{
+		dump_node_output( nn,np);
+	}
+#endif
+
+	for( int i = 0; i < n_out; i++ ){
+		struct tensor const *ot = np->outputs[i];
+		if( ot->data_size == 4){
+			logmsg(nn,level,"  %2d : (%2d,%3d,%3d,%4d) len=4   int = %d  float=%.8g",
+				i, (int)ot->shape.batches, (int)ot->shape.height, (int)ot->shape.width, (int)ot->shape.depth,
+				(int)tensor_get_int32( ot, 0), tensor_get_float(ot,0));
+		}else{
+			uint64_t chk = 0;
+			unsigned elsize;
+			char const *strd32 = "      ";
+			if( ot->data_size > 0){
+				if( tensor_is_d32(ot)){
+					strd32 = " (d32)";
+					chk = nn_checksum_tensor_d32(ot);
+					elsize = 1;
+				}else{
+					unsigned n = tensor_element_count(ot);
+					elsize = ot->data_size/n;
+					chk = nn_checksum_tensor(ot);
+				}
+			}
+			logmsg(nn,level,"  %2d : (%2d,%3d,%3d,%4d) elsize=%u  %s Chk=0x%016llX",
+				i, (int)ot->shape.batches, (int)ot->shape.height, (int)ot->shape.width, (int)ot->shape.depth,
+				elsize, strd32, (unsigned long long) chk);
+		}
+	}
+}
+
+static void
+dump_node_output(struct nn_graph * nn, struct nn_node const *np )
+{
+#ifdef DUMP_NODE_OUTPUTS
+	unsigned node_id = np->node_id;
+	char filename[256];
+	snprintf(filename, sizeof(filename), "dsp_%08X.bin", node_id );
+
+	FILE *fout = fopen(filename,"wb");
+	if( fout == NULL){ perror(filename); return; }
+	struct tensor const *ot = np->outputs[0];
+
+	printf("writing %s ...\n", filename);
+	if( !tensor_is_d32(ot)){
+		fwrite( ot->data, 1, ot->max_size, fout);
+	}else{
+		struct tensor_addressing tin = tensor_addressing_d32(ot);
+		struct shape oshape = ot->shape;
+
+		uint8_t const * base = tin.data;
+
+		for( int ib = 0; ib < oshape.batches; ib++ ){
+			for( int ih = 0; ih < oshape.height; ih++ ){
+				for( int iw = 0; iw < oshape.width; iw++ ){
+					uint8_t const * rp = base + ib * tin.batch_stride + ih *  tin.height_stride + iw*32;
+					int dremain = oshape.depth;
+					while( dremain > 0){
+						int dx = min_i32( 32, dremain);
+						fwrite( rp, 1, dx, fout);
+						rp += tin.d32_stride;
+						dremain -= dx;
+					}
+				}
+			}
+		}
+	}
+	fclose(fout);
+	snprintf(filename, sizeof(filename), "dsp_%08X.range", node_id );
+
+	fout = fopen(filename,"wb");
+	if( fout == NULL){ perror(filename); return; }
+	float out_min = tensor_get_float(np->outputs[1],0 );
+	float out_max = tensor_get_float(np->outputs[2],0 );
+	fprintf(fout, "%.12g, %.12g\n", out_min, out_max);
+	fclose(fout);
+#endif
+}
 
 

@@ -1,0 +1,94 @@
+
+/*
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted (subject to the limitations in the
+ * disclaimer below) provided that the following conditions are met:
+ *
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *
+ *    * Redistributions in binary form must reproduce the above
+ *      copyright notice, this list of conditions and the following
+ *      disclaimer in the documentation and/or other materials provided
+ *      with the distribution.
+ *
+ *    * Neither the name of The Linux Foundation nor the names of its
+ *      contributors may be used to endorse or promote products derived
+ *      from this software without specific prior written permission.
+ *
+ * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
+ * GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
+ * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+ * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+ * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ */
+
+
+===============================================
+How the weights are arranged for the supernode
+===============================================
+
+On input, the weights are flat 4-d tensor of u8, with the following shape
+
+		[---height---] [---width---] [--depth--] [--batches---]
+	
+ (the indices to the right increase faster as you go through the array linearly)
+ The 'depth' dimension matches the depth of the input to the convolution; 'batches' is the output depth.
+ 
+ Conversion of the weights to the internal form *conceptually* involves two steps:
+   (1) pad depth and batches out each to a multiple of 32 (if necessary)
+   (2) 'tranpose' the data (rearrange the order of the indices)
+   
+After the batch depth are padded, we can consider the data to be a linear tensor with this shape:
+		[---height---] [---width---] [--padded_depth --] [--padded_batches-]
+		
+Which we can simply repartition into 7 array indices (without rearranging the data)	
+		[---height---] [---width---] [--dephi| depmid| deplo--] [--bathi-|-batlo-]
+
+Here the padded_depth has been broken up into three sections, of these sizes:
+		dephi = padded_depth/32,
+		depmid = 8
+		deplo = 4
+while padded_batches has been broken into two:
+	bathi = padded_batches/32
+	batlo = 32
+
+This 7-dimensional tensor data is then rearranged so that the indices are in this order:
+
+[-bathi-] [---height---] [--dephi--] [--width--] || [depmid] [-batlo-][deplo]
+                                                 ||    8         32      4
+
+Since the last 3 dimensions are of these fixed sizes, the first four dimensions select an aligned chunk
+of size 1024 bytes, containing a 32x32 "tile" of a particular [h,w] section of the weights. Each of
+8 vectors in the chunk contains a slice of 32 batches, 4 depth.
+
+The transformation from the original form to this form is actually done in one pass, without creating the intermediate
+'padded linear' form. The 'padding' values are set to the 'zero code' for the particular quantization scheme being used, and the 'sumb' of the
+filter includes these 'zero' values.
+
+If the original 'batches' is not a multiple of 32, the padding values in the 'batches' dimension exist at the highest 'bathi' index,
+towards the higher indices of batlo.
+
+For the depth dimension, the padding is in the largest 'dephi' index, at higher indices of depmid; if the original depth is not
+a multiple of 4, there will be padding of 1..3 in 'deplo'.
+Example, depth = 141 = 4*32 + 3*4 + 1
+padded_depth= 160 = 5*8*4    (so dephi is of size 5)
+  dephi= 0..3: full (32 values each)
+  dephi = 4:  13 values + 19 padding
+  		depmid indices 0..2:  full, four values each
+  		depmid = 3 :   final depth value at deplo = 0;  deplo= 1..3 are padding
+  		depmid = 4..7:  four padding each.
+  		
+  		
+  		

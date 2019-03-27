@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -229,7 +229,7 @@ maxpool_slice_hvx_3x3_stride1:
     .size maxpool_slice_hvx_3x3_stride1, .-maxpool_slice_hvx_3x3_stride1
 /*=============================================================================*/
 
-
+#if 0 //////////////////////////// >>>> MOVED TO maxpool_3x3s2_d32.S >>>>>>>>>>>>
 /*
  * Redo these.  EJP did horizontal max and then vertical.  That's dumb.  
  * We should do vertical first and then horizontal since the horizontal is more expensive.
@@ -490,6 +490,9 @@ maxpool_slice_hvx_3x3_stride2:
 		jumpr r31
 	}
 	.size maxpool_slice_hvx_3x3_stride2,.-maxpool_slice_hvx_3x3_stride2
+
+#endif //////////////////////////// <<<<< MOVED TO maxpool_3x3s2_d32.S <<<<<<<<<<<
+
 
 #if 1
 /*======================================================================*/

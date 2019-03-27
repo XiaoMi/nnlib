@@ -1,0 +1,492 @@
+
+===========================================
+===========================================
+Notes on adding code to prepare.c 
+===========================================
+===========================================
+( a work in progress, but a good start...)
+
+The 'prepare' process consists of these steps:
+
+ (1) make sure all nodes are in the hash (which is used to map node_id to a node pointer)
+ (2) a series of passes which perform graph transformations
+ (3) cleanup passes, including
+      - dead node removal :all nodes which have no used outputs (with certain exceptions)
+	      are removed, until no such nodes exist. There is also a dead node removal pass
+		  within step (2)
+      - const nodes are brought to the front of the list so they don't need to be executed.
+	  - the 'inputs' pointers (to tensors) on nodes are pointed to the proper outputs
+	  - memory is allocated to all tensors
+	  - the 'check' methods on nodes are called
+	  
+This document concerns the operations in step (2) - the optimization passes.
+Conditions are not the same as when execute methods are called:
+   - node->inputs and node->outputs (pointer to tensors) should not be accessed
+     except for 
+	   (a) Const nodes, which have valid output tensors attached to them when they are created; and 
+	   (b) output tensor *shapes* on non-Const nodes (which reflect the max allocated shape;
+ 	       actual runtime shape could be different). Data pointers are usually NULL.
+   - graph connectivity is expressed via each node's input_refs[] array, which gives the src_id and output_idx
+     identifying a node output.
+   - in 'op' nodes, node->output_defs[idx].rank and .max_sizes[] may be examined to find out what
+     dimensions the graph has specified for node outputs; the node->output[idx].shape will have been
+     set up in a consistent way ('depth' being the last dimension, according to 'rank'). 
+	 
+The following invariants must be maintained:
+   (a) All nodes referenced in a node's inputs must exist and must be earlier in the list
+   (b) Each node must have a unique id;
+   (c) the set of nodes in the list must be the same set which is known to the find_node hash
+   (d) each node has a 32-bit 'noderefhash' value which is used to help search for input refs. This must
+      be consistent with the contents of the node's input_refs array.
+	 
+   (c) and (d) are maintained by the various utility functions below.	 
+	There is a function check_graph which is called a few times during prepare, it checks all of these
+	invariants, and a few other things, when debug_level >=1. So it is good to test mods with debug_level>0,
+	and see if any errors occur.
+	
+========================================================
+Classes of Modifications
+========================================================
+Most optimizations consist of three phases, applied at each node:
+  [A] determine if there is a match for the particular pattern; and if so,
+      extract all of the relevant information needed to make the change.
+      This stage doesn't channge the graph at all; so if anything is found which
+	  means we can't apply the change, th node can just be skipped over.
+  [B] build any new nodes which are needed; these are constructed with assigned node_id's
+      and with inputs connected to upstream nodes in the graph (or to other new nodes in
+      the pattern).
+  [C] apply the change: insert the new node(s) and maybe remove some existing nodes
+      There are several utility functions which can used here to make the change in
+	  one step while maintaining the invariants. 
+
+
+There are three basic types of change which can be made in the graph:
+
+(1) adding a new const node. This is generally a sub-operation in phase [B]; if you don't
+     add a reference to the new const, it will be removed later. There are some utilities
+	 to make it easier to add new consts.
+(2) Bypass some part of the graph. If we find AutoQuantize->Dequantize, then this can
+    be bypassed; all of the inputs which reference the output of the 'Dequantize' can
+	be reconnected the same as the input of the AutoQuantize. This is done by
+	searching and modifying the input_refs[] arrays of all the downstream nodes;
+	there are some utility functions to do that efficiently while maintaining the noderefhash.
+	You don't need to remove the Dequantize; it will be deleted later as a dead node, and
+	the AutoQuantize could be removed too, if its output is not used elsewhere.
+	
+(3) More complex 'pattern replacements'. In such cases, a pattern of one or more nodes is
+    found, and then replaced by one or more new nodes. Usually, one of the new nodes will
+	'inherit' the node ID of one of the removed nodes; other nodes are given auto-generated
+	node ids.	
+	In this situation, the new nodes are build with their input references properly set up,
+	and then the replacement is done in one step. Sometimes, downstream nodes need to have
+	inputs rewired, as in (2) above.
+	During the phase [A] of such an operation, you need to make sure that any nodes you
+	are going to remove do not drive any other inputs outside the pattern.
+	
+	
+========================================================================
+Functions
+========================================================================
+---------------------------------------------
+Functions to look up a node based on node id
+---------------------------------------------
+struct nn_node * find_node( nn , node_id );
+
+  This finds a node given its ID; returns NULL if not found
+
+  The following shortcuts are provided to simplify common uses of find_node:
+
+	struct nn_node * find_node_must_be( nn , node_id, type_needed);
+	  - same as find_node, but will also return NULL if the node's node_type is not type_needed
+	  
+	struct nn_node * find_node_must_be_Const( nn , node_id);
+	  - same as find_node, but will also return NULL if the node's node_type is not OP_Const
+	  
+	struct nn_node * find_node_must_be_Const_from_ref( nn , struct input const *inref);
+	  - same as find_node_must_be_Const, but it reads the node id from inref->src_id; and
+	    first checks that inref->output_idx is 0, and will return 0 otherwise.
+
+---------------------------------------------------
+Functions to search downstream for 'consumer' nodes
+---------------------------------------------------
+These are useful in stage [A] of a transformation, to locate nodes which form
+part of a pattern, and to check the conditions needed by the pattern.
+
+struct nn_node* find_unique_consumer_anytype(nn, struct nn_node *src, int flags )
+	This returns the 'unique consumer' dst of  srcnode, which is the only node such that:
+	   (1) no output of src is connected to any node other than dst
+	   (2) no inputs of dst are connected to any outputs other than src, or const nodes.
+	   
+	If no such node exists, it returns NULL.
+	If flags includes CONSUMER_NOINCHECK, then condition (2) is not checked (consumer may
+	have inputs connected to outputs of other operation nodes).
+	
+struct nn_node* find_unique_consumer_mustbe(nn, struct nn_node *src, int optype, int flags )
+	Just like find_unique_consumer_anytype, except that it will return NULL if dest is not
+	of the given type.
+	
+struct nn_node* find_unique_consumer(nn, struct nn_node *src, int narr, int const *arr, int flags )
+	Just like find_unique_consumer_anytype, except that it will return NULL if the node_type of dest
+	is not present the supplied array of candidate types: arr[0...narr-1]
+
+int check_single_consumer_all( nn, struct nn_node *producer, struct nn_node *consumer);
+
+	'producer' and 'consumer' are two nodes in the graph.
+	returns 0 iff
+		- 'consumer' has at least one input connected to an output of producer
+		- no other node has inputs connected to output of producer
+	returns -1 otherwise
+
+int check_all_outputs( nn, struct nn_node *producer, struct nn_node *consumer);
+
+	check_all_outputs is an alias for check_single_consumer_all, defined in prepare.c
+	
+	
+----------------------------
+Functions to add const nodes
+----------------------------	
+--> You can't change the data in a const node, unless you've first established that it's not connected to
+the input of other nodes (e.g. by using check_all outputs). And even then, if you change it you should call 
+purge_const_cache(nn, node_id_of_the_const_node_you_channged), to make sure it's not in the cache used by
+create_const_float_op and create_const_int32_op. 
+	
+To add a const node with a single 'int32' or 'float' scalar value (shape = (1,1,1,1), len=4) use one
+of :
+
+	uint32_t create_const_float_op(struct nn_graph *nn, float floatval);
+	uint32_t create_const_int32_op(struct nn_graph *nn, int32_t intval);
+
+    These functions return a node id.
+    These functions 'cache' values, to try to share a const node over multiple uses.
+	( 0,-inf and inf are always cached; other values on a 'best effort' basis).
+	When needed they use do_prepend_const_node (see below) to make a new const node.
+    if the node can't be created, they log a message and return 0.
+	
+    uint32_t get_zero_node(nn)
+    uint32_t get_ninf_node(nn)
+    uint32_t get_inf_node(nn)
+    - shorthand for create_const_float_op(nn,x) where x = 0.0, -inf, inf
+  
+To make a node of general size, shape, contents:
+    - first use 
+	   uint32_t node_id = nn_graph_new_internal_node_id(nn); 
+  .. to get a new node id; then use
+		 
+	int do_prepend_const_node(
+		struct nn_graph *nn,
+		uint32_t node_id,
+		uint32_t batches, uint32_t height, uint32_t width, 	uint32_t depth,
+		const uint8_t *data, uint32_t data_len)
+
+    Returns 0 on success.
+	This is like an append_const_node API call, except the new node is placed
+	 at the start of the list, so it can be referenced from  any op; and it is added to the hash.
+	- the data_len can be 0, to make an empty ('shape only') node; data should be NULL.
+	- if data_len >0 but data==NULL:
+	    the node will be created and allocated with the given size of data, but is not
+		initialized. Use find_node(nn,node_id) to locate it so you can fill it in after
+		creating it.
+
+-----------------------------------------------
+Functions to reconnect inputs of existing nodes
+-----------------------------------------------
+
+These functions are used to modify the 'input_refs' fields of downstream nodes,
+to connect them to different outputs. The noderefhash values are updated as needed.
+( ideally you can find a function here that does all the remapping you need to do in
+one pass, to reduce the time spent traversing the list).
+
+It's also possible to just 'manually' modify one or more of the input_refs of a node - whether
+the node is in the graph yet or not, provided:
+   (1) the new reference id is valid (id !=0, and is earlier in the graph; and output_idx
+       is a valid output for the node
+   (2) if you change (or may have changed) any of the .src_id on a node, call node_rehash_inputrefs( node*)
+       to update the noderefhash, otherwise the find_.._consumer and similar functions could fail.
+       node_rehash_inputrefs() is quite low-cost.
+  The functions below update the noderefhash automatically (but the condition [1] above is still up to you).
+
+
+ int change_output_refs( struct nn_graph * nn,
+		struct nn_node * begin,	
+		uint32_t old_nodeid,
+		uint32_t new_nodeid,
+		uint64_t pattern );
+		- this looks through the list starting from node 'begin' (or the whole list, if begin is NULL)
+		   looking for nodes whose inputs reference 'old_nodeid'. These inputs are reconnected to an output
+		   of new_nodeid; the index is mapped according to 'pattern', see below.
+		   
+	  NOTE: this returns <0 on error, or >=0 indicating the number of replacements done.
+	  The pattern is used to remap the output index of the reference as below:
+	      When we find an input ref with { src_id = old_nodeid, output_idx = i }:
+			 nybble = (i>=16)? 0 : (( pattern >> 4*i) &0xF);
+			 if( nybble == 0 ) {**error**}
+			 else if( nybble ==0xF) { /*don't change it */}
+			 else { change ref to { src_id = new_nodeid, output_idx=(nybble-1) } }
+			 
+	   for instance, pattern = 0xF321 means:
+			any input reading from old_nodeid outputs 0,1,2 are remapped to new_nodeid, same output;
+			any input reading from old_nodeid output 3 is unchanged;
+			any input reading from old_nodeid output >=4 results in an error.
+	  
+
+int change_multi_output_refs_table( struct nn_graph * nn,
+		struct nn_node * begin,	
+		uint32_t old_nodeid,
+		int n_outputs,					// number of outputs to rewire
+		struct input const new_inpref[] )  // array of new
+
+
+   This is for rewiring when a single node has been arbitrarily replaced
+   by several nodes which supply the results previously generated by 'old_nodeid'.
+   'new_inpref[0..n_outputs-1]' is a table of size n_outputs which contains the replacements. 
+    
+    Operation is:
+     -- start at 'begin' (or whole list, if NULL)
+     -- look for all node input refs of the form { old_nodeid, idx }
+           where idx is in range 0 .. n_outputs-1
+     -- change these to new_inpref[idx],  
+        but in cases where newnodes[idx].src_id = 0, existing reference are not changed.
+
+int change_multi_output_refs( struct nn_graph * nn,
+		struct nn_node * begin,
+		uint32_t old_nodeid,
+		int n_outputs,					// number of outputs to rewire
+		struct nn_node const * newnodes[] )  // array of new nodes to point to [0..n_outputs-1]
+		
+   This is used when a node with multiple outputs has been converted to d32, and we need to
+   remap all references to the node to point to the 'from_d32' nodes. But it could have other
+   uses. newnodes[0..n_outputs-1] is a table of struct nn_node * (NULL pointers are allowed, and
+   they don't need to be in the graph yet, they just need a valid node_id)
+
+    Operation is:
+     -- start at 'begin' (or whole list, if NULL)
+     -- look for all node input refs of the form { old_nodeid, idx }
+           where idx is in range 0 .. n_outputs-1
+     -- change these to { newnodes[idx]->node_id, 0 }  
+        but in cases where newnodes[idx]==NULL, existing reference are not changed.
+		
+
+-----------------------------------------------
+Functions to replace parts of the graph
+-----------------------------------------------
+Three functions for making local graph transformations.
+The first function removes 1 or more nodes from the graph, optionally replacing it by a
+single node. The second (optionally) removes 1 node, and replaces by 1 or more nodes.
+The third inserts one or more nodes at a given position.
+These are done in such a way as to maintain the hash; also, all 'removed' nodes are 
+deallocated. Please read carefully:
+
+The following apply to all three functions:
+
+(1) These are #define, using __VARARGS___. The direct function calls are useful
+   when the number of nodes to be passed is variable at runtime; they accept a pointer
+   to a table of nn_graph *, and a table length. See nn_graph.h for details.
+(2) Each has an 'anchor' parameter, which generally points to an nn_node *
+   within the linked-list; if NULL, the address of the list head is used. When you
+   are deleting at least one node, this is the point at which it will start
+   looking for the first node to delete. If you are not deleting any nodes, then
+   this is where the new node(s) will be inserted.
+(3) The nodes passed as 'new_node' or 'add_node1' etc, must be newly constructed nodes
+  (not already in the list); in cases where more than one is passed, they must all
+   be distinct. These nodes will be added to the list.
+(4) Nodes passed as rm_node, rm_node1 etc must be nodes already in the list (which
+   will be removed from the list *and* deallocated).
+
+
+-->>> replace_nodes: generally this 
+	(1) finds rm_node1, starting from 'anchor' as described above;
+	(2) removes rm_node_1, and rm_node2,... from the list. If more than one,
+	    they MUST be in the order specified (but it's OK if there are other
+		nodes between them in the list; these won't be removed).
+	(3) inserts new_node at the position where rm_node1 was found.
+	(4) updates the node_id hash tables. It is ok if new_node has the same id as
+	    one of the removed nodes. Removed nodes are deallocated.
+	(5) returns 0 if ok, <0 if error
+	
+	Other capabilities:
+		- 'new_node' may be NULL, in which case the function will only delete the
+		  nodes specified in rm_node1, ...
+		- any of the rm_node2, ... may be NULL. These are skipped over and ignored.
+	       The first, rm_node1, may not be NULL.
+		   
+  int replace_nodes(
+		struct nn_graph *nn,
+		struct nn_node ** anchor,	// list anchor, at rm_node1 or upstream
+		struct nn_node * new_node,	// replacement node (may be null)
+    	struct nn_node * rm_node1, *rm_node2, ...);
+
+-->>> replace_node_with: generally this 
+	(1) finds rm_node, starting from 'anchor' as described above;
+	(2) removes rm_node from the list
+	(3) inserts add_node1, add_node2... at the position where rm_node was found.
+	    They will be in that order and contiguous in the list.
+	(4) updates the node_id hash tables. It is ok if one of the add_node has the 
+	    same id as the removed node. Removed nodes are deallocated.
+	(5) returns <0 if error, or the number of nodes inserted (>=0)
+
+	Other capabilities:
+		- 'rm_node' may be NULL, in which case the function will just add the nodes
+		  specified in add_node1; they will be added at the point specified by anchor 
+		  (see also insert_nodes())
+		- any or all of the add_node1, ... may be NULL. These are skipped over and ignored.
+	       
+  int replace_node_with(
+		struct nn_graph *nn,
+		struct nn_node ** anchor,
+		struct nn_node * rm_node,
+    	struct nn_node * add_node1, *add_node2, ...);
+
+-->>> insert_nodes:
+	(1) inserts add_node1, add_node2... at the position specified by anchor.
+	    They will be in that order and contiguous in the list.
+	(2) updates the hash node_id hash table.
+	(3) returns <0 if error, or the number of nodes inserted (>=0)
+     This is identical to calling replace_node_with, with rm_node = NULL.
+		- any or all of the add_node1, ... may be NULL. These are skipped over and ignored.
+
+  int insert_nodes(
+		struct nn_graph *nn,
+		struct nn_node ** anchor,
+    	struct nn_node * add_node1, *add_node2, ...);
+
+========================================================================
+Order of Optimization Passes
+========================================================================
+
+The order is important, since some passes map certain patterns to simpler
+patterns which are recognized by later passes. But roughly the order is
+   - simplification of certain operations (e.g. more complex patterns which can convert
+      to AutoQuantize, or QuantizeDownAndShrinkRange_32to8)
+   - There is a pass which converts QuantizedAdd_8p8to32 to QuantizedBiasAdd_8p8to32
+     in cases where this makes sense;
+   - A very important pass is 'make_supernodes'; this is where supernode patterns
+     are detected and changed to supernodes
+   - This is followed by some passes that do various specific things
+   - Another important pass - convert_to_depth32 - which converts many nodes
+     to d32 format.
+   - A few cleanup passes after. 'Fake Concat' are created in one of these.
+
+ New operations will be inserted before or after the make_supernodes' pass,
+ according to how they interact with supernodes; and most likely before the convert_to_depth32
+ pass, unless the pass specifically needs to be after. Most "normal" graphs will not
+ have any _d32 ops in them before the convert_to_depth32 pass (graphs made for testing
+ often do).
+
+ There are a set of 'class' flags in nn_graph.h which are used to tag operations
+ in certain classes; during the early stages of optimization, an 'or' of these
+ is made, so that if a certain class of node doesn't exist at all, an entire pass can be
+ skipped. Before adding such a flag for a new node, consider whether it can
+ be included in that of an existing class.
+
+
+The code which runs the passes looks like this (excerpt):
+
+	OPTIMIZE_PERF(4)
+	if ((err = remove_unnecessary_quants(nn)) != 0) return err;
+	OPTIMIZE_PERF(5)
+	if ((err = remove_unnecessary_dequant_quants(nn)) != 0) return err;
+	OPTIMIZE_PERF(6)
+	if( (nn->op_class_set & NN_NODE_FLAG_CLS_CHANSHUFFLE)!= 0){			// any QuantizedChannelShuffle_8 ?
+		if ((err = combine_chanshuffle(nn)) != 0) return err;
+	}
+
+Here, the 'combine_chanshuffle(nn)' pass is only run if nodes marked NN_NODE_FLAG_CLS_CHANSHUFFLE
+are in the list.
+
+     *********************
+     ****  IMPORTANT  ****
+     *********************
+The OPTIMIZE_PERF() macros save the cycle counts between each in a table to help understand
+how long the passes take; by default this is completely #ifdef'd out, and is not frequently used. 
+If you add a new pass please DO NOT add a new OPTIMIZE_PERF() to separate it from the
+existing adjacent passes. The necessary changes to the rest of the function clutter the diffs and
+are very likely to cause merge conflicts.
+
+========================================================================
+check_graph
+========================================================================
+Amongst the optimization passes you will see lines like this
+	CHECK(GRAPHCHECK_HASH)  OPTIMIZE_PERF(-1)
+... the CHECK expands to 
+   if ((err= check_graph(nn,(GRAPHCHECK_HASH)))!=0) return err;
+(the OPTIMIZE_PERF(-1) is so that the time calling check_graph is not attributed
+ to the following optimization pass).
+
+'check_graph' is defined in graph_check.c; it does nothing unless debug_level>=1
+ since it is quite time-consuming. The parameter is a set of or'd flags which indicates
+ what should be be checked:
+     GRAPHCHECK_HASH          - check find_node hash is consistent
+     GRAPHCHECK_DEADNODES     - report 'dead' nodes (only used after remove_dead_nodes)
+     GRAPHCHECK_NONCONST      - report any nodes out of place wrt nonconst_head_ptr (only used at end)
+
+     Even with flags=0, it will check the following (note that some failures will
+     cause it to abandon further checking):
+ 
+    - list is valid (no 'loop'; and 'tail' is within the list, node_count is correct)
+    - all nodes have distinct ids
+    - Each input reference must refer to a valid output of a node which is earlier
+      in the list. This is done without using the find_node hash.
+    - Each node's noderefhash is consistent with the input_refs.
+
+  with GRAPHCHECK_NONCONST:
+    - nn->nonconst_head_ptr must be in list; all prior nodes must be Const; all
+      nodes at and after this point must be non-const.
+
+  with GRAPHCHECK_DEADNODES:
+    - each node must have at least one consumer (except for 'exempt' nodes: those
+      with NN_NODE_FLAG_RETAIN; this includes all nodes with n_outputs = 0, plus
+      a few special things like Assign). This is not considered an error; only
+      a log message is produced.
+
+  with GRAPHCHECK_HASH:
+    - check that all nodes in the find_node hash are actually in the list.
+      If there are nodes in the list which are not in the hash, this is not considered an
+      error (they will still be found, but more slowly). But if debug_level > 2, a
+      message is always printed like this, indicating how many are in the hash:
+        hash ok; 205 of 205 nodes are in hash
+
+If you are testing a fairly complex graph transformation, it is a good
+idea to temporarily insert a call to check_graph_check( nn, GRAPHCHECK_HASH) immediately
+after your pass, and run with debug_level >= 1.
+
+if hexagon_nn is built with NN_LOG_MAXLEV <=0, the check_graph function 
+is entirely omitted from the build.
+
+Note: 
+ (1) the nn->tail is a 'weak' tail: it may be null, or it may point to any node
+     on the list. Attempts are made to keep it near the end for faster 'append'.
+     graph_check only complains if it doesn't meet the weak requirements.
+ (2) nn->node_count is defined as an unreliable indication of the number of nodes
+     in the list; it will be correct if the utility functions are used to remove &
+     insert nodes. But no code relies on it being accurate. graph_check will always
+     log a message if it does not match the actual count (and if debug_level > 0).
+
+========================================================================
+Etc
+========================================================================
+ 
+ When making a replacement pattern, 'output_defs' arrays need to be created
+ for new nodes. These can usually be copied from the output_defs
+  of nodes being replaced; for cases where this not true, they can be filled
+ out as needed (e.g. maybe copy one but then change elementsize). 
+ There is a function make_outputdesc_from_shape which will fill one in based
+ on a shape and elementsize; the fourth paramater is a flag which was used 
+ to indicate when the 'sizes' array needed to be expanded for d32 support; 
+ however, this expansion is no longer necessary and the parameter is ignored.
+
+ For the common case where an output will contain a scalar float, you
+ can copy that desc from the constant struct value Output_ScalarFloat
+
+ The prepare.c file is thousands of lines. If you need an operation that
+ requires a lot of code specific to a single node type, consider putting
+ it in a separate file (unfortunately, a few of the functions described above
+ are not available outside prepare.c -- probably we should have an nn_prepare.h)
+ An example: hexagon/src/metanode_lens_lstm.c
+
+ Code cleanups, other than minor ones, in prepare.c are generally tricky due to
+ the potential of creating a conflict with another branch, or the risk of creating
+ an unintended side effect. Generally, if you add code which only runs when a certain
+ (new) node type exists, the risk of breaking (or impairing) existing graphs should
+ be low.
+
+

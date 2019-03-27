@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -51,6 +51,7 @@
 #define MAX_THREAD (2)   //Works only for thread 2 and less
 #define ALIGN_SIZE 128
 #define NUM_BYT_PERVECTOR (ALIGN_SIZE)
+#define ROUNDUP(X) (((X) + ALIGN_SIZE - 1) & (~((ALIGN_SIZE)-1)))
 #define NUM_BYT_PERVECTOR_MASK (NUM_BYT_PERVECTOR - 1)
 #define MAXPAD (ALIGN_SIZE)
 //#define  DEBUG_PRINT_PRELU_REF_PERFORMANCE
@@ -106,6 +107,9 @@ static int prelu_execute(struct nn_node *self, struct nn_graph *nn)
 	uint32_t i,j,idx;
 	float in_min = tensor_get_float(in_min_tensor,0);
 	float in_max = tensor_get_float(in_max_tensor,0);
+	if (nn_scratch_grow(nn,sizeof(float)*alpha_depth)){
+		return errlog(nn,"failed to get scratch");
+	}
 	float *alpha = nn->scratch;
 	uint8_t quantized_zero = quantize_uint8(0.0f,in_min,in_max);
 	//uint32_t alpha_frac = (1<<16) * alpha;
@@ -480,7 +484,7 @@ void hvx_intr_prelu_circ(struct nn_graph *nn, void *vinfo)
 //
 void prelu_1D_alpha(uint8_t *in_data, uint8_t *out_data, float *alpha, uint32_t quantized_zero,size_t bytes , size_t alpha_depth ,struct nn_node *self, struct nn_graph *nn)
 {
-
+	//If you're changing any of the sizes here, please update them in prelu_execute_hvx
 	uint8_t  *alpha_frac1   = pad_and_align(alpha, sizeof(float)*alpha_depth+2*NUM_BYT_PERVECTOR);
 	uint8_t  *alpha_frac2   = pad_and_align(alpha_frac1,   alpha_depth+2*NUM_BYT_PERVECTOR);
 	uint8_t  *alpha_offset1 = pad_and_align(alpha_frac2,   alpha_depth+2*NUM_BYT_PERVECTOR);
@@ -716,6 +720,20 @@ static int prelu_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	uint8_t *out_data = out_tensor->data;
 	float in_min = tensor_get_float(in_min_tensor,0);
 	float in_max = tensor_get_float(in_max_tensor,0);
+
+	//values obtained from prelu_1d_alpha
+	size_t alpha_size = (sizeof(float)*alpha_depth+2*NUM_BYT_PERVECTOR);
+	size_t temp16_al_size = (sizeof(uint16_t)*alpha_depth);
+	size_t alpha_frac_size = (alpha_depth+2*NUM_BYT_PERVECTOR);
+	size_t alpha_offset_size = (alpha_depth+2*NUM_BYT_PERVECTOR);
+	size_t buf_pad_size = (2*NUM_BYT_PERVECTOR);
+	size_t total_size = ROUNDUP(alpha_size) + ROUNDUP(alpha_frac_size)*2 + 
+		ROUNDUP(alpha_offset_size)*2 + ROUNDUP(buf_pad_size)*2 + ROUNDUP(temp16_al_size);
+
+	if (nn_scratch_grow(nn,total_size)) {
+		return errlog(nn,"failed to get scratch");
+	}
+
 	float *alpha = nn->scratch;
 	uint8_t quantized_zero = quantize_uint8(0.0f,in_min,in_max);
 	uint32_t j;
@@ -731,7 +749,7 @@ static int prelu_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 
 	for(j =0; j <  alpha_depth; j++) {
 		alpha[j] = tensor_get_float(in_alpha_tensor,j);
-		printf("Check Alpha \n");
+		//printf("Check Alpha \n");
 		if (alpha[j] < 0.0f) return errlog(nn,"negative alpha %f, %d", alpha[j],j);
 		if (alpha[j] > 1.0f) return errlog(nn,"alpha must be <= 1.0f");
 	}

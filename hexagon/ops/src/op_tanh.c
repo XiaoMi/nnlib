@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -42,8 +42,11 @@
 #if defined(__hexagon__)
 #include "hexagon_types.h"
 #endif
-#include <op_tanh.h>
+
 //#define TEST_PERFORMANCE
+
+// this does (slow, reference) 8-bit quantized tanh and sigmoid functions.
+// The two are the same except for changes in input and output scaling.
 
 static int qtanh_execute_ref(struct nn_node *self, struct nn_graph *nn)
 {
@@ -61,12 +64,40 @@ static int qtanh_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	float inval,tmpval,outval;
 	float in_min = tensor_get_float(in_min_tensor,0);
 	float in_max = tensor_get_float(in_max_tensor,0);
-	float stepsize = (in_max - in_min)/255.0f;
+	float stepsize = flt_div_255(in_max - in_min);
 
-	logmsg(nn,2,"tanh execute. self=%p ",self);
+	logmsg(nn,2,"tanh/sigmoid execute. self=%p ",self);
 	if( tensor_out_prepare_normal_fromshape( out_tensor, &in_tensor->shape, NN_TYPE_QUINT8)!= 0){
 		return errlog(nn,"out too small");
 	}
+
+	// datapath is:
+	//       tmp = tanh( in[i]*ingain + inoffs );
+	//       out = (tmp + 1.0)*outgain;
+	// with ingain, inoffs, outgain depending the function we're doing
+	// and the input range.
+	//
+	float ingain = stepsize;
+	float inoff =  in_min;
+	float outgain;
+	float out_min, out_max;
+
+	int is_sigmoid = (self->node_type == OP_QuantizedSigmoid_8_ref);
+	if( is_sigmoid){
+		ingain *= 0.5f;
+		inoff *= 0.5f;
+		// we want 0.5*(1+tanh)*255   = (tanh+1)*(255/2)
+		outgain = 255.0f*0.5f;
+		out_min = 0.0f;
+		out_max = 1.0f;
+	}else{
+		// range is -1.0 to 1.00787 (128/127)  (zero code = 127)
+		// so scaling is (tanh+1)*(254/2)  -- max output code is 254.
+		out_min = -1.0f;
+		out_max = 128.0/127.0;
+		outgain = 127.0f;
+	}
+
 
 #ifdef TEST_PERFORMANCE
 	int start_time, end_time;
@@ -74,115 +105,29 @@ static int qtanh_execute_ref(struct nn_node *self, struct nn_graph *nn)
 #endif
 
 	for (i = 0; i < elements; i++) {
-		inval = in_min + stepsize * in_data[i];
+		inval = inoff + ingain * in_data[i];
 		tmpval = tanhf(inval);
-		outval = (tmpval + 1.0f) * (255.0f/2.0f) + 0.5f;
-		if (outval > 255.0f) outval = 255.0f;
-		out_data[i] = outval;
+		outval = (tmpval + 1.0f) * outgain;
+		out_data[i] = saturate_u8( roundf_i32(outval));
 	}
-	// FIXME: -1.0  .. 1.0 is not a proper range, 0 code is 127.5
-	// Should be -1.0 .. 1.007874
+
 #ifdef TEST_PERFORMANCE
 	end_time =  nn_os_get_cycles(nn);
 	printf("qtanh ref cycles = %d (elements = %d)\n", (end_time-start_time), elements);
 #endif
-	tensor_set_single_float(out_min_tensor,-1.0f);
-	tensor_set_single_float(out_max_tensor,1.0f);
+	tensor_set_single_float(out_min_tensor,out_min);
+	tensor_set_single_float(out_max_tensor,out_max);
 
-	logmsg(nn,2,"tanh %p done",self);
-	return 0;
-}
-
-struct tdata {
-	struct nn_node *self;
-	void *in_data;
-	void *out_data;
-	size_t bytes;
-	size_t pad_size;
-	float in_min;
-	float in_max;
-	float out_min;
-	float out_max;
-	nn_sem_t donesem;
-};
-
-static void non_lin_execute_td(struct nn_graph *nn, void *vtdata)
-{
-	struct tdata *td = vtdata;
-	uint8_t *in_data = td->in_data;
-	int8_t *out_data = td->out_data;
-	size_t bytes = td->bytes;
-	size_t pad_size = td->pad_size;
-	float in_min = td->in_min;
-	float in_max = td->in_max;
-	float out_min = td->out_min;
-	float out_max = td->out_max;
-	requant_s8u8(out_data, in_data, bytes, in_min, in_max, out_min, out_max);
-	non_lin_i_tanh_8(out_data, out_data, pad_size);
-	nn_sem_post(&td->donesem);
-}
-
-static int __attribute__((unused)) qtanh_execute_hvx(struct nn_node *self, struct nn_graph *nn)
-{
-	const struct tensor *in_tensor = self->inputs[0];
-	const struct tensor *in_min_tensor = self->inputs[1];
-	const struct tensor *in_max_tensor = self->inputs[2];
-	struct tensor *out_tensor = self->outputs[0];
-	struct tensor *out_min_tensor = self->outputs[1];
-	struct tensor *out_max_tensor = self->outputs[2];
-	size_t elements = tensor_element_count(in_tensor);
-	size_t bytes = elements * sizeof(uint8_t);
-	size_t pad_size = (bytes+MAXPAD-1)&~(MAXPAD-1);
-	uint8_t *in_data = in_tensor->data;
-	uint8_t *out_data = out_tensor->data;
-	float in_min = tensor_get_float(in_min_tensor,0);
-	float in_max = tensor_get_float(in_max_tensor,0);
-	float rng_min = (float)(MIN_RNG_TANH_8);
-	float rng_max = (float)(MAX_RNG_TANH_8);
-	
-	logmsg(nn,2,"tanh execute. self=%p ",self);
-	
-	if( tensor_out_prepare_normal_fromshape( out_tensor, &in_tensor->shape, NN_TYPE_QUINT8)!= 0){
-		return errlog(nn,"out too small");
-	}
-
-#ifdef TEST_PERFORMANCE
-	int start_time, end_time;
-	start_time =  nn_os_get_cycles(nn);
-#endif
-	
-	struct tdata td = {
-		.self = self,
-		.in_data = in_data,
-		.out_data = out_data,
-		.bytes = bytes,
-		.pad_size = pad_size,
-		.in_min = in_min,
-		.in_max = in_max,
-		.out_min = rng_min,
-		.out_max = rng_max,
-	};
-	nn_sem_init(&td.donesem,0);
-	nn_os_work_for_vector(nn, non_lin_execute_td, &td);
-	nn_sem_wait(&td.donesem);
-	
-#ifdef TEST_PERFORMANCE
-	end_time =  nn_os_get_cycles(nn);
-	printf("qtanh hvx cycles = %d (elements = %d)\n", (end_time-start_time), elements);
-#endif
-	
-	tensor_set_single_float(out_min_tensor,-1.0f);
-	tensor_set_single_float(out_max_tensor,1.0f);
-	logmsg(nn,2,"tanh %p done",self);
+	logmsg(nn,2,"tanh/sigmoid %p done",self);
 	return 0;
 }
 
 static int qtanh_check(struct nn_node *self, struct nn_graph *nn)
 {
-	logmsg(nn,2,"Checking tanh node %p",self);
+	logmsg(nn,2,"Checking tanh/sigmoid node %p",self);
 	if (self->n_inputs != 3) return errlog(nn,"wrong # inputs");
 	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"tanh node %p check OK",self);
+	logmsg(nn,2,"tanh/sigmoid node %p check OK",self);
 	return 0;
 }
 
@@ -192,12 +137,12 @@ struct nn_node_ops nn_ops_for_QuantizedTanh_8_ref = {
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
 };
-
-struct nn_node_ops nn_ops_for_QuantizedTanh_8 = {
-	//.execute = qtanh_execute_hvx,
+struct nn_node_ops nn_ops_for_QuantizedSigmoid_8_ref = {
 	.execute = qtanh_execute_ref,
 	.check = qtanh_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
 };
 
+// NOTE: the 'flat' QuantizedTanh_8 and QuantizedSigmoid_8 are done with hvx ops in op_tanh_d32.c
+//

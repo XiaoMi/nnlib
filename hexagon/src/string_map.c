@@ -1,4 +1,3 @@
-#define NO_PREBUILT_OPNAME_HASH 1
 /*
  * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
@@ -33,12 +32,16 @@
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
+
 /*
  * 
  * Now that that's out of the way, let's get to the good stuff.
  * 
  * code to map 'op_type' and 'padding_type' to/from strings
  */
+
+#define NO_PREBUILT_OPNAME_HASH 1
+
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>

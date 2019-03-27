@@ -1,6 +1,5 @@
-
 /*
- * Copyright (c) 2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -36,10 +35,10 @@
 /*
  */
 /*======================================================================*/
-/*  FUNCTIONS      : scalemem_d32                                        */
+/*  FUNCTIONS      : scalemem_d32                                       */
 /*                                                                      */
 /*  DESCRIPTION                                                         */
-/*                 copy rows, scaling u8 via given scale/offset          */
+/*                 copy rows, scaling u8 via given scale/offset         */
 /*                                                                      */
 /*  ARCHITECTURE   : QDSP6V6  + HVX                                     */
 /*======================================================================*/
@@ -51,11 +50,10 @@
 /*  GLS                 13/09/17       created                          */
 /*======================================================================*/
 /*  IDEAL-CYCLE-COUNT:                                                  */
-/* 					                                                   */
 /*                                                                      */
 /*  MEMORY                                                              */
 /*     CODESIZE = 348 bytes                                             */
-/*     STACK    =  0 bytes                                             */
+/*     STACK    =  0 bytes                                              */
 /*  ASSUMPTIONS                                                         */
 /*        arrays rows are vector aligned                                */
 /*  C MODEL                                                             */
@@ -103,160 +101,152 @@ void scalemem_d32_hvx(
 //
 #endif
 /*=============================================================================*/
-        .text
-        .file "scalemem_d32.S"
-        .global scalemem_d32_hvx
-        .balign 32
-        .type  scalemem_d32_hvx, @function
+    .text
+    .file "scalemem_d32.S"
+    .global scalemem_d32_hvx
+    .balign 32
+    .type  scalemem_d32_hvx, @function
 scalemem_d32_hvx:
 /*=============================================================================*/
 #define ptr_out         r0
-#define stride_out     r1
-#define ptr_in         r2
-#define stride_in      r3
-#define height        r4
-#define width         r5
-#define scl_off       r6
-#define const7       r7
-#define scale_lo       r8
-#define scale_hi       r9
-#define offs          r10
-#define rowloops      r11
-
-#define vzero v0
-#define vinp v1
-#define vout v2
-#define voffs v3
-#define vprodA0 v10
-#define vprodA1 v11
-#define vvprodA v11:10
-#define vprodB0 v12
-#define vprodB1 v13
-#define vvprodB v13:12
-
+#define stride_out      r1
+#define ptr_in          r2
+#define stride_in       r3
+#define height          r4
+#define width           r5
+#define scl_off         r6
+#define const7          r7
+#define scale_lo        r8
+#define scale_hi        r9
+#define offs            r10
+#define rowloops        r11
 /*=============================================================================*/
-       {
-       		scl_off = memw(sp+#0)						// get scl_off
-            r14 = add(width, #-1)							// will find the loop count with this.
-       } {
-       	   offs = combine( scl_off.h, scl_off.h)							// upper 16 bits of offs
-       	   scale_lo = vsplatb(scl_off)						// lo 8 bits of scale
-       	   r15 = asr(scl_off, #8)
-       } {
-           scl_off  = asr(scl_off,#6)
-       	   scale_hi = vsplatb(r15)						// hi 8 bits of scale
-       } {
-           rowloops = lsr(r14,#2)				// # of row loops (one less than vecs needed)
-       }
-	   // if scl_off == 511 now, it means we can use a copy instead.
-       // if scl_off = 0x1fe0200, we use 2's complement.
-	   //
-       // the row loops advance ptr_in by (rowloops+1)*128,
-       // and ptr_out by rowloops*128; so deduct those amounts from stride_in and stride_out
+#define vzero           v0
+#define vinp            v1
+#define vout            v2
+#define voffs           v3
+#define vprodA0         v10
+#define vprodA1         v11
+#define vvprodA         v11:10
+#define vprodB0         v12
+#define vprodB1         v13
+#define vvprodB         v13:12
+#define vvoffs          v5:4
+#define vprodC0         v10
+#define vprodC1         v11
+#define vvprodC         v11:10
+/*=============================================================================*/
+    {
+       scl_off = memw(sp+#0)                    // get scl_off
+       r14 = add(width, #-1)                    // will find the loop count with this.
+    }{
+       offs = combine( scl_off.h, scl_off.h)    // upper 16 bits of offs
+       scale_lo = vsplatb(scl_off)              // lo 8 bits of scale
+       r15 = asr(scl_off, #8)
+    }{
+       scl_off  = asr(scl_off,#6)
+       scale_hi = vsplatb(r15)                  // hi 8 bits of scale
+    }{
+       rowloops = lsr(r14,#2)                   // # of row loops (one less than vecs needed)
+       voffs = vsplat(offs)
+    }{
+    // if scl_off == 511 now, it means we can use a copy instead.
+    // if scl_off = 0x1fe0200, we use 2's complement.
+    //
+    // the row loops advance ptr_in by (rowloops+1)*128,
+    // and ptr_out by rowloops*128; so deduct those amounts from stride_in and stride_out
 
-       {
-		  r14 = asl(rowloops,#7)			// # find the row advance in h loop
-		  stride_in = add(stride_in, #-128)
-		  r15 = asl(width,#5)				// for last-mask
-#if __HEXAGON_ARCH__ < 62
-		  r13 = and( width, #3)			// width is aligned?
+       r14 = asl(rowloops,#7)                   // # find the row advance in h loop
+       stride_in = add(stride_in, #-128)
+       r15 = asl(width,#5)                      // for last-mask
+       vvoffs = vcombine(voffs,voffs)           //
+    }{
+       stride_out = sub(stride_out,r14)
+       stride_in  = sub(stride_in, r14)
+       const7 = #7
+       vzero = #0
+    }{
+#if __HEXAGON_ARCH__ >= 62
+       q3 = vsetq2(r15)
+#else
+       q3 = vsetq(r15)
 #endif
-       } {
-       	  stride_out = sub(stride_out,r14)
-       	  stride_in = sub(stride_in,r14)
-       	  const7 = #7
-       	  vzero = #0
-       } {
- #if __HEXAGON_ARCH__ >= 62
- 			q3 = vsetq2(r15)
- #else
- 			q3 = vsetq(r15)
- #endif
-       		voffs = vsplat(offs)
-       		p0 = cmp.eq(rowloops,#0)	// true if no loops
-       		p1 = cmp.eq(scl_off,#511)	 // is just a copy if so.
-       }
- #if __HEXAGON_ARCH__ < 62
-		// need to change q3 to all 1's if line width a multiple of 4.
-		{
- 		 	p2 = cmp.eq(r13,#0)
- 		 	if( !p2.new ) jump:t .L_skip
- 		 }
- 		{
- 			q3 = not(q3)
- 		}
+       p0 = cmp.eq(rowloops,#0)	                // true if no loops
+       p1 = cmp.eq(scl_off,#511)	            // is just a copy if so.
+    }
+#if __HEXAGON_ARCH__ < 62
+    // need to change q3 to all 1's if line width a multiple of 4.
+    {
+       p2 = bitsclr(width,#3)
+       if( !p2.new ) jump:t .L_skip
+    }{
+       q3 = not(q3)
+    }
 .L_skip:
- #endif
+#endif
 
 ///////////////////////////////////////////
 // the copy that needs scaling
 ///////////////////////////////////////////
+    {
+       if( p1 ) jump:nt .L_case_noS;
+       p2 = cmp.eq(scl_off,#0x1fe0200)                      //2's complement if so
+    }{
+       if (p2) jump:nt .L_case_noS;
+       loop1( .L_hloop_S, height );
+    }
 
-       {
-       		if( p1 ) jump:nt .L_case_noS;
-       		p2 = cmp.eq(scl_off,#0x1fe0200)	 //2's complement if so
-       } {
-            if( p2) jump:nt .L_case_noS;
-       		loop1( .L_hloop_S, height );
-       }
-        .balign 32
+    .balign 32
  .L_hloop_S:
- 		{
- 			vinp =vmem( ptr_in ++#1 )			// get first
- 			loop0( .L_wloop_S, rowloops )
- 		}
- 		{	// mul scale_lo by input bytes to get lo prod
- 			vvprodA.uh = vmpy( vinp.ub, scale_lo.ub)
- 		}
- 		{  // >> 8 using vshuffo
- 			vprodB0.b = vshuffo(vzero.b, vprodA0.b)
- 			vprodB1.b = vshuffo(vzero.b, vprodA1.b)
- 		} {
- 			// add the scale_hi product
- 			vvprodB.h += vmpy( vinp.ub, scale_hi.b)
- 		}
- 		{		// add the offset
- 			vprodB0.h = vadd( vprodB0.h, voffs.h):sat
- 			vprodB1.h = vadd( vprodB1.h, voffs.h):sat
-		    if( p0 ) jump:nt .L_wloop0_S					// skip if loop count = 0
- 		}
+    {  vinp.cur = vmem(ptr_in++#1)                          //[1]load 
+       vvprodA.uh = vmpy( vinp.ub, scale_lo.ub)             //[1]mul scale_lo by input bytes to get lo prod
+       p3 = sp1loop0(.L_wloop_S, rowloops)                  //
+       nop
+    }{
+       vprodB0.b = vshuffo(vzero.b, vprodA0.b)              //[1]>> 8 using vshuffo
+       vprodB1.b = vshuffo(vzero.b, vprodA1.b)              //[1]
+    }{
+       vvprodB.h += vmpy( vinp.ub, scale_hi.b)              //[1]add the scale_hi product
+       if( p0 ) jump:nt .L_wloop0_S                         // skip if loop count = 0
+    }
 
-
-        .balign 32
+    .balign 32
 .L_wloop_S:
- 		{
- 			vinp.cur = vmem(ptr_in++#1)			// load next
- 			vvprodA.uh = vmpy( vinp.ub, scale_lo.ub)
- 		}
-		{
- 			vout.ub = vasr( vprodB1.h, vprodB0.h, const7 ):rnd:sat   // 2nd stage
- 			vprodB0.b = vshuffo(vzero.b, vprodA0.b)
- 			vprodB1.b = vshuffo(vzero.b, vprodA1.b)
-   	     }
- 		{
- 			vvprodB.h += vmpy( vinp.ub, scale_hi.b)
- 			vmem( ptr_out ++ #1) = vout						// 2nd stage
- 		}
- 		{
- 			vprodB0.h = vadd( vprodB0.h, voffs.h):sat
- 			vprodB1.h = vadd( vprodB1.h, voffs.h):sat
- 		}: endloop0
+    {  vinp.cur = vmem(ptr_in++#1)                          //[1]load 
+       vvprodA.uh = vmpy( vinp.ub, scale_lo.ub)             //[1]mul scale_lo by input bytes to get lo prod
+       vout.ub = vasr(vprodC1.h, vprodC0.h, const7):rnd:sat //[3]
+#if __HEXAGON_ARCH__ > 60
+       if p3 vmem(ptr_out ++#1) = vout.new                  //[3] 
+#endif
+    }{
+       vprodB0.b = vshuffo(vzero.b, vprodA0.b)              //[1]>> 8 using vshuffo
+       vprodB1.b = vshuffo(vzero.b, vprodA1.b)              //[1]
+       vvprodC.h = vadd(vvprodB.h, vvoffs.h):sat            //[2]add the offset
+    }{
+       vvprodB.h += vmpy( vinp.ub, scale_hi.b)              //[1]add the scale_hi product
+#if __HEXAGON_ARCH__ == 60
+       if p3 vmem(ptr_out ++#1) = vout                      //[3] 
+#endif
+    }:endloop0
+
 .L_wloop0_S:
-		// now store the last one
- 		{
- 			vout.ub = vasr( vprodB1.h, vprodB0.h, const7 ):rnd:sat
- 			ptr_in = add(ptr_in, stride_in)
- 		}
- 		{
- 			if( q3 ) vmem(ptr_out+ #0) = vout
- 			ptr_out = add(ptr_out, stride_out)
- 		}: endloop1
+    {
+       vout.ub = vasr(vprodC1.h, vprodC0.h, const7):rnd:sat //[3]
+       if p3 vmem(ptr_out ++ #1) = vout.new                 //[3] 
+       vvprodC.h = vadd(vvprodB.h, vvoffs.h):sat            //[2]add the offset
+    }{ 
+       vout.ub = vasr(vprodC1.h, vprodC0.h, const7):rnd:sat //[3]
+       ptr_in = add(ptr_in, stride_in)
+    }{
+       if( q3 ) vmem(ptr_out+ #0) = vout                    // now store the last one
+       ptr_out = add(ptr_out, stride_out)
+    }: endloop1
 
+    {
+       jumpr r31
+    }
 
-       {
-          jumpr r31
-       }
-        .balign 32
+    .balign 32
 ///////////////////////////////////////////
 /// for when no scaling is needed - just a copy
 /// This is also used for 1's complement:
@@ -265,43 +255,39 @@ scalemem_d32_hvx:
 //     1      -1            invert
 ///////////////////////////////////////////
 .L_case_noS:
-       {
-            voffs = vnot(vzero)                 // voffs = -1  (only if p2)
-       		loop1( .L_hloop_noS, height );
-       }
-        {
-            if (!p2) voffs = vzero              // restore voffs = 0 if !p2
-         }
-        .balign 32
+    {
+       voffs = vnot(vzero)                  // voffs = -1  (only if p2)
+       loop1( .L_hloop_noS, height );
+    }{
+       if (!p2) voffs = vzero               // restore voffs = 0 if !p2
+    }
+    .balign 32
  .L_hloop_noS:
- 		{
- 			vinp.cur =vmem( ptr_in ++#1 )			// get first
-            vout = vxor(vinp,voffs)
- 			loop0( .L_wloop_noS, rowloops )
-		    if( p0 ) jump:nt .L_wloop0_noS					// skip if loop count = 0
- 		}
-        .balign 32
+    {
+       vinp.cur =vmem( ptr_in ++#1 )        // get first
+       vout = vxor(vinp,voffs)
+       loop0( .L_wloop_noS, rowloops )
+       if( p0 ) jump:nt .L_wloop0_noS       // skip if loop count = 0
+    }
+     .balign 32
 .L_wloop_noS:
- 		{
- 			vinp.cur = vmem(ptr_in++#1)			// load next
-            vout = vxor(vinp,voffs)
- 			vmem( ptr_out ++ #1) = vout		// store current
-   	     }: endloop0
+    {
+       vinp.cur = vmem(ptr_in++#1)          // load next
+       vout = vxor(vinp,voffs)
+       vmem( ptr_out ++ #1) = vout          // store current
+    }: endloop0
 .L_wloop0_noS:
-		// now store the last one
- 		{
- 			ptr_in = add(ptr_in, stride_in)
- 			if( q3 ) vmem(ptr_out+ #0) = vout
- 			ptr_out = add(ptr_out, stride_out)
- 		}: endloop1
+    // now store the last one
+    {
+       ptr_in = add(ptr_in, stride_in)
+       if( q3 ) vmem(ptr_out+ #0) = vout
+       ptr_out = add(ptr_out, stride_out)
+    }: endloop1
 
-
-       {
-          jumpr r31
-       }
-
-
-
+    {
+       jumpr r31
+    }
 .L_end:
 /*=============================================================================*/
-      .size scalemem_d32_hvx, .L_end-scalemem_d32_hvx
+    .size scalemem_d32_hvx, .L_end-scalemem_d32_hvx
+/*=============================================================================*/

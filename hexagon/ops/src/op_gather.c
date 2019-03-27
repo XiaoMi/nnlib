@@ -36,6 +36,7 @@
 #include <string.h>
 #include <quantize.h>
 #include <stdio.h>
+#include "hvx_inlines.h"
 //
 // 'gather' operator.
 // This has 2-4 inputs:
@@ -109,7 +110,7 @@
 //   input 0: index tensor; of int32's
 //   input 1: table tensor; of ELTYPE
 //   input 2: (optional) table_structure:  list of ints giving the partition structure of the table.
-//   input 3: (optional) partition_strategy.
+//   input 3: (optional) partition_strategy  ( single int; 0= mod, 1 = div)
 //
 //   output 0: output tensor (of ELTYPE)
 //
@@ -148,22 +149,22 @@
 //         (2) exactly TPN; this is only allowed if there is a single 'size' entry (NTS=3), and in this
 //             case the next dimension must match this size entry.
 //		    Some examples:
-//               tensor_shape = (1,5,32,128)       structure = (1,5,32)
+//               table_shape = (1,5,32,128)       structure = (1,5,32)
 //                         table is 5 partitions of 32 each; the elements are [128]
-//               tensor_shape = (1,1,5*32,128)       structure = (2,5,32)
+//               table_shape = (1,1,5*32,128)       structure = (2,5,32)
 //                         same as previous, in effect.
-//               tensor_shape = (1,1,5*32,128)       structure = (2,5,32,32,32,32,32)
+//               table_shape = (1,1,5*32,128)       structure = (2,5,32,32,32,32,32)
 //                         also same as previous.
-//               tensor_shape = (1,320,6, 128),		structure = (1,5,64,64,32,32,128)
+//               table_shape = (1,320,6, 128),		structure = (1,5,64,64,32,32,128)
 //                    table has 5 partitions of different sizes, adding up to 320, which
 //                    are packed in the 2nd dimension. Each element is (6,128).
 //
 //     TPN  =  number of partitions in the table
 //     IPN  = number of partitions in the index (size of last dimension).
 //     if IPN > TPN, we need a way to select a table partition (idxT) based on the index partition (idxI)
-//     The strategies are:
-//     'mod':    idxT= idxI % TPN
-//     'div':    idxT = idxI / TPN  (this formula applies only when IPN is a multiple of TPN).
+//     The strategies are below, set by 'strategy' input; default is mod:
+//     0 'mod':    idxT= idxI % TPN
+//     1 'div':    idxT = idxI / TPN  (this formula applies only when IPN is a multiple of TPN).
 //         when IPN is not a multiple of TPN, the 'div' strategy assigns ceil(IPN/TPN) indices
 //         to the initial table partitions, until the remainder is evenly split, e.g.
 //         IPN = 12, TPN = 5:
@@ -208,7 +209,23 @@ struct gather_opparms {
 	int size_index;			// total size of tensor array
 	int elbytes;
 };
-struct gather_runstate;
+// we choose a 'table copy funcp' based on the element size for lookup,
+// this is specialized for various values of 'elbytes'.
+// The generic one uses memcpy.
+//
+// for each there is a 'limit' and 'check' version.
+// - both normally return 0.
+// - if any indices are out of range the 'check' version will return 1+i where
+///  is the position of the out of range index.
+//
+typedef int ( *table_copy_funcp)(
+		uint8_t * out,		// output pointer [num] of elbytes
+		int32_t const *indices, 	// input pointer (indices) [ num ] of int32,
+		uint8_t const *tbl,			// table pointer [ TabN ] of elbytes
+		int TabN, int elbytes, int num );
+
+static table_copy_funcp
+select_copy_func( int elsize, int check_range);struct gather_runstate;
 
 // for two threads, the work is split in two across 'size_index'
 // unless that is small and rather smaller than size_tab_outer, in which case
@@ -219,9 +236,14 @@ struct gather_thrinfo {
 	struct gather_runstate *rstp;
 	int begin_index, end_index;	// range of 'index' to do
 	int begin_outer, end_outer;	// range of 'tab_outer to do.
+	int out_of_range_index;
 };
 struct gather_runstate {
 	 struct gather_opparms opp;
+	 uint8_t const * table_base;
+	 int32_t const * index_base;
+	 uint8_t * output_base;
+	 table_copy_funcp copy_fp;
 	 nn_sem_t done_sem;
 	 struct gather_thrinfo thrinfo[2];
 };
@@ -355,23 +377,7 @@ analyze_gather_op( struct nn_graph * nn, struct tensor const *index_tensor, stru
 
 }
 
-// we choose a 'table copy funcp' based on the element size for lookup,
-// this is specialized for various values of 'elbytes'.
-// The generic one uses memcpy.
-//
-// for each there is a 'limit' and 'check' version.
-// - both normally return 0.
-// - if any indices are out of range the 'check' version will return 1+i where
-///  is the position of the out of range index.
-//
-typedef int ( *table_copy_funcp)(
-		uint8_t * out,		// output pointer [num] of elbytes
-		int32_t const *indices, 	// input pointer (indices) [ num ] of int32,
-		uint8_t const *tbl,			// table pointer [ TabN ] of elbytes
-		int TabN, int elbytes, int num );
-
-static table_copy_funcp
-select_copy_func( int elsize, int check_range);
+static void gather_worker_thread( struct nn_graph *nn, void * p);
 
 static int
 gather_execute( struct nn_node *self, struct nn_graph *nn)
@@ -403,7 +409,7 @@ gather_execute( struct nn_node *self, struct nn_graph *nn)
 	int index_rank = -1;
 	if( n_scalar_inputs >= 1){
 		index_dim = tensor_get_int32( scalar_tensors[0], 0);
-		if( n_scalar_inputs >= 1 )
+		if( n_scalar_inputs >= 2 )
 			index_rank = tensor_get_int32( scalar_tensors[1], 0);
 	}
 
@@ -412,7 +418,6 @@ gather_execute( struct nn_node *self, struct nn_graph *nn)
 
 	if( analyze_gather_op( nn, index_tensor, table_tensor, &rstate.opp, index_dim, index_rank)!= 0)
 		return -1;
-
 	// create the output tensor
 	if( tensor_out_prepare_normal_fromshape( out_tensor, &rstate.opp.outshape, data_type) != 0 ){
 		return errlog(nn, "output too small");
@@ -421,13 +426,16 @@ gather_execute( struct nn_node *self, struct nn_graph *nn)
 	int inner_size_bytes  = rstate.opp.size_tab_inner * elbytes;
 	// select a copy func
 	table_copy_funcp copy_func = select_copy_func( inner_size_bytes, check_range);
-
+	rstate.copy_fp = copy_func;
 
 	// set up for threads
 	int size_index =  rstate.opp.size_index;		// # of lookups to do
 	int size_tab_outer = rstate.opp.size_tab_outer;
 
-#if 0
+#if 1
+	rstate.index_base = (int32_t *) index_tensor->data;
+	rstate.table_base = (uint8_t *) table_tensor->data;
+	rstate.output_base = (uint8_t *) out_tensor->data;
 	rstate.thrinfo[0].rstp = &rstate;
 	rstate.thrinfo[0].begin_index = 0;
 	rstate.thrinfo[0].end_index = size_index;
@@ -449,11 +457,21 @@ gather_execute( struct nn_node *self, struct nn_graph *nn)
 			rstate.thrinfo[1].begin_index = n;
 		}
 	}
-#endif
-	// TODO:
-	//  - use threads
-	//  - use hvx (especially when inner_size_bytes is a multiple of 128)
-	//
+	nn_sem_init( &rstate.done_sem,0);
+	for( int i = 0; i < nthreads; i++){
+		nn_os_work_for_vector(nn, gather_worker_thread, &rstate.thrinfo[i]);
+	}
+	nn_sem_wait_n_times( &rstate.done_sem, nthreads);
+
+	for( int i = 0; i < nthreads; i++){
+		int k = rstate.thrinfo[i].out_of_range_index;
+		if( k >= 0){
+			int32_t val = ((int32_t *) index_tensor->data)[k];
+			return errlog(nn, "out-of-range value %d found at offset %d; table size is %d",
+					val, k, rstate.opp.table_size );
+		}
+	}
+#else
 
 	uint8_t * outp = (uint8_t *) out_tensor->data;
 	uint8_t const * tabp = (uint8_t *) table_tensor->data;
@@ -475,10 +493,50 @@ gather_execute( struct nn_node *self, struct nn_graph *nn)
 					val, k, Ntab );
 		}
 	}
+#endif
 	logmsg(nn,2,"gather node %p complete",self);
 	return 0;
 }
 
+static void gather_worker_thread( struct nn_graph *nn, void * p)
+{
+	struct gather_thrinfo * thrp = (struct gather_thrinfo *)p;
+	struct gather_runstate  * rstp = thrp->rstp;
+	int inner_size_bytes  = rstp->opp.size_tab_inner * rstp->opp.elbytes;
+	int size_index =  rstp->opp.size_index;		// # of lookups to do
+	int begin_outer = thrp->begin_outer;
+	int begin_inner = thrp->begin_index;
+	int end_inner = thrp->end_index;
+	int end_outer = thrp->end_outer;
+	uint8_t * outp = rstp->output_base;
+	uint8_t const * tabp = rstp->table_base;
+	int32_t const * indp = rstp->index_base;
+	int Ntab = rstp->opp.table_size;	// size of lookup dim of table
+	int table_outer_stride = inner_size_bytes * Ntab;	// table size per outer loop
+	int output_outer_stride = inner_size_bytes * size_index;	// output size per outer loop
+	//printf("inner_size_bytes= %d; Ntab= %d; size_index = %d; size_tab_outer = %d\n",
+	//		inner_size_bytes, Ntab, size_index, size_tab_outer );
+	table_copy_funcp copy_func = rstp->copy_fp;
+	// offset for start of inner slice
+	indp += begin_inner;
+	outp += begin_inner * inner_size_bytes;
+	int count_inner = end_inner - begin_inner;
+
+	//logmsg(nn,0, "outer range %d.. %d; inner %d..%d", begin_outer, end_outer, begin_inner, end_inner);
+	int oor_index = -1;
+	for( int i = begin_outer; i < end_outer; i++){
+		int k = (*copy_func)( outp + i*output_outer_stride,
+				indp, tabp + i*table_outer_stride,
+				Ntab, inner_size_bytes, count_inner );
+		if( k> 0){	// k-1 is index of bad table index.
+			--k;
+			oor_index = begin_inner + k;
+			break;
+		}
+	}
+	thrp->out_of_range_index = oor_index;
+	nn_sem_post( &rstp->done_sem);
+}
 
 //////////////////////// table //////////////////////////////////////////////////
 //
@@ -675,7 +733,6 @@ table_execute( struct nn_node *self, struct nn_graph *nn)
 	int n_optional_inputs = self->n_inputs - 2;
 
 	logmsg(nn,2,"table node %p execute",self);
-	logmsg(nn,0, "**** Partitioned Table has not been tested **************");
 
 	int elbytes = var_token->element_bytes;
 	int data_type = var_token->element_typecode;
@@ -753,12 +810,11 @@ table_execute( struct nn_node *self, struct nn_graph *nn)
 		int tsize = rstate.opp.pdesc[tpart].partn_size;
 		uint8_t const * tbl_data = rstate.opp.pdesc[tpart].partn_data;
 
-
 		for( int iout = 0; iout < rstate.opp.outer_index_size; iout++){
 			int idx = idxp[ ipart+ iout * index_partn]; // read the value.
 			idx = min_i32( tsize-1, max_i32(idx,0));		// clip it
 			memcpy( outp_part, tbl_data + inner_size_bytes * idx,  inner_size_bytes);
-			outp += rstate.opp.output_partition_stride;
+			outp_part += rstate.opp.output_partition_stride;
 		}
 	}
 
@@ -799,6 +855,54 @@ static int perform_lookup_N_check( uint8_t * out, int32_t const *indices, uint8_
 		int idx = indices[i];
 		if( (unsigned)idx >= (unsigned)TabN) return i+1;
 		memcpy( out, tbl + idx * elbytes, elbytes);
+		out += elbytes;
+	}
+	return 0;
+}
+
+// these are for use with HVX, and only when elbytes >=128
+static int perform_lookup_bigN_limit( uint8_t * out, int32_t const *indices, uint8_t const *tbl,
+		int TabN, int elbytes, int num )
+{
+	int nvcopy = (elbytes-1)>>7;		// number of copy ops,-1 (>=0)
+	int bump1 = ((elbytes-1)&127)+1;	// amount to bump ptrs after first copy
+
+	for(int i =0; i < num; i++){
+		int idx = indices[i];
+		idx = min_i32( TabN-1, max_i32(idx,0));
+		uint8_t const *rptr  = tbl + idx * elbytes;
+		uint8_t * wptr = out;
+		q6op_vstu_AV( (HVX_Vector*)wptr, q6op_V_vldu_A((HVX_Vector const*)rptr));
+		wptr += bump1;
+		rptr += bump1;
+		for( int k = 0; k <nvcopy; k++){
+			q6op_vstu_AV( (HVX_Vector*)wptr, q6op_V_vldu_A((HVX_Vector const*)rptr));
+			wptr += 128;
+			rptr += 128;
+		}
+		out += elbytes;
+	}
+	return 0;
+}
+static int perform_lookup_bigN_check( uint8_t * out, int32_t const *indices, uint8_t const *tbl,
+		int TabN, int elbytes, int num )
+{
+	int nvcopy = (elbytes-1)>>7;		// number of copy ops,-1 (>=0)
+	int bump1 = ((elbytes-1)&127)+1;	// amount to bump ptrs after first copy
+
+	for(int i =0; i < num; i++){
+		int idx = indices[i];
+		if( (unsigned)idx >= (unsigned)TabN) return i+1;
+		uint8_t const *rptr  = tbl + idx * elbytes;
+		uint8_t * wptr = out;
+		q6op_vstu_AV( (HVX_Vector*)wptr, q6op_V_vldu_A((HVX_Vector const*)rptr));
+		wptr += bump1;
+		rptr += bump1;
+		for( int k = 0; k <nvcopy; k++){
+			q6op_vstu_AV( (HVX_Vector*)wptr, q6op_V_vldu_A((HVX_Vector const*)rptr));
+			wptr += 128;
+			rptr += 128;
+		}
 		out += elbytes;
 	}
 	return 0;
@@ -891,6 +995,9 @@ select_copy_func( int elsize, int check_range)
 		}
 	}
 	// if we don't have a function for it, use generic
+	if(elsize >=128)
+		return check_range? perform_lookup_bigN_check : perform_lookup_bigN_limit;
+
 	return check_range? perform_lookup_N_check : perform_lookup_N_limit;
 }
 const struct gather_table_variant_token
@@ -1036,7 +1143,7 @@ struct nn_node_ops nn_ops_for_Table_f = {
 	.dtor = gather_dtor,
 };
 struct nn_node_ops nn_ops_for_Table_int32 = {
-	.execute = gather_execute,
+	.execute = table_execute,
 	.check = gather_check,
 	.ctor = node_alloc_common,
 	.dtor = gather_dtor,

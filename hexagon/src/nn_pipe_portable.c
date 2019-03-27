@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -37,8 +37,9 @@
  */
 #include <nn_graph.h>
 #include <stdlib.h>
-#ifndef USE_OS_QURT
-struct nn_pipe *nn_pipe_alloc_portable(struct nn_graph *nn, uint32_t pipe_elements)
+//#ifndef USE_OS_QURT
+
+struct nn_pipe *nn_pipe_alloc(struct nn_graph *nn, uint32_t pipe_elements)
 {
 	struct nn_pipe *pipe;
 	uint64_t *buf;
@@ -62,25 +63,35 @@ struct nn_pipe *nn_pipe_alloc_portable(struct nn_graph *nn, uint32_t pipe_elemen
 	return pipe;
 }
 
-void nn_pipe_free_portable(struct nn_pipe *pipe)
+void nn_pipe_free(struct nn_pipe *pipe)
 {
 	nn_free(pipe->data);
 	nn_free(pipe);
 }
 
-void nn_pipe_send_portable(struct nn_pipe *pipe, uint64_t data)
+void nn_pipe_send_multi_slowpath(struct nn_pipe *pipe, uint64_t *data, int n_items_left)
 {
-	int oldidx;
-	nn_sem_wait(&pipe->howempty);
-	nn_mutex_lock(&pipe->mutex);
-	oldidx = pipe->send_idx;
-	pipe->send_idx = ((oldidx == (pipe->elements-1)) ? 0 : oldidx+1);
-	pipe->data[oldidx] = data;
-	nn_mutex_unlock(&pipe->mutex);
-	nn_sem_post(&pipe->howfull);
-	//printf("Sending data in the pipe idx %d: val %llu",oldidx, data);
+	int i;
+	int idx;
+	do {
+		int n_items = Q6_R_min_RR(n_items_left,(pipe->elements + 1)/2);
+		n_items_left = n_items_left-n_items;
+		nn_sem_sub(&pipe->howempty,n_items);
+		nn_mutex_lock(&pipe->mutex);
+		idx = pipe->send_idx;
+		for (i = 0; i < n_items; i++) {
+			pipe->data[idx] = data[i];
+			idx = idx+1;
+			if (idx >= pipe->elements) idx = 0;
+		}
+		pipe->send_idx = idx;
+		nn_mutex_unlock(&pipe->mutex);
+		nn_sem_add(&pipe->howfull,n_items);
+		data += n_items;
+	} while (n_items_left > 0);
 }
 
+#if 0
 uint64_t nn_pipe_recv_portable(struct nn_pipe *pipe)
 {
 	int oldidx;
@@ -95,5 +106,23 @@ uint64_t nn_pipe_recv_portable(struct nn_pipe *pipe)
 	//printf("Recv data from the pipe idx %d: val %llu",oldidx, ret);
 	return ret;
 }
-
 #endif
+
+uint64_t nn_pipe_recv_slowpath(struct nn_pipe *pipe)
+{
+	uint32_t oldidx;
+	uint32_t newidx;
+	uint64_t ret;
+	/* Ensure not empty */
+	nn_sem_wait(&pipe->howfull);
+	do {
+		oldidx = pipe->recv_idx;
+		ret = pipe->data[oldidx];
+		newidx = oldidx + 1;
+		if (newidx >= pipe->elements) newidx = 0;
+	} while (!__sync_bool_compare_and_swap(&pipe->recv_idx,oldidx,newidx));
+	nn_sem_post(&pipe->howempty);
+	return ret;
+}
+
+//#endif

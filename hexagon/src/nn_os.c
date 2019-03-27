@@ -38,18 +38,18 @@
 #include <nn_graph.h>
 #include <stdlib.h>
 
-//#define NUM_VECTOR_THREADS 1
-
-#ifndef NUM_VECTOR_THREADS
 #ifdef HEXAGON_V66
-#define NUM_VECTOR_THREADS 4
+int Num_Vector_Threads = 4;
+int Total_Threads = 4;
 #else
-#define NUM_VECTOR_THREADS 2
-#endif
+int Num_Vector_Threads = 2;
+int Total_Threads = 2;
 #endif
 
-#define TOTAL_THREADS (NUM_VECTOR_THREADS+2)
-#define STACK_SIZE 8192
+int Stack_Size = 16384;
+int VTCM_User_Req = -1;
+
+#define HVX_LOCK_RETRY_TIMEOUT_COUNT 1000
 
 /*
  * OK, well, we need to cut the # of threads and make things non-global.
@@ -57,14 +57,6 @@
  * It will include worker thread information
  * It will include a pointer to all the nn graph contexts, this will facilitate debug
  */
-
-union workitem {
-	struct {
-		void (*f)(struct nn_graph *, void *);
-		void *arg;
-	};
-	uint64_t raw;
-};
 
 struct tinfo {
 	struct nn_graph *nn;
@@ -89,7 +81,7 @@ static void *nn_os_worker(void *vinfo)
 	volatile struct tinfo *info = vinfo;
 	struct nn_graph *nn = info->nn;
 	nn_pipe_t *pipe = info->pipe;
-	union workitem work;
+	nn_os_workitem_t work;
 	nn_sem_post((nn_sem_t*)&info->sem);
 	while (1) {
 		work.raw = nn_pipe_recv(pipe);
@@ -103,17 +95,22 @@ static void *nn_os_worker(void *vinfo)
 
 void nn_os_work_for_vector(struct nn_graph *nn, void (*f)(struct nn_graph *, void *),void *arg)
 {
-	union workitem msg;
+	nn_os_workitem_t msg;
 	msg.f = f;
 	msg.arg = arg;
 	//logmsg(nn,0,"nn_pipe_send msg.raw=%x", msg.raw);
 	nn_pipe_send(nn->vec_work, msg.raw);
 }
 
+void nn_os_worklist_for_vector(struct nn_graph *nn, nn_os_workitem_t *items, int n_items)
+{
+	nn_pipe_send_multi(nn->vec_work,&items[0].raw,n_items);
+}
+
 
 void nn_os_work_for_scalar(struct nn_graph *nn, void (*f)(struct nn_graph *, void *),void *arg)
 {
-	union workitem msg;
+	nn_os_workitem_t msg;
 	msg.f = f;
 	msg.arg = arg;
 	nn_pipe_send(nn->nonvec_work, msg.raw);
@@ -169,18 +166,60 @@ void nn_os_vector_workers_acquire(struct nn_graph *nn)
 	int i;
 	logmsg(nn,4,"acquire");
 	struct nn_thread_info *info = nn->os_opaque;
+
+#if !defined(HEXAGON_V65) && !defined(HEXAGON_V66)
+    // v60 has no context management
+	int hvx_lock_fail;
+	int hvx_lock_try_count = 0;
+	do {
+		hvx_lock_fail = 0;
+		/* Tell all the vector threads to acquire vectors */
+		for (i = 0; i < (Num_Vector_Threads); i++) {
+			nn_os_work_for_vector(nn,worker_acquire,&info[i]);
+		}
+		/* wait for all the threads to lock vectors */
+		for (i = 0; i < (Num_Vector_Threads); i++) {
+			nn_sem_wait(&info[i].ack);
+			nn_sem_post(&info[i].go);
+			/* set hvx lock fail flag if lock error return from any thread */
+			/* if could not lock hvx succesfully in time, quit lock action */
+			if (info[i].vecinfo) {
+				if (hvx_lock_try_count < HVX_LOCK_RETRY_TIMEOUT_COUNT) {
+					hvx_lock_fail = 1;
+					hvx_lock_try_count++;
+				} else {
+					logmsg(nn,2,"couldn't lock hvx successfully in time.");
+					break;
+				}
+			}
+		}
+		/* handle hvx lock error - release all occupied hvx vector and then try to relock*/
+		if (hvx_lock_fail) {
+			/* Tell all the vector threads to release vectors */
+			for (i = 0; i < (Num_Vector_Threads); i++) {
+				nn_os_work_for_vector(nn,worker_release,&info[i]);
+				nn_sem_wait(&info[i].ack);
+			}
+			for (i = 0; i < (Num_Vector_Threads); i++) {
+				nn_sem_post(&info[i].go);
+			}
+		}
+	} while(hvx_lock_fail); /*keep acquiring hvx until successful*/
+#else
 	/* Tell all the vector threads to release vectors */
-	for (i = 0; i < (NUM_VECTOR_THREADS); i++) {
+	for (i = 0; i < (Num_Vector_Threads); i++) {
 		nn_os_work_for_vector(nn,worker_acquire,&info[i]);
 	}
 	/* wait for all the threads to release vectors */
-	for (i = 0; i < (NUM_VECTOR_THREADS); i++) {
+	for (i = 0; i < (Num_Vector_Threads); i++) {
 		nn_sem_wait(&info[i].ack);
 	}
 	/* tell all the threads to keep going */
-	for (i = 0; i < (NUM_VECTOR_THREADS); i++) {
+	for (i = 0; i < (Num_Vector_Threads); i++) {
 		nn_sem_post(&info[i].go);
 	}
+#endif
+
 	logmsg(nn,4,"acquire done");
 	// nn_os_vecinfo[0] = nn_os_vector_acquire();
 }
@@ -190,11 +229,11 @@ void nn_os_vector_workers_release(struct nn_graph *nn)
 	int i;
 	logmsg(nn,4,"release");
 	struct nn_thread_info *info = nn->os_opaque;
-	for (i = 0; i < (NUM_VECTOR_THREADS); i++) {
+	for (i = 0; i < (Num_Vector_Threads); i++) {
 		nn_os_work_for_vector(nn,worker_release,&info[i]);
 		nn_sem_wait(&info[i].ack);
 	}
-	for (i = 0; i < (NUM_VECTOR_THREADS); i++) {
+	for (i = 0; i < (Num_Vector_Threads); i++) {
 		nn_sem_post(&info[i].go);
 	}
 	logmsg(nn,4,"release done");
@@ -206,7 +245,7 @@ int nn_os_careful_free(struct nn_graph *nn, int ret)
 	struct nn_thread_info *worker_info = nn->os_opaque;
 	int i;
 	if (worker_info == NULL) return ret;
-	for (i = 0; i < TOTAL_THREADS; i++) {
+	for (i = 0; i < Total_Threads; i++) {
 		if (worker_info[i].stack) nn_free(worker_info[i].stack);
 	}
 	nn_free(worker_info);
@@ -223,12 +262,26 @@ void nn_os_join_n_threads(struct nn_graph *nn, int n_threads)
 	int i;
 	struct nn_thread_info *worker_info = nn->os_opaque;
 	for (i = 0; i < n_threads; i++) {
-		if (i < NUM_VECTOR_THREADS) nn_os_work_for_vector(nn,NULL,NULL);
+		if (i < Num_Vector_Threads) nn_os_work_for_vector(nn,NULL,NULL);
 		else nn_os_work_for_scalar(nn,NULL,NULL);
 	}
-	for (i = 0; i < TOTAL_THREADS; i++) {
+	for (i = 0; i < Total_Threads; i++) {
 		nn_thread_join(worker_info[i].tid,NULL);
 	}
+}
+
+int nn_os_update_main_thread_priority(struct nn_graph *nn, int *priority) {
+	int err = 0;
+	int new_priority = nn_os_get_main_thread_priority(nn->priority);
+	if (priority) {
+		err = nn_os_get_current_thread_priority(priority);
+		if (err) errlog(nn, "failed to get current thread priority");
+	}
+	if (0 == err) err = nn_os_set_current_thread_priority(new_priority);
+	return err;
+}
+int nn_os_restore_main_thread_priority(struct nn_graph *nn, int priority) {
+	return nn_os_set_current_thread_priority(priority);
 }
 
 int nn_os_workers_spawn(struct nn_graph *nn)
@@ -243,19 +296,19 @@ int nn_os_workers_spawn(struct nn_graph *nn)
 	if (nn->os_opaque != NULL) {
 		return errlog(nn,"OS workers already spawned?");
 	}
-	if ((worker_info = nn_calloc(sizeof(*worker_info),(2+NUM_VECTOR_THREADS))) == NULL) {
+	if ((worker_info = nn_calloc(sizeof(*worker_info),(Total_Threads))) == NULL) {
 		return nn_os_careful_free(nn,errlog(nn,"OS calloc fail"));
 	}
 	nn->os_opaque = worker_info;
 
-	if ((nn->vec_work = nn_pipe_alloc(nn, 128)) == NULL) {
+	if ((nn->vec_work = nn_pipe_alloc(nn, 1024)) == NULL) {
 		return nn_os_careful_free(nn,errlog(nn,"os pipe alloc fail"));
 	}
 	if ((nn->nonvec_work = nn_pipe_alloc(nn, 128)) == NULL) {
 		return nn_os_careful_free(nn,errlog(nn,"os pipe alloc fail"));
 	}
-	for (i = 0; i < TOTAL_THREADS; i++) {
-		if ((worker_info[i].stack = nn_malloc(STACK_SIZE)) == NULL) {
+	for (i = 0; i < Total_Threads; i++) {
+		if ((worker_info[i].stack = nn_malloc(Stack_Size)) == NULL) {
 			return nn_os_careful_free(nn,errlog(nn,"thread stack malloc fail"));
 		}
 		nn_sem_init(&worker_info[i].go,0);
@@ -266,9 +319,9 @@ int nn_os_workers_spawn(struct nn_graph *nn)
 	info.nn = nn;
 	nn_os_vector_init();
 
-	for (i = 0; i < TOTAL_THREADS; i++) {
-		nn_thread_attr_setstack(&attrs,worker_info[i].stack,STACK_SIZE);
-		if (i < NUM_VECTOR_THREADS) info.pipe = nn->vec_work;
+	for (i = 0; i < Total_Threads; i++) {
+		nn_thread_attr_setstack(&attrs,worker_info[i].stack,Stack_Size);
+		if (i < Num_Vector_Threads) info.pipe = nn->vec_work;
 		else info.pipe = nn->nonvec_work;
 		if (nn_thread_create(nn,&worker_info[i].tid,&attrs,nn_os_worker,&info) != 0) {
 			nn_os_join_n_threads(nn,i);
@@ -289,7 +342,7 @@ void nn_os_workers_kill(struct nn_graph *nn)
 		errlog(nn,"OS workers already killed?");
 		return;
 	}
-	nn_os_join_n_threads(nn,TOTAL_THREADS);
+	nn_os_join_n_threads(nn,Total_Threads);
 	nn_os_careful_free(nn,0);
 	logmsg(nn,4,"workers kill done");
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -61,9 +61,9 @@ static int biasadd_f_execute(struct nn_node *self, struct nn_graph *nn)
 
 	/* Assert min and max are size 1,1,1,1 ? */
 
-	if (bias_tensor->shape.height != 1) return errlog(nn,"bias shape");
-	if (bias_tensor->shape.batches != 1) return errlog(nn,"bias shape");
-	if (bias_tensor->shape.width != 1) return errlog(nn,"bias shape");
+	if (bias_tensor->shape.height != 1) return errlog(nn,"bias shape (height!=1)");
+	if (bias_tensor->shape.batches != 1) return errlog(nn,"bias shape (batches!=1)");
+	if (bias_tensor->shape.width != 1) return errlog(nn,"bias shape (width!=1)");
 	if (bias_tensor->shape.depth != depth) {
 		return errlog(nn,"depth mismatch %d vs %d",bias_tensor->shape.depth,depth);
 	}

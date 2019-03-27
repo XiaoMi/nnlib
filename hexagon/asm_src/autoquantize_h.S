@@ -94,6 +94,7 @@ quantize_floats_to_8b_asm:
 #define const31                     v19
 #define zero                        v20    //const zero 
 #define mask                        v21
+#define vscale                      v22
 /* --------------------------------------------------------------------------------------- */
     { p0 = cmp.gt(elements,#0)                          //
       if (!p0.new) jumpr:nt r31                         //
@@ -120,16 +121,17 @@ quantize_floats_to_8b_asm:
       l2fparam_l = combine(c128.l, numvec.l)            //
       lpcount = lsr(lpcount,#7)                         //
     }{
-      scaling = combine(scaling.l,scaling.l)            //
+//    scaling = combine(scaling.l,scaling.l)            //
       maxexp = vsplat(maxexp_in)                        //
       min_offset = vsplat(min_offset_in)                //
       partial = neg(elements)                           //
     }{
-      p3 = sp1loop0(.quantize_loop,lpcount)             //
       zero = #0                                         //
+      vscale = vsplat(scaling)                          //
       mantbits = #23                                    //
-      elements -= asl(lpcount,#7)                       //
+      p3 = sp1loop0(.quantize_loop,lpcount)             //
     }{
+      elements -= asl(lpcount,#7)                       //
       l2fetch(in_ptr,l2fparam)                          //
     } 
 .quantize_wait_l2fetch:    
@@ -167,12 +169,12 @@ quantize_floats_to_8b_asm:
       exp(0)  = vand(s_exp(0),const0000_00ff)           //[0, 1]
       mant(0) = vand(vals(0), const007f_ffff)           //[0, 1]
       mants(3).w = vlsr(mant(3).w,shift(3).w)           //[1,17]
-      halves0.h = vpacko(word1.w,word0.w)               //[1,17]
+      halves0.uh = vpack(word1.w,word0.w):sat           //[1,17]
     }{
       shift(0).w = vsub(maxexp.w,exp(0).w)              //[0, 2]
       p0 = cmp.gtu(boundary,in_ptr)                     //[0, 2]
       neg_mants(3).w = vsub(zero.w,mants(3).w)          //[1,18]
-      word2.w = vmpyi(smant(2).w,scaling.h)             //[1,18]
+      word2.w = vmpye(smant(2).w,vscale.uh)             //[1,18]
     }{
       mant(0) = vor(mant(0),const0080_0000)             //[0, 3]
       shift(0).w = vmin(shift(0).w,const31.w)           //[0, 3]
@@ -192,7 +194,7 @@ quantize_floats_to_8b_asm:
       neg_mants(0).w = vsub(zero.w,mants(0).w)          //[0, 6]
       shift(1).w = vsub(maxexp.w,exp(1).w)              //[0, 6]
       if (!p0) in_ptr = sub(in_ptr,c128)                //[0, 6]
-      word3.w = vmpyi(smant(3).w,scaling.h)             //[1,21]
+      word3.w = vmpye(smant(3).w,vscale.uh)             //[1,21]
     }{
       smant(0) = vmux(Q0,neg_mants(0),mants(0))         //[0, 7]
       mant(1) = vor(mant(1),const0080_0000)             //[0, 7]
@@ -206,9 +208,9 @@ quantize_floats_to_8b_asm:
       mants(1).w = vlsr(mant(1).w,shift(1).w)           //[0, 9]
       exp(2)  = vand(s_exp(2),const0000_00ff)           //[0, 9]
       mant(2) = vand(vals(2), const007f_ffff)           //[0, 9]
-      halves1.h = vpacko(word3.w,word2.w)               //[1,22]
+      halves1.uh = vpack(word3.w,word2.w):sat           //[1,22]
     }{
-      word0.w = vmpyi(smant(0).w,scaling.h)             //[0,10]
+      word0.w = vmpye(smant(0).w,vscale.uh)             //[0,10]
       neg_mants(1).w = vsub(zero.w,mants(1).w)          //[0,10]
       shift(2).w = vsub(maxexp.w,exp(2).w)              //[0,10]
       p0 = cmp.gtu(boundary,in_ptr)                     //[0,10]
@@ -228,7 +230,7 @@ quantize_floats_to_8b_asm:
       mant(3) = vand(vals(3), const007f_ffff)           //[0,13]
       bytes.b = vpacko(halves1.h,halves0.h)             //[1,23]
     }{
-      word1.w = vmpyi(smant(1).w,scaling.h)             //[0,14]
+      word1.w = vmpye(smant(1).w,vscale.uh)             //[0,14]
       neg_mants(2).w = vsub(zero.w,mants(2).w)          //[0,14]
       shift(3).w = vsub(maxexp.w,exp(3).w)              //[0,14]
     }{
@@ -249,20 +251,20 @@ quantize_floats_to_8b_asm:
       mask = vnot(zero)                                 //
     }{
       mants(3).w = vlsr(mant(3).w,shift(3).w)           //[1,17]
-      halves0.h = vpacko(word1.w,word0.w)               //[1,17]
+      halves0.uh = vpack(word1.w,word0.w):sat           //[1,17]
     }{
       neg_mants(3).w = vsub(zero.w,mants(3).w)          //[1,18]
-      word2.w = vmpyi(smant(2).w,scaling.h)             //[1,18]
+      word2.w = vmpye(smant(2).w,vscale.uh)             //[1,18]
     }{
       smant(3) = vmux(Q0,neg_mants(3),mants(3))         //[1,19]
       mask = valign(zero,mask,partial)                  //
     }{
       smant(3).w = vadd(smant(3).w,min_offset.w)        //[1,20]
     }{
-      word3.w = vmpyi(smant(3).w,scaling.h)             //[1,21]
+      word3.w = vmpye(smant(3).w,vscale.uh)             //[1,21]
       Q1 = vcmp.gt(mask.ub,zero.ub)                     //
     }{
-      halves1.h = vpacko(word3.w,word2.w)               //[1,22]
+      halves1.uh = vpack(word3.w,word2.w):sat           //[1,22]
     }{
       bytes.b = vpacko(halves1.h,halves0.h)             //[1,23]
     }{
@@ -407,3 +409,4 @@ find_minmax_of_floats_asm:
 /*=============================================================================*/
       .size find_minmax_of_floats_asm, .L_end_1-find_minmax_of_floats_asm
 /*=============================================================================*/
+

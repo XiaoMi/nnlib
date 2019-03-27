@@ -1,0 +1,191 @@
+
+/*
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted (subject to the limitations in the
+ * disclaimer below) provided that the following conditions are met:
+ *
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *
+ *    * Redistributions in binary form must reproduce the above
+ *      copyright notice, this list of conditions and the following
+ *      disclaimer in the documentation and/or other materials provided
+ *      with the distribution.
+ *
+ *    * Neither the name of The Linux Foundation nor the names of its
+ *      contributors may be used to endorse or promote products derived
+ *      from this software without specific prior written permission.
+ *
+ * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
+ * GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
+ * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+ * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+ * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ */
+
+All about the Depth32 Format
+
+
+
+Typically we get data in "NHWC" format: Number of elements in the batch, height, width, and channels (depth).  Depth is the most major.
+
+This is not a bad format, but there are some disadvantages:
+* The distance to the next value over in the width dimension is not a fixed or vector-friendly value
+* On the output, if we are computing some vector-friendly value of output depth
+  (like 32) we are doing partial stores, which are unfriendly to the cache and
+  bus and memory controller
+* For adding accelerated interfaces, having less state required for fast execution is advantageous
+* Whenever we need padding, we have to copy the data to make room for it
+
+The solution we came up with was to create a new format that we use internally.
+We call it "depth32" since "Slices-of-Bread" acronymn had an alternative
+meaning. :-)
+
+Typically we draw an activation like this:
+
+
+
+
+    _____
+   /    /|
+ D/    / |
+ /____/  |
+ |    |  |
+ |    |  /
+H|    | /
+ |____|/
+  W
+
+
+In the new format, instead of having the complete depth consecutive, we take
+only a slice of depth at a time:
+
+    _____
+   /____/|
+ D/____/||
+ /____/|||
+ |    ||||
+ |    |||/
+H|    ||/
+ |____|/
+  W
+
+These slices concatenated together contain all the same values, just as a loaf
+of sliced bread is still a whole loaf of bread.  It's just sliced up for
+convienience.
+
+In addition to keeping the depth direction in multiples of 32, we also now have
+the ability to have padding along H, W, and D dimensions.  Padding is considered
+to be values that are present in space, but do not hold any valid data. 
+
+The shape structure holds the shape of the actual data.  Additionally, there
+is padding information for before and after padding in each dimension.  The
+padding must make the following true:
+
+* Total depth including padding must be a multiple of 32
+* Total width including padding must be a multiple of 4
+
+This ensures that each row of width*32 yields an entire vector.
+
+Conventionally, although not required, we tend to make the following also true:
+
+* Left padding of 4 is typical, such that an entire vector is skipped and valid
+  data starts on an entire new vector.
+* Leaving top and bottom padding is recommended so that we can do padding without requiring copies
+
+
+
+
+**** Programming Helper Functions ****
+
+With various amounts of padding and data no longer consecutive, it can be difficult to know
+where the data you want actually is.  It is recommended to use the following functions:
+
+inline uint8_t *tensor_location_d32(
+	const struct tensor *src,
+	int32_t b,
+	int32_t h,
+	int32_t w,
+	int32_t d);
+
+Given a tensor and a specified b/h/w/d coordinates, assuming the type is uint8_t, yield a 
+pointer to the element at the specified coordinates.
+
+
+inline uint8_t *tensor_location_bwh_d32(
+	const struct tensor *src,
+	int32_t b,
+	int32_t h,
+	int32_t w);
+Given a tensor and a specified b/h/w coordinates, assuming the type is uint8_t, yield a 
+pointer to the 32-byte depth chunk at the coordinates. This is a multiple of 32, and
+is the start of depth-padding (if any), or the first depth byte (if no padding). 
+
+
+
+inline int32_t tensor_row_stride_d32(const struct tensor *src);
+
+For a given tensor, how many bytes from one row to the next?
+
+static inline int32_t tensor_d32_stride_d32(const struct tensor *src);
+
+For a given tensor, how many bytes from one set of depths to the next at a given H/W location?
+
+static inline int32_t tensor_batch_stride_d32(const struct tensor *src);
+
+For a given tensor, how many bytes offset when increasing the 'batch' index by 1?
+
+static inline int tensor_out_prepare_padded_d32(
+	struct tensor *dst,
+	uint32_t b,
+	uint32_t h,
+	uint32_t h_before,
+	uint32_t h_after,
+	uint32_t w,
+	uint32_t w_before,
+	uint32_t w_after,
+	uint32_t d,
+	uint32_t d_before,
+	uint32_t d_after,
+	uint32_t type)
+
+Fills out the shape and padding fields appropriately.
+
+These helper functions help to hide the details of the data format.  It is
+recommended that you use the helper functions for maintainability and readability.
+
+If you see some place where the functions are not used, it might be a good
+opportunity to change them and clean things up!  Especially if it is in a
+not-so-performance-sensitive area.
+
+
+**** Future Work ****
+
+One of the ideas in the depth32 format is that the format can potentially make
+interesting functionality more transparent.  Here are a few ideas:
+
+* By carefully setting up the output tensor with carefully chosen before/after
+  depth padding, the Concat node data movement could be replaced with carefully
+  placed output data.  Additionally, if the min/max values are coordinated in the
+  producers, the concat node can completely optimize away.
+
+* For large activations, tiling may be able to be accomplished by choosing large
+  left/right/top/bottom padding to point to the right amount of data
+
+* Currently, after we do 32*width values, we proceed to the next set of 32 depth.
+  Having the row_stride and d32_stride as separate parameters would allow us to 
+  change the memory format if needed without too much code modification.
+
+
+

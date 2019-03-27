@@ -42,9 +42,10 @@
 #include <stdint.h>
 #if defined(__hexagon__)
 #include <hexagon_protos.h>
-#else
-#include <math.h>
+#include <hexagon_types.h>
 #endif
+#include <math.h>
+#include "hvx_hexagon_protos.h"
 
 void avgpool_aligned_hvx(
 	uint8_t *out,
@@ -99,6 +100,93 @@ void vmemcpy_asm(void *dst, const void *src, int len);
 void vmemset_asm(void *dst, int val, int len);
 void vmemset_nt_asm(void *dst, int val, int len);
 #endif
+
+// 2d vector memcpy with src_pitch, dst_pitch being multiples of  vector
+void vmemcpy_2d_asm(
+  	 unsigned wid,			// bytes wide
+      unsigned ht,			//rows
+      void *dst,			// destination address, any allowed
+      int dst_pitch,		// row pitch of dest; must be multiple of vector
+      void const *src,		// source address, any allowed
+      int src_pitch);		// row pitch of source; must be multiple of vector
+// 2d vector memcpy with src_pitch, dst_pitch being anything
+void vmemcpy_2d_general_asm(
+  	 unsigned wid,			// bytes wide
+      unsigned ht,			//rows
+      void *dst,			// destination address, any allowed
+      int dst_pitch,		// row pitch of dest; any allowed
+      void const *src,		// source address, any allowed
+      int src_pitch);		// row pitch of source; any allowed
+
+
+// 2d vector memset: stride must be a multiple of vector, but the
+// start address and width can be arbitrary.
+// There are three versions, for filling bytes, int16, or int32;
+// note that for 16 and 32,
+//    (1) Each fill row starts with the lsb of the value, even if the address is not aligned;
+//    (2) The fill width in is *bytes*, not in elements, typically this would be a multiple of
+//       the element size.
+// Note: height <=0, and width <= 0 are tolerated cleanly.
+//
+void vmemset_32_2d_asm(
+      void * dst,         // location
+      int val,            // 32_bit value to fill
+      int width,          // width of rectangle (bytes), >0
+      int height,         // height of rectangle; rows > 0
+      int stride );       // stride of buffer; must be multiple of vector
+static inline void __attribute__((always_inline))
+vmemset_16_2d_asm(
+      void * dst,         // location
+      int val,            // 16_bit value to fill
+      int width,          // width of rectangle (bytes), >0
+      int height,         // height of rectangle; rows > 0
+      int stride )        // stride of buffer; must be multiple of vector
+{
+	vmemset_32_2d_asm(dst, Q6_R_combine_RlRl(val,val), width, height, stride);
+}
+static inline void __attribute__((always_inline))
+vmemset_2d_asm(
+      void * dst,         // location
+      int val,            // 8 bit value to fill
+      int width,          // width of rectangle (bytes), >0
+      int height,         // height of rectangle; rows > 0
+      int stride )        // stride of buffer; must be multiple of vector
+{
+	vmemset_32_2d_asm(dst, Q6_R_vsplatb_R(val), width, height, stride);
+}
+// the 'general' version of vmemset_2d is the same but does not require an aligned row stride.
+// It will split the operation into as many sub-arrays as needed, and fill these using vmemset_32_2d_asm;
+// for instance if the stride  is 5+1/4 vectors, and height is 15, it will split it into four parts, each with a stride
+// of 21 vectors; the first part has rows 0,4,8,12 of the original; the other 3 have (1,5,9,13)
+//  (2,6,10,14) and (3,7,11). So, the more aligned the stride is, the faster it will tend to go, but it
+// will always work (even if it has to do each row separately).
+void vmemset_32_2d_general_asm(
+      void * dst,         // location
+      int val,            // 32_bit value to fill
+      int width,          // width of rectangle (bytes), >0
+      int height,         // height of rectangle; rows > 0
+      int stride );       // stride of buffer; any value
+static inline void __attribute__((always_inline))
+vmemset_16_2d_general_asm(
+      void * dst,         // location
+      int val,            // 16_bit value to fill
+      int width,          // width of rectangle (bytes), >0
+      int height,         // height of rectangle; rows > 0
+      int stride )        // stride of buffer; any value
+{
+	vmemset_32_2d_general_asm(dst, Q6_R_combine_RlRl(val,val), width, height, stride);
+}
+static inline void __attribute__((always_inline))
+vmemset_2d_general_asm(
+      void * dst,         // location
+      int val,            // 8 bit value to fill
+      int width,          // width of rectangle (bytes), >0
+      int height,         // height of rectangle; rows > 0
+      int stride )        // stride of buffer; any value
+{
+	vmemset_32_2d_general_asm(dst, Q6_R_vsplatb_R(val), width, height, stride);
+}
+
 
 void gemacca_asm(const uint8_t * x, int N, int K, int *xsum, int y_offset);
 void gemaccb_asm(const uint8_t * y, int * ysum, int K, int);
@@ -230,8 +318,11 @@ void fast_im2col_co(
   uint8_t* im2col_buf, int filt_height, int filt_width, int stride,
   int start_line, int num_lines, int out_width, int pad_left, int pad_top, int skip_unpad_k);
 
+void histogram_flat_asm(uint16_t * histo, uint8_t const * data, int depth, int nbatches, int batch_stride );
+void histogram_d32_asm(uint16_t * histo, uint8_t const * data, int depth, int nbatches, int d32_stride );
 
-static inline void l2pref(const void *p, uint32_t height, uint32_t width, uint32_t stride)
+
+static inline void __attribute__((always_inline)) l2pref(const void *p, uint32_t height, uint32_t width, uint32_t stride)
 {
 #if defined(__hexagon__)
 	uint64_t control = Q6_P_combine_RR(stride,Q6_R_combine_RlRl(width,height));
@@ -239,12 +330,12 @@ static inline void l2pref(const void *p, uint32_t height, uint32_t width, uint32
 #endif
 }
 
-static inline void l2fetch(const void *p, uint32_t stride, uint32_t width, uint32_t height)
+static inline void __attribute__((always_inline)) l2fetch(const void *p, uint32_t stride, uint32_t width, uint32_t height)
 {
 	return l2pref(p,height,width,stride);
 }
 
-static inline void l2fetch_v(const void *p, uint32_t stride, uint32_t width, uint32_t height)
+static inline void __attribute__((always_inline)) l2fetch_v(const void *p, uint32_t stride, uint32_t width, uint32_t height)
 {
 #if defined(__hexagon__)
 	uint64_t control = Q6_P_combine_RR(Q6_R_combine_RlRl(1,stride),Q6_R_combine_RlRl(width,height));
@@ -252,12 +343,12 @@ static inline void l2fetch_v(const void *p, uint32_t stride, uint32_t width, uin
 #endif
 }
 
-static inline void wait_for_l2fetch()
+static inline void __attribute__((always_inline)) wait_for_l2fetch()
 {
 #if defined(__hexagon__)
 	int32_t usr;
 	do {
-		asm volatile ("%0 = usr" :"=r"(usr));
+		asm volatile ("nop ; %0 = usr ; nop" :"=r"(usr));
 	} while(usr < 0);
 #endif
 }
@@ -454,8 +545,8 @@ void gvconv2dbbb_v60_asm(
 
 void gvconv2dbbb_v66_asm(
 	const uint8_t *input,
-	const uint8_t *weights,
-	const uint8_t *output,
+	const int8_t *weights,
+	uint8_t *output,
 	int32_t in_width,
 	int32_t out_next_row,
 	int32_t out_width,
@@ -465,17 +556,39 @@ void gvconv2dbbb_v66_asm(
 	int32_t filt_height,
 	int32_t num_lines,
 	const int32_t *biasbuf,
-	const int32_t *suma,
-	int32_t next_suma,
 	int32_t *minmax_buf,
-	uint32_t recip_val,
+	const uint32_t * recip_val,
 	int32_t out_align,
-	int32_t skip_col);
+	int32_t skip_col,
+	int32_t out_next_d32,
+	int32_t nslice,
+        const int32_t *equalize);
+
+void gvconv2dbbbs1_d16_v66_asm( //special case for depths 48,80 etc.
+	const uint8_t *input,
+	const int8_t *weights,
+	uint8_t *output,
+	int32_t in_width,
+	int32_t out_next_row,
+	int32_t out_width,
+	int32_t stride_height_width,
+	int32_t in_depth,
+	int32_t filt_width,
+	int32_t filt_height,
+	int32_t num_lines,
+	const int32_t *biasbuf,
+	int32_t *minmax_buf,
+	const uint32_t * recip_val,
+	int32_t out_align,
+	int32_t skip_col,
+	int32_t out_next_d32,
+	int32_t nslice,
+        const int32_t *equalize);
 
 void gvconv2dbbbs1_v66_asm(
 	const uint8_t *input,
-	const uint8_t *weights,
-	const uint8_t *output,
+	const int8_t *weights,
+	uint8_t *output,
 	int32_t in_width,
 	int32_t out_next_row,
 	int32_t out_width,
@@ -485,12 +598,36 @@ void gvconv2dbbbs1_v66_asm(
 	int32_t filt_height,
 	int32_t num_lines,
 	const int32_t *biasbuf,
-	const int32_t *suma,
-	int32_t next_suma,
 	int32_t *minmax_buf,
-	uint32_t recip_val,
+	const uint32_t * recip_val,
 	int32_t out_align,
-	int32_t skip_col);
+	int32_t skip_col,
+	int32_t out_next_d32,
+	int32_t nslice,
+        const int32_t *equalize);
+
+void gvconv2dbbbs1x4_v66_asm(
+	const uint8_t *input,
+	const int8_t *weights,
+	uint8_t *output,
+	int32_t in_width,
+	int32_t out_next_row,
+	int32_t out_width,
+	int32_t stride_height_width,
+	int32_t in_depth,
+	int32_t filt_width,
+	int32_t filt_height,
+	int32_t num_lines,
+	const int32_t *biasbuf,
+	int32_t *minmax_buf,
+	const uint32_t * recip_val,
+	int32_t nc1,
+	int32_t nc2, 
+	int32_t out_next_d32,
+	int32_t nslice,
+        const int32_t *equalize);
+
+extern const unsigned char integral_control[];
 
 extern const unsigned char integral_control[];
 
@@ -918,4 +1055,85 @@ void find_minmax_of_floats_asm(
 	float const *ptr, 
 	uint32_t elements,
 	float *vminmax); 
+
+void getstats_asm(HVX_Vector *in_data,
+                  int32_t width32,
+                  int32_t next_width,
+                  int32_t height,
+                  HVX_Vector * sum,
+                  HVX_Vector * var,
+                  HVX_Vector * max,
+                  HVX_Vector * min);
+
+void visqrt64_asm(HVX_Vector * am,
+                  HVX_Vector * ae,
+                  HVX_Vector * cm,
+                  HVX_Vector * ce,
+                  const short * lut);
+
+void renorm_asm(HVX_Vector * in_vec,
+                int width32,
+                int next_row,
+                int height,
+                HVX_Vector * out_vec,
+                HVX_Vector * qmean,
+                HVX_Vector * qrsd);
+
+void inconv2dbbb332_v60_asm(
+        const uint8_t * input,
+        const uint8_t * weights,
+        uint8_t * output,
+        int in_width_pad,
+        int next_out_width_row,
+        int out_width,
+        int indepth,
+        int filt_width,
+        int filt_height,
+        int num_out_lines,
+        int32_t * minmax_buf,
+        int recip_level,
+        const int32_t *biasbuf,
+        const int32_t *ptr_suma,
+        int next_suma,
+        int stride_height_width);
+
+void fcsuma_asm(const uint8_t * input,
+                int width,
+                HVX_Vector * suma);
+
+void fullconnlayerbatch_asm(
+        const uint8_t ** ptr_in_batches,
+        const uint8_t *  filt_trans,
+        uint8_t       ** ptr_out_batches,
+        int              in_depth,
+        int              batches,
+        int32_t       *  max_asm,
+        int32_t        fixed_recip_level_size,  //reciprocal of max for quatnization
+        const int32_t *  biasadd,
+        int32_t       *  batch_sum,
+        int32_t          weight_offset
+);
+
+
+void conv3322bbb(
+	const uint8_t *input, 
+	const uint8_t *filt,
+	const int32_t *bias,
+	uint8_t *output,
+	int32_t out_width, 
+	int32_t out_height,
+	int32_t recip_level, 
+	int32_t zshift,
+	int32_t filt_offset,
+	int32_t in_next_row );
+
+void load_indata_d2(
+	const uint8_t *in, 
+	int32_t in_width, 
+	int32_t next_row,
+	int32_t left_pad,
+	int32_t right_pad,
+	int32_t in_offset, 
+	uint8_t *out,
+	int32_t remains);
 #endif

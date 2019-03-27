@@ -1,4 +1,3 @@
-
 /*
  * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
@@ -36,9 +35,9 @@
 #include <nn_graph.h>
 
 /*
- * 
+ *
  * Now that that's out of the way, let's get to the good stuff.
- * 
+ *
  * This contains the code to get/reset performance info
  */
 
@@ -64,6 +63,7 @@ static inline void config_event_hw(struct nn_graph *nn, uint32_t event)
 	pmu_write_pmuevtcfg(pmuevtcfg);
 }
 #else
+#ifndef NO_PMU_CONFIG
 #include <qurt.h>
 #include <qurt_event.h>
 #include "nn_graph_log.h"
@@ -79,7 +79,7 @@ static inline void config_event_hw(struct nn_graph *nn, uint32_t event)
     }
 
     hvxver.arch_version &= 0xff;
-    if (hvxver.arch_version == 0x65)
+    if (hvxver.arch_version >= 0x65)
     {
         qurt_pmu_set(QURT_PMUCFG, (event & 0x100) >> 8);
     }
@@ -87,17 +87,29 @@ static inline void config_event_hw(struct nn_graph *nn, uint32_t event)
     uint32_t pmuevtcfg = (event & 0xFF) | 0x0100;
     qurt_pmu_set(QURT_PMUEVTCFG,pmuevtcfg);
 }
+#endif // NO_PMU_CONFIG
 #endif
 
 int do_perfinfo_reset(struct nn_graph *nn, uint32_t event)
 {
 	struct nn_node *node;
+#ifdef NO_PMU_CONFIG
+	// Event 5 is usecs.  Doesnt' need PMU. Other events need PMU.
+	// Using PMU causes a problem and is not supposed to be used in
+	// production code, so we don't allow it.
+	// Using PMU interferes with sysmon and DCVS on DSP..
+	if (event != 5) {
+	    return -1;
+	}
+#endif // NO_PMU_CONFIG
 	for (node = nn->head; node != NULL; node = node->next) {
 		node->perfcounter = 0;
 		node->executions = 0;
 	}
 	nn->perf_event = event;
+#ifndef NO_PMU_CONFIG
 	if (event != 0) config_event_hw(nn,event);
+#endif // NO_PMU_CONFIG
 	return 0;
 }
 
@@ -107,7 +119,7 @@ int do_perfinfo_get(struct nn_graph *nn, struct perfinfo *info, uint32_t info_le
 	uint32_t i = 0;
 	for (node = nn->head; node != NULL; node = node->next) {
 		if (i >= info_len) return -1;
-		if (node->node_type != OP_Const) {
+		if( node->node_type != OP_Const){
 			info[i].node_id = node->node_id;
 			info[i].node_type = node->node_type;
 			info[i].executions = node->executions;

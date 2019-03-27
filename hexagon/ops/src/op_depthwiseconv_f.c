@@ -152,6 +152,7 @@ struct nn_node_ops nn_ops_for_DepthwiseConv2d_f = {
 	.check = depthwiseconv2d_check_f,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.flags = NN_NODE_FLAG_CLS_DWCONVF,
 };
 // 'reference' (same thing, but immune to being transformed by prepare.c)
 struct nn_node_ops nn_ops_for_DepthwiseConv2d_f_ref = {

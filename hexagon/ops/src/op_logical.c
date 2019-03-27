@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (mulject to the limitations in the
@@ -40,28 +40,102 @@
 #include <math.h>
 #include <nn_broadcast.h>
 
-static inline int32_t xor_helper(int32_t a, int32_t b, void *u) { return a^b; }
-static inline int32_t and_helper(int32_t a, int32_t b, void *u) { return a&b; }
-static inline int32_t ior_helper(int32_t a, int32_t b, void *u) { return a|b; }
+#define OPERATOR_AND(X,Y) ((X)&(Y))
+BROADCAST_STRIDE_11_FUNC( and_int32_stride_11, int32_t, OPERATOR_AND)
+
+static void  and_int32_stride_10( void *out, void const *in1, void const *in2, int n, void *opaque)
+{
+	int32_t * op = (int32_t*)out;
+	int32_t const * inp1 = (int32_t const *)in1;
+	int32_t xin2 = *(int32_t const *)in2;
+	if( n >0){
+		if (xin2 == -1) memcpy( out, in1, n*sizeof(int32_t));
+		else if (xin2 == 0) memset( out, 0, n*sizeof(int32_t));
+		else
+			for( int i =0; i < n; i++) op[i] = inp1[i]&xin2;
+	}
+}
+
+
+static const struct elementwise_funcs And_int32_funcs = {
+	.op_stride_11 = and_int32_stride_11,
+	.op_stride_10 = and_int32_stride_10,
+	.op_rev_stride_01 = and_int32_stride_10,
+	.in_elbytes = 4,
+	.out_elbytes = 4,
+	.out_typecode =  NN_TYPE_INT32
+};
 
 static int and_int32_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return broadcast_elementwise_execute_int32(self,nn,and_helper,NULL);
+	return nn_elementwise_with_broadcast( self, nn, &And_int32_funcs, NULL );
 }
+
+#define OPERATOR_IOR(X,Y) ((X)|(Y))
+BROADCAST_STRIDE_11_FUNC( ior_int32_stride_11, int32_t, OPERATOR_IOR)
+
+static void  ior_int32_stride_10( void *out, void const *in1, void const *in2, int n, void *opaque)
+{
+	int32_t * op = (int32_t*)out;
+	int32_t const * inp1 = (int32_t const *)in1;
+	int32_t xin2 = *(int32_t const *)in2;
+	if( n >0){
+		if (xin2 == 0) memcpy( out, in1, n*sizeof(int32_t));
+		else if( xin2 == -1) memset( out, -1, n*sizeof(int32_t));
+		else
+			for( int i =0; i < n; i++) op[i] = inp1[i]|xin2;
+	}
+}
+
+
+static const struct elementwise_funcs Ior_int32_funcs = {
+	.op_stride_11 = ior_int32_stride_11,
+	.op_stride_10 = ior_int32_stride_10,
+	.op_rev_stride_01 = ior_int32_stride_10,
+	.in_elbytes = 4,
+	.out_elbytes = 4,
+	.out_typecode =  NN_TYPE_INT32
+};
+
 static int ior_int32_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return broadcast_elementwise_execute_int32(self,nn,ior_helper,NULL);
+	return nn_elementwise_with_broadcast( self, nn, &Ior_int32_funcs, NULL );
 }
+#define OPERATOR_XOR(X,Y) ((X)^(Y))
+BROADCAST_STRIDE_11_FUNC( xor_int32_stride_11, int32_t, OPERATOR_XOR)
+
+static void  xor_int32_stride_10( void *out, void const *in1, void const *in2, int n, void *opaque)
+{
+	int32_t * op = (int32_t*)out;
+	int32_t const * inp1 = (int32_t const *)in1;
+	int32_t xin2 = *(int32_t const *)in2;
+	if( n >0){
+		if (xin2 == 0) memcpy( out, in1, n*sizeof(int32_t));
+		else
+			for( int i =0; i < n; i++) op[i] = inp1[i]^xin2;
+	}
+}
+
+
+static const struct elementwise_funcs Xor_int32_funcs = {
+	.op_stride_11 = xor_int32_stride_11,
+	.op_stride_10 = xor_int32_stride_10,
+	.op_rev_stride_01 = xor_int32_stride_10,
+	.in_elbytes = 4,
+	.out_elbytes = 4,
+	.out_typecode =  NN_TYPE_INT32
+};
+
 static int xor_int32_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return broadcast_elementwise_execute_int32(self,nn,xor_helper,NULL);
+	return nn_elementwise_with_broadcast( self, nn, &Xor_int32_funcs, NULL );
 }
 
 static int logical_int32_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"logical op node %p",self);
-	if (self->n_inputs != 2) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
+	int k = node_check_inputs_outputs_n( self,nn, "logical", 2, 1);
+	if( k!= 0) return k;
 	logmsg(nn,2,"logical op %p check OK",self);
 	return 0;
 }

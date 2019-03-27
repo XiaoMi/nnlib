@@ -44,26 +44,26 @@
 #include <string.h>
 #include <stdlib.h>
 #include <quantize.h>
-
+#include <hvx_inlines.h>
 #ifndef __hexagon__
 #include <malloc.h>
 #endif
 #define ALIGN_SIZE 128
 
+#define MAXMUL_THREADS 2
+
 /* 8x8 matrix multiply --> 32 bits */
-#if defined(__hexagon__)
-static int min(int a, int b) { return((a<b)?a:b); }
-#endif
 
 struct tdata {
 	struct nn_node *self;
-	void (*f)(struct nn_node *self, struct nn_graph *nn, int32_t a_off, int32_t b_off);
-	int retval;
-	nn_sem_t donesem;
+	void (*f)(struct nn_node *self, struct nn_graph *nn, int32_t a_off, int32_t b_off, uint32_t tid);
+	int32_t retval;
+	uint32_t tid;
+	nn_sem_t *donesem;
 };
 
 static inline int matmul_execute(struct nn_node *self, struct nn_graph *nn,
-		void (*f)(struct nn_node *self, struct nn_graph *nn, int32_t a_offset, int32_t b_offset))
+		void (*f)(struct nn_node *self, struct nn_graph *nn, int32_t a_offset, int32_t b_offset, uint32_t tid), uint32_t tid)
 {
 	const struct tensor *a_tensor = self->inputs[0];
 	const struct tensor *b_tensor = self->inputs[1];
@@ -135,7 +135,7 @@ static inline int matmul_execute(struct nn_node *self, struct nn_graph *nn,
 	tensor_set_single_float( out_min, out_min_val);
 	tensor_set_single_float( out_max, out_max_val);
 
-	f(self, nn, a_offset, b_offset);
+	f(self, nn, a_offset, b_offset, tid);
 
 	logmsg(nn,2,"matmul execute done!");
 	return 0;
@@ -144,29 +144,42 @@ static inline int matmul_execute(struct nn_node *self, struct nn_graph *nn,
 static void matmul_worker(struct nn_graph *nn, void *vtdata)
 {
 	struct tdata *td = vtdata;
-	td->retval = matmul_execute(td->self,nn,td->f);
-	nn_sem_post(&td->donesem);
+	td->retval = matmul_execute(td->self,nn,td->f, td->tid);
+	nn_sem_post(td->donesem);
 }
 
 static int matmul_launch(struct nn_node *self, struct nn_graph *nn,
-		void (*f)(struct nn_node *self, struct nn_graph *nn, int32_t a_offset, int32_t b_offset))
+		void (*f)(struct nn_node *self, struct nn_graph *nn, int32_t a_offset, int32_t b_offset, uint32_t tid))
 {
-	struct tdata td = {
-		.f = f,
-		.self = self,
-		.retval = 0,
-	};
-	nn_sem_init(&td.donesem,0);
-	nn_os_work_for_vector(nn,matmul_worker,&td);
-	nn_sem_wait(&td.donesem);
-	return td.retval;
+	struct tdata td[MAXMUL_THREADS];
+	nn_sem_t sem;
+
+	nn_scratch_reset(nn);
+
+	nn_sem_init(&sem,0);
+	for (int32_t i = 0; i < MAXMUL_THREADS; i++) {
+		td[i].f = f;
+		td[i].self = self;
+		td[i].tid = i;
+		td[i].retval = 0;
+		td[i].donesem = &sem;
+		nn_os_work_for_vector(nn, matmul_worker, &td[i]);
+	}
+	int res = 0;
+	for (int32_t i = 0; i < MAXMUL_THREADS; i++) {
+		nn_sem_wait(&sem);
+		res |= td[i].retval;
+	}
+	return res;
 }
 
 static inline void matmul_ref(
 		struct nn_node *self,
 		struct nn_graph *nn,
 		int32_t a_offset,
-		int32_t b_offset)
+		int32_t b_offset,
+		uint32_t tid
+	)
 {
 	const struct tensor *a_tensor = self->inputs[0];
 	const struct tensor *b_tensor = self->inputs[1];
@@ -188,6 +201,9 @@ static inline void matmul_ref(
 	uint32_t out_width = (a_tensor->shape.batches*a_tensor->shape.height*a_tensor->shape.width*a_tensor->shape.depth)/b_width;
 	uint32_t out_depth = b_depth;
 
+	if( tid != 0)
+		return;
+
     logmsg(nn,2,"a_widthxa_depth=%lux%lu a_offset=%ld b_offset=%ld",
     		out_width, b_width, a_offset, b_offset);
 	for (y = 0; y < out_width; y++) {
@@ -208,7 +224,9 @@ static inline void matmul_asm(
 		struct nn_node *self,
 		struct nn_graph *nn,
 		int32_t a_offset,
-		int32_t b_offset)
+		int32_t b_offset,
+		uint32_t tid
+		)
 {
 	const struct tensor *a_tensor = self->inputs[0];
 	const struct tensor *b_tensor = self->inputs[1];
@@ -220,47 +238,96 @@ static inline void matmul_asm(
 	uint32_t a_depth = b_tensor->shape.width;
 	uint32_t b_depth = b_tensor->shape.depth;
 	uint32_t a_batches = (a_tensor->shape.batches*a_tensor->shape.width*a_tensor->shape.height*a_tensor->shape.depth)/a_depth;
-	uint32_t out_width = a_batches;
 	uint32_t out_depth = b_depth;
 	int32_t i;
-
-    //SIM_ACQUIRE_HVX;
-    //SIM_SET_HVX_DOUBLE_MODE;
 
 	//int b_depth_pad = (b_depth + 32-1)&~(32-1);
 	int a_depth_pad = (a_depth + 16-1)&~(16-1);
 
-	// ASM code does not handle out_width != 1, for now use reference C code
-	if ((out_width == 1) && (a_batches == 1))
+	// ASM code may be used if a_batches ==1, or if a_depth is a multiple of 16.
+	// (since we need to keep aligned by 16 on a_ptr).
+	// If the output depth is not a multiple of 32, some batches will have misaligned output addresses.
+	// Each time we start a new batch, if the output address isn't aligned, we compute it to an aligned temp
+	// and copy those to the output using vmemcpy.
+	// When multiple threads are in use, we also need to do this when the *end* of the depth chunk is
+	// misaligned, to avoid over-writing the start of the next batch -- see comment below and 'all_misaligned'.
+	//
+
+	uint8_t const * bptr = (uint8_t const *)self->opaque;		// read 'b side' from here...
+	//
+	//if (a_batches == 1 || a_depth == a_depth_pad )	// can use hvx
+	if( a_batches==1 || a_depth == a_depth_pad)
 	{
 		logmsg(nn,2,"Pad A: a_widthxa_depth=%lux%lu,a_widthxa_depth_pad=%lux%d, a_offset=%ld b_offset=%ld",
 				a_batches, a_depth, a_batches,a_depth_pad, a_offset, b_offset);
+		// depth per thread: divide depth by (32*MAX_THREADS), rounded up; then *32
+		//
+		int depth_thread = ((out_depth + MAXMUL_THREADS*32 - 1) / (MAXMUL_THREADS*32))<<5;
+		int out_depth_start = tid * depth_thread;
+		int out_depth_end = min_i32( out_depth_start+depth_thread, out_depth);
+		int out_depth_todo = out_depth_end - out_depth_start;
+		if( out_depth_end <= out_depth_start)
+			return;
 
-		l2fetch(a, a_depth_pad, a_depth_pad, 1);
-
-		l2fetch((uint8_t *)self->opaque, a_depth_pad, a_depth_pad, 32);
-
-		for(i = 0; i < out_depth; i+=32) {
-			wait_for_l2fetch();
-
-			if ((i+32)< out_depth)
-				l2fetch((uint8_t *)self->opaque+(i+32)*a_depth_pad, a_depth_pad, a_depth_pad, 32);
-
-			gemvmpybbw_asm(
-				a,
-				-a_offset,
-				((uint8_t *)self->opaque)+i*a_depth_pad,
-				-b_offset,
-				((int *)out)+i,
-				min(32, out_depth-i),
-				a_depth_pad);
+		// allocate a work buffer, enough to hold our depth slice (only needed if depth misaligned).
+		int32_t * temp_buf = NULL;
+		if( ( out_depth & 31)!= 0 ){
+			temp_buf = (int32_t *) nn_scratch_alloc( nn, sizeof(int32_t) * ((out_depth_todo+31)&~31u) );
+			if( temp_buf == NULL) {
+				errlog(nn, "can't alloc scratch for %d ints", (int) out_depth_todo);
+				goto use_ref_code ;
+			}
 		}
-		//SIM_RELEASE_HVX;
+		// out_depth_start is always a multiple of 32. If out_depth_end is *not* a multiple
+		// of 32, we need to use the temp-copy on all operations, even if the start is aligned;
+		// otherwise we could spill over the end of the batch on top of work done by the other
+		// thread. Exception: if there is only one active thread, since out_depth <= 32, we don't
+		// need to do this (so, thread 0 never needs to); also if a_batches ==1 we don't need this.
+		//
+		int all_misaligned = (out_depth_end&31)!= 0 && tid != 0 && a_batches > 1;
+
+		for( uint32_t ibatch = 0; ibatch < a_batches; ibatch++){
+			uint8_t *aptr = a + a_depth_pad * ibatch;
+
+			l2fetch(aptr, a_depth_pad, a_depth_pad, 1);
+			l2fetch(bptr+ out_depth_start*a_depth_pad, a_depth_pad, a_depth_pad, min_i32(32, out_depth_todo));
+
+			int outpos = out_depth * ibatch+ out_depth_start; 	// offset of batch in output area.
+			int32_t *optr = out + outpos;		// actual output pos
+			int32_t *wptr = optr;				// output for the asm op
+			int is_misaligned = (outpos & 31) != 0 || all_misaligned;
+			if( is_misaligned)
+				wptr = temp_buf;		// if misaligned,store here instead
+			// loop through, do 32 outputs at once.
+			// if misaligned, on each 4 loops, copy out the temp data.
+			for(i = out_depth_start; i < out_depth_end; i+=32) {
+					wait_for_l2fetch();
+
+				if ((i+32)< out_depth_end)
+						l2fetch(bptr+(i+32)*a_depth_pad, a_depth_pad, a_depth_pad, min_i32(32, out_depth_end -i-32));
+
+				gemvmpybbw_asm(
+				    aptr,
+					-a_offset,
+					bptr+i*a_depth_pad,
+					-b_offset,
+					(int*) wptr,
+					min_i32(32, out_depth_end -i),
+					a_depth_pad);
+				wptr += 32;
+			}
+			if( is_misaligned ){	// copy remnant from the buffer
+				vmemcpy_asm( optr, temp_buf, out_depth_todo * sizeof(int32_t));
+			}				
+		}
 	}
 	else
 	{
-		matmul_ref(self, nn, a_offset, b_offset);
-		logmsg(nn,2,"matmul execute asm does not handle batches / out_width != 1, for now use reference C code!");
+		if( tid !=0)
+			return;
+	  use_ref_code:
+		matmul_ref(self, nn, a_offset, b_offset, tid);
+		logmsg(nn,2,"matmul execute asm does not handle this case, for now use reference C code!");
 
 	}
 	logmsg(nn,2,"matmul execute asm done!");
@@ -338,6 +405,9 @@ static int matmul_check_ref(struct nn_node *self, struct nn_graph *nn)
 	uint32_t vecinfo;
 	filt_elements_pad = (filt_elements_pad < 32)?32:filt_elements_pad;
 	consts_size = filt_elements_pad * out_depth_pad;
+	if (nn_scratch_grow(nn,consts_size)){
+		return errlog(nn,"couldn't allocate scratch buffer for const rearrangement");
+	}
 	if (self->opaque == NULL) {
 		if ((self->opaque = nn_memalign(ALIGN_SIZE,consts_size)) == NULL) {
 			return errlog(nn,"couldn't allocate buffer for const rearrangement");
@@ -357,9 +427,10 @@ static int matmul_check_ref(struct nn_node *self, struct nn_graph *nn)
 
 static int matmul_dtor(struct nn_node *self, struct nn_graph *nn)
 {
-	if (self->opaque) nn_free(self->opaque);
-	else logmsg(nn,0,"Oops: opaque pointer already gone?");
-	self->opaque = NULL;
+	if (self->opaque){
+		nn_free(self->opaque);
+		self->opaque = NULL;
+	}
 	return node_free_common(self,nn);
 }
 

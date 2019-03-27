@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -78,7 +78,11 @@ struct perfinfo {
 	};
 };
 
-uint32_t hexagon_nn_get_dsp_offset();
+struct initinfo {
+	int32_t priority;
+};
+
+int hexagon_nn_get_dsp_offset(uint32_t *libhexagon_addr, uint32_t *fastrpc_shell_addr);
 int hexagon_nn_version(int *ver);
 int hexagon_nn_last_execution_cycles(nn_id_t id, unsigned int *cycles_lo, unsigned int *cycles_hi);
 int hexagon_nn_init(hexagon_nn_nn_id *g);
@@ -89,6 +93,20 @@ int hexagon_nn_set_debug_level(nn_id_t id, int level);
 int print_node_perf(nn_id_t id);
 
 struct almost_a_tensor ;
+
+int hexagon_nn_config_with_options(
+	const struct uint_option_t *uint_options,
+	uint32_t num_uint_options,
+	const struct string_option_t *string_options,
+	uint32_t num_string_options
+	);
+int hexagon_nn_graph_config(
+	nn_id_t id,
+	const struct uint_option_t *uint_options,
+	uint32_t num_uint_options,
+	const struct string_option_t *string_options,
+	uint32_t num_string_options
+	);
 
 /* 
  * Definition / I/O for a Tensor
@@ -184,8 +202,22 @@ int hexagon_nn_get_perfinfo(nn_id_t id,
 	unsigned int info_out_len,
 	unsigned int *n_items_out);
 
+int hexagon_nn_get_nodetype(nn_id_t graph_id,
+			    nn_id_t node_id, 
+			    uint32_t *node_type);
+
+int hexagon_nn_variable_read( nn_id_t id, uint32_t node_id, int32_t output_index,
+	uint32_t *b_out, uint32_t *h_out, uint32_t *w_out, uint32_t *d_out,
+	uint8_t *data_out,	uint32_t data_out_max, 	uint32_t *data_out_len);
+int hexagon_nn_variable_write (	nn_id_t id, uint32_t node_id, int32_t output_index,
+	uint32_t batches_in, uint32_t height_in, uint32_t width_in, uint32_t depth_in,
+	const uint8_t *data_in, uint32_t data_len_in);
+int hexagon_nn_variable_write_flat( nn_id_t id, 	uint32_t node_id, int32_t output_index,
+	const uint8_t *data_in, uint32_t data_len_in);
+
 int hexagon_nn_op_name_to_id(const char *name, unsigned int *id);
 int hexagon_nn_op_id_to_name(const unsigned int id, char *name, int name_len);
 int hexagon_nn_set_powersave_level(unsigned int level);
+int hexagon_nn_set_powersave_details(hexagon_nn_corner_type corner, hexagon_nn_dcvs_type dcvs, unsigned int latency);
 
 #endif

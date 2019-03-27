@@ -1,0 +1,642 @@
+1	COUNTER0_OVERFLOW	Counter0 overflow. This can be used as the event detected by counter1 to build an effective 64-bit counter.
+2	COUNTER2_OVERFLOW	Counter2 overflow. This can be used as the event detected by counter3 to build an effective 64-bit counter.
+3	COMMITTED_PKT_ANY	Thread committed a pkt. Packets executed
+4	COMMITTED_PKT_BSB	Packet committed 2 cycles after previous packet in same thread.
+5	COUNTER4_OVERFLOW	Counter4 overflow. This can be used as the event detected by counter5 to build an effective 64-bit counter.
+6	COUNTER6_OVERFLOW	Counter6 overflow. This can be used as the event detected by counter7 to build an effective 64-bit counter.
+7	COMMITTED_PKT_B2B	Packet committed 1 cycle after previous packet in same thread.
+8	COMMITTED_PKT_SMT	2 packets committed in the same cycle.
+9	IU_CREDIT_FAIL	IU credit fail
+10	CYCLES_5_THREAD_RUNNING	Processor cycles that exactly 5 thread is running. Running means not in wait or stop
+11	CYCLES_6_THREAD_RUNNING	Processor cycles that exactly 6 thread is running. Running means not in wait or stop
+12	COMMITTED_PKT_T0	Thread 0 committed a pkt. Packets executed
+13	COMMITTED_PKT_T1	Thread 1 committed a pkt. Packets executed
+14	COMMITTED_PKT_T2	Thread 2 committed a pkt. Packets executed
+15	COMMITTED_PKT_T3	Thread 3 committed a pkt. Packets executed
+18	ICACHE_DEMAND_MISS	Icache demand miss. Includes secondary miss.
+19	DCACHE_DEMAND_MISS	Dcache cacheable demand primary or secondary miss. Includes dczero stall. Excludes uncacheables, prefetches, and no allocate store misses.
+20	DCACHE_STORE_MISS	Dcache cacheable store miss.
+23	CU_PKT_READY_NOT_DISPATCHED	Packets that were ready at the CU scheduler but were not scheduled because (1) its thread was not picked or (2) an intercluster resource conflict
+28	IU_L1S_ACCESS	IU L1S load. Demand or prefetch
+29	IU_L1S_PREFETCH	IU L1S Prefetch
+30	IU_L1S_AXIS_STALL	IU L1S Stall due to AXI slave
+31	IU_L1S_NO_GRANT	IU Request to L1S and no grant from VU
+32	ANY_IU_REPLAY	Any IU stall other than icache miss. Includes jump register stall, fetchcross stall, itlb miss stall, etc. Excludes CU replay.
+33	ANY_DU_REPLAY	Any DU replay. Bank conflict, store buffer full, etc. Excludes stalls due to cache misses.
+35	ISSUED_PACKETS	Speculatively issued packets delivered from IU.
+36	LOOPCACHE_PACKETS	Commmited packets which were cloned from the packet queue during a pinned hardware loop
+37	COMMITTED_PKT_1_THREAD_RUNNING	Committed pkts with 1 thread running. Not in stop/wait
+38	COMMITTED_PKT_2_THREAD_RUNNING	Committed pkts with 2 threads running. Not in stop/wait
+39	COMMITTED_PKT_3_THREAD_RUNNING	Committed pkts with 3 threads running. Not in stop/wait
+42	COMMITTED_INSTS	Committed instructions. Increments by up to 8 per cycle. Duplex counts as two instructions. Does not include endloops.
+43	COMMITTED_TC1_INSTS	Committed tc1 class instructions. Increments by up to 8 per cycle. Duplex of two tc1 instructions counts as two tc1 instructions.
+44	COMMITTED_PRIVATE_INSTS	Committed instructions that have per-cluster (private) execution resources. Increments by up to 8 per cycle. Duplex of two private instructions counts as two private instructions.
+47	COMMITTED_PKT_4_THREAD_RUNNING	Committed pkts with 4 threads running. Not in stop/wait
+48	COMMITTED_LOADS	Committed load instructions. Includes cached and uncached. Increments by 2 for dual loads. Excludes prefetches, memops, and coprocessor loads.
+49	COMMITTED_STORES	Committed store instructions. Includes cached and uncached. Increments by 2 for dual stores. Excludes memops and coprocessor stores.
+50	COMMITTED_MEMOPS	Committed memop instructions. Cached or uncached.
+55	COMMITTED_PROGRAM_FLOW_INSTS	Committed pkt contains program flow inst. Includes cr jumps, endloop, j, jr, dealloc_return, system/trap, superset of event 56. Dual jumps count as two.
+56	COMMITTED_PKT_CHANGED_FLOW	Committed pkt resulted in change-of-flow. Any taken jump. Includes endloop and dealloc_return.
+57	COMMITTED_PKT_ENDLOOP	Committed pkt contains an endloop which was taken
+59	CYCLES_1_THREAD_RUNNING	Processor cycles that exactly 1 thread is running. Running means not in wait or stop
+60	CYCLES_2_THREAD_RUNNING	Processor cycles that exactly 2 threads are running. Running means not in wait or stop
+61	CYCLES_3_THREAD_RUNNING	Processor cycles that exactly 3 threads are running. Running means not in wait or stop
+62	CYCLES_4_THREAD_RUNNING	Processor cycles that exactly 4 threads are running. Running means not in wait or stop
+63	AXI_LINE128_READ_REQUEST	128-byte line read requests issued by primary AXI master
+64	AXI_READ_REQUEST	All read requests issued by primary AXI master. Includes full line and partial line.
+65	AXI_LINE32_READ_REQUEST	32-byte line read requests issued by primary AXI master
+66	AXI_WRITE_REQUEST	All write requests issued by primary AXI master. Includes full line and partial line.
+67	AXI_LINE32_WRITE_REQUEST	32-byte line write requests issued by primary AXI master, all bytes valid
+68	AHB_READ_REQUEST	Read requests issued by AHB master
+69	AHB_WRITE_REQUEST	Write requests issued by AHB master
+70	AXI_LINE128_WRITE_REQUEST	128-byte line write requests issued by primary AXI master, all bytes valid
+71	AXI_SLAVE_MULTI_BEAT_ACCESS	AXI slave multi-beat access
+72	AXI_SLAVE_SINGLE_BEAT_ACCESS	AXI slave single-beat access
+73	AXI2_READ_REQUEST	All read requests issued by secondary AXI master. Includes full line and partial line.
+74	AXI2_LINE32_READ_REQUEST	32-byte line read requests issued by secondary AXI master
+75	AXI2_WRITE_REQUEST	All write requests issued by secondary AXI master. Includes full line and partial line.
+76	AXI2_LINE32_WRITE_REQUEST	32-byte line Write requests issued by secondary AXI master
+77	AXI2_CONGESTION	Secondary AXI command or data queue is full and an operation is stuck at the head of the secondary AXI master command queue.
+78	DMA_SLAVE_MULTI_BEAT_ACCESS	DMA slave multi-beat access.
+79	DMA_SLAVE_SINGLE_BEAT_ACCESS	DMA slave single-beat access.
+80	COMMITTED_FPS	Committed floating point instructions. Increments by 2 for dual fp ops. Excludes conversions
+81	REDIRECT_BIMODAL_MISPREDICT	Mispredict bimodal branch direction caused a control flow redirect.
+82	REDIRECT_TARGET_MISPREDICT	Mispredict branch target caused a control flow redirect. Includes RAS mispredict. Excludes indirect jumps and calls other than JUMPR R31 returns. Excludes direction mispredicts.
+83	REDIRECT_LOOP_MISPREDICT	Mispredict hardware loopend caused a control flow redirect. Can only happen when the loop has relatively few packets and the loop count is 2 or less.
+84	REDIRECT_MISC	Control flow redirect for a reason other than events 81, 82, and 83. Includes exceptions, traps, interrupts, non-R31 jumps, multiple initloops in flight, and others.
+86	NUM_PACKET_CRACKED	Number of packets cracked
+88	JTLB_MISS	Instruction or data address translation request missed in the JTLB.
+90	COMMITTED_PKT_RETURN	Committed a return instruction. Includes canceled returns.
+91	COMMITTED_PKT_INDIRECT_JUMP	Committed an indirect jump or call instruction. Includes canceled instructions. Does not include JUMPR R31 returns.
+92	COMMITTED_BIMODAL_BRANCH_INSTS	Committed bimodal branch. Includes .old and .new. Increments by 2 for dual jumps.
+93	BRANCH_QUEUE_FULL	Bimodal branch ignored. If queue is full.
+94	DU_REQUESTED_BUBBLE_INSERTED	The number of bubbles CU inserted at the request of DU in an effort to avoid DU port conflicts.
+95	VTCM_SCALAR_FIFO_FULL_CYCLES	Cycles cluster could issue scalar memory access to vtcm scalar fifo
+97	DU_L1S_LOAD_ACCESS	Scalar Load to L1S
+98	ICACHE_ACCESS	Number of I-cache line fetches.
+99	BTB_HIT	BTB hit.
+100	BTB_MISS	BTB miss.
+101	IU_DEMAND_SECONDARY_MISS	Icache secondary misses.
+102	IU_LINE_FROM_HWLOOP	IU line fetched from a detected hardware loop. Low power optimizations can elide various tag and data accesses here.
+103	FAST_FETCH_KILLED	Fast-fetch killed (after an I-cache access).
+104	IU_1_PKT_AVAILABLE_TO_ISSUE	Fetch that could issue one packet independent of available packet queue entries.
+105	FETCHED_PACKETS_DROPPED	Dropped packets because unable to deliver to CU.
+106	IU_REQUESTS_TO_L2_REPLAYED	IU requests to L2 replayed. Could be IU and DU collision to L2 or IU credit failure. Could fire multiple times for a single transaction.
+107	IU_PREFETCHES_SENT_TO_L2	IU prefetches sent to L2. Counts cachelines not dropped by L2. Excludes replayed prefetches and only counts ones L2 accepts.
+108	ITLB_MISS	ITLB miss which goes to JTLB.
+109	IU_2_PKT_AVAILABLE_TO_ISSUE	Fetch that could issue two packets independent of available packet queue entries.
+110	IU_3_PKT_AVAILABLE_TO_ISSUE	Fetch that could issue three packets independent of available packet queue entries.
+111	IU_REQUEST_STALLED	IU request stalled due to fill. Demand or prefetch fills from L2 to icache caused IU demand to stall.
+112	IU_BIMODAL_L2_ELIGIBLE	This event counts the number of branches which resolved which can go to L2.
+113	IU_0_PKT_AVAILABLE_TO_ISSUE	Fetch which could only issue a partial packet due to a jump to a packet which crosses cachelines boundary.
+114	FETCH_2_CYCLE	2-cycle actual (returns, loop end, fallthrough, BTB).
+115	FETCH_3_CYCLE	3-cycle actual.
+116	IU_PREFETCHES_DROPPED	IU prefetches aborted before accessing I$.
+117	L2_IU_SECONDARY_MISS	L2 secondary misses from IU.
+118	L2_IU_ACCESS	L2 cacheable access from IU. Any access to the L2 cache that was the result of an IU command, either demand or L1 prefetch access. Excludes any prefetch generated in the L2. Excludes L2Fetch, tcm accesses and uncacheables. Address must target primary AXI
+119	L2_IU_MISS	L2 misses from IU. Of the events qualified by 0x76, the ones that resulted in an L2 miss (demand miss or L1 prefetch miss). A L2 miss is any condition that prevents the immediate return of data to the IU, excluding pipeline conflicts.
+120	L2_IU_PREFETCH_ACCESS	Pre-fetch from the IU to L2. Any IU pre-fetch access sent to the L2 cache. Access must be L2 cacheable and target primary AXI. This does not include L2Fetch generated accesses.
+121	L2_IU_PREFETCH_MISS	L2 prefetch from IU miss . Of the events qualified by 0x78, the ones that resulted in an L2 miss.
+122	L2_IU_BRANCH_CACHE_WRITE_REQUEST	Requests sent from IU to the L2 to write the bimodal bits of instructions in L2. Includes all requests, without regard to target.
+123	L2_IU_BRANCH_CACHE_WRITE	Writes to the bimodal bits of instructions in L2. This is the number of event 122 requests that completed by updating memory in the L2 cache or TCM.
+124	L2_DU_READ_ACCESS	L2 cacheable read access from DU. Any read access from DU that may cause a lookup in the L2 cache. Includes loads, l1 prefetch, dcfetch. Excludes initial L2fetch command, uncacheables, tcm, and coprocessor loads. Must target AXI primary.
+125	L2_DU_READ_MISS	L2 read miss from DU. Of the events qualified by 0x7C, any that resulted in L2 miss. i.e. the line was not previously allocated in the L2 cache and will be fetched from backing memory.
+126	L2FETCH_ACCESS	L2fetch access from DU. Any access to the L2 cache from the L2 prefetch engine that was initiated by programing the L2Fetch engine. Includes only the cache inquire and fetch if not present commands.
+127	L2FETCH_MISS	L2fetch miss from a programed inquiry. Of the events qualified by 0x7E, the ones that resulted in L2 miss. i.e. the line was not previously allocated in the L2 cache and will be fetched from backing memory.
+128	L2_AXI_INTERLEAVE_DROP	L2 drops a return or converts to uncacheable due to AXI interleave buffer overflow.
+129	L2_ACCESS	All requests to the L2. Does not include internally generated accesses like L2Fetch, however the programing of the L2Fetch engine would be counted. Accesses target Odd or Even interleave, and may be L2 cacheable or TCM
+130	L2_PIPE_CONFLICT	Request not taken by the L2 due to a pipe conflict. The conflict may be a tag bank, data bank, or other pipeline conflict.
+131	L2_TAG_ARRAY_CONFLICT	Of the items in event 130, the ones caused by a conflict with the tag array
+132	AXI_RD_CONGESTION	Primary AXI read command queue is full and an operation is stuck at the head of the primary AXI master command queue.
+133	AHB_CONGESTION	Ahb congestion. Triggers when ahb interface is full and an operation is stuck at the head of the command queue.
+134	SNOOP_BLOCK	Snoop block. Triggers when a snoop is not accepted and the snoop is blocking the head of the return fifo, and the return fifo has other items.
+135	TCM_DU_ACCESS	TCM access from DU. DU access to the L2 tcm space. HVX requests are excluded
+136	TCM_DU_READ_ACCESS	TCM read access from DU. DU read access to the L2 tcm space. HVX requests are excluded
+137	TCM_IU_ACCESS	TCM access from IU. IU access to the L2 tcm space
+138	L2_CASTOUT	L2 castout. Triggers when L2 evicts a dirty line due to an allocation. not triggered on cache ops.
+139	L2_DU_STORE_ACCESS	L2 cacheable store access from DU. Any store access from DU that may cause a lookup in the L2 cache. Excludes cache ops, uncacheables, tcm, and coprocessor stores. Must target primary AXI
+140	L2_DU_STORE_MISS	L2 miss from DU. Of the events qualified by 0x8B, the ones that resulted in a miss. Specifically the cases where the line is not in cache or a coalesce buffer
+141	L2_DU_PREFETCH_ACCESS	L2 prefetch access from DU. Of the events qualified by 0x7C, the ones which are Dcfetch and dhwprefetch. These are L2 cacheable targeting AXI primary.
+142	L2_DU_PREFETCH_MISS	L2 prefetch miss from DU. Of the events qualified by 0x8D, which ones missed the L2
+143	L2_DU_RETURN_NOT_ACKED	L2 return to DU not acknowledged. This is active for any DU return, prefetch or demand. This event was renamed. I was called L2_DU_PREFETCH_NOT_ACKED
+144	L2_DU_LOAD_SECONDARY_MISS	L2 load secondary miss from DU. Hit busy line in the scoreboard which prevented a return. Busy condition may include pipeline bubbles caused by back to back loads, as may be seen on L1UC loads.
+145	L2FETCH_COMMAND	L2fetch command. Excludes stop command
+146	L2FETCH_COMMAND_KILLED	L2fetch command killed because a stop command was issued. Increments once for each L2fetch commands that is killed. If multiple commands are queued to the L2Fetch engine, the kill of each one will be recorded
+147	L2FETCH_COMMAND_OVERWRITE	L2fetch command overwrite. Kills old L2fetch and replaces with new one
+148	L2FETCH_ACCESS_CREDIT_FAIL	L2fetch access couldn't get a credit. L2fetch blocked because missing L2fetch or L2evict credit
+149	AXI_SLAVE_READ_BUSY	AXI slave read access hit a busy line
+150	AXI_SLAVE_WRITE_BUSY	AXI slave write access hit a busy line
+151	L2_ACCESS_EVEN	Of the events in 0x81, the number of accesses made to the even L2 cache.
+152	CLADE_HIGH_PRIO_L2_ACCESS	IU or DU request for a high priority CLADE region. Not counted for L2 Fetch.
+153	CLADE_LOW_PRIO_L2_ACCESS	IU or DU request for a low priority CLADE region. Not counted for L2 Fetch.
+154	CLADE_HIGH_PRIO_L2_MISS	CLADE high priority L2 Access that missed in L2.
+155	CLADE_LOW_PRIO_L2_MISS	CLADE low priority L2 Access that missed in L2.
+156	CLADE_HIGH_PRIO_EXCEPTION	CLADE high priority decode that had an exception.
+157	CLADE_LOW_PRIO_EXCEPTION	CLADE low priority decode that had an exception.
+158	AXI2_SLAVE_READ_BUSY	AXI secondary slave read access hit a busy line
+159	AXI2_SLAVE_WRITE_BUSY	AXI secondary slave write access hit a busy line
+160	ANY_DU_STALL	Any DU stall. Increments once when the thread has any DU stall (dcache miss or dtlb miss).
+161	DU_BANK_CONFLICT_REPLAY	DU bank conflict replay. Dual mem access to same bank but different lines.
+162	DU_CREDIT_REPLAY	No. of time the packet took a replay because there were insufficient qos du credits available.
+163	L2_FIFO_FULL_REPLAY	Counts L2 even/odd FIFO full replays.
+164	DU_STORE_BUFFER_FULL_REPLAY	First packet puts access in DU store buffer (memop, store.new, load/store bank conflict, store/store bank conflict). Any later packet tries to use store buffer before the first one evicts, and so must replay so the store buffer can drain.
+165	DU_STORE_BUFFER_FORCED_DRAIN	The number of times a store buffer underwent a forced drain
+166	DU_SNOOP_CONFLICT_REPLAY	DU snoop conflict replay. Set-based match with stores inflight while a snoop comes in, and we replay the store. Snoop reads and writes the cache, needs to finish before the store can write. Excludes the fill replay case that a snoop can cause.
+167	DU_SNOOP_REQUEST	DU snoop requests that were accepted
+168	DU_FILL_REPLAY	A fill has a index conflict with an instruction from the same thread in pipeline. Fills and demands might be from different threads if there is a prefetch from the deferral queue or a fill has not be ack'ed for too long and forces itself in to the pipeline.
+169	DU_SECMISS_REPLAY	A load hits on a reserved line while a fill is pending.
+170	DU_SNOOP_REQUEST_CLEAN_HIT	DU snoop request clean hit. Snoop hitting a clean line
+171	DU_EVICTIONS_SENT_TO_L2	Evictions sent by DU to L2
+172	DU_READ_TO_L2	DU read to L2. Total of everything that brings data from L2. Includes prefeches (dcfetch and hwprefetch). Excludes coprocessor loads.
+173	DU_WRITE_TO_L2	DU write to L2. Total of everything that is written out of DU to the L2 array. Includes dczeroa. Excludes dcclean, dccleaninv, tag writes, and coprocessor stores.
+175	DCZERO_COMMITTED	Commited a dczeroa instruction.
+179	DTLB_MISS	DTLB miss which goes to JTLB. When both slots miss to different pages, increments by 2. When both slots miss to the same page, only counts S1, since S1 goes first and fills for S0.
+181	DU_STORE_BUFFER_ACCESS	This event counts the no. of times an entry went to the store buffer.
+182	STORE_BUFFER_HIT_REPLAY	Store buffer hit replay due to a packet with 2 stores going to the same bank but different cachelines, followed by a load from an address that was pushed into the store buffer.
+183	STORE_BUFFER_FORCE_REPLAY	The store buffer must drain, forcing the current packet to replay. This usually happens on an cache index match between the current packet and store buffer. Could also a store buffer timeout.
+184	TAG_WRITE_CONFLICT_REPLAY	Counts intercluster tag write conflicts
+185	SMT_BANK_CONFLICT	Counts inter-thread SMT bank conflicts.
+186	PORT_CONFLICT_REPLAY	Counts all port conflict replays including the same cluster replays caused due to high priority fills and store buffer force drains, and intercluster ones as well.
+189	PAGE_CROSS_REPLAY	Page cross replay. Page cross from valid packet that caused replay. Excludes pdkill packets. Counts twice if both slots cause a page cross.
+190	DU_DEALLOC_SECURITY_REPLAY	Replays due to executing deallocframe or dealloc_return with FRAMEKEY != 0.
+191	DU_DEMAND_SECONDARY_MISS	DU demand secondary miss.
+192	DU_MISC_REPLAY	All DU replays not counted by other replay events. This event should count every time ANY_DU_REPLAY counts and no other DU replay event counts.
+195	DCFETCH_COMMITTED	Dcfetch committed. Includes hit and dropped. Does not include convert-to-prefetches.
+196	DCFETCH_HIT	Dcfetch hit in dcache. Includes hit valid or reserved line
+197	DCFETCH_MISS	Dcfetch missed in L1. Counts the dcfetch issued to L2 FIFO.
+200	DU_LOAD_UNCACHEABLE	Uncacheable load in L1 cache. Counts twice for dual uncachable loads.
+201	DU_DUAL_LOAD_UNCACHEABLE	Dual uncacheable loads in L1 cache.
+202	DU_STORE_UNCACHEABLE	Uncacheable store in L1 cache. Counts twice for dual uncachable stores. Excludes uncached memops.
+204	MISS_TO_PREFETCH	Dcache miss is converted to a prefetch. Could be the second load to miss in a packet, or a DMT subsequent packet on same thread. The normal dcache access will proceed when the first miss resolves. Includes converted prefetches into uncacheable space which will be cancelled later in the pipe.
+206	AXI_LINE64_READ_REQUEST	64-byte line read requests issued by primary AXI master
+207	AXI_LINE64_WRITE_REQUEST	64-byte line write requests issued by primary AXI master. All bytes valid
+208	AXI_WR_CONGESTION	Primary AXI write command or data queue is full and an operation is stuck at the head of the primary AXI master command queue.
+209	AHB_8_READ_REQUEST	An 8 byte AHB read was made.
+210	AXI_INCOMPLETE_WRITE_REQUEST	An L2 line-sized write was made to the primary AXI, but not all bytes were valid. This includes segmented writes. It excludes WT stores. The intent of this event is to capture the number of writes coalesced at a line level.
+211	L2FETCH_COMMAND_PAGE_TERMINATION	L2fetch command terminated because it could not get a page translation from VA to PA. Includes termination dues to permission errors. i.e. address translation could fail because the VA to PA is not in the TLB, or the propertys in the translation are not acceptable and the command terminates.
+212	REQUEST_STALL_WRITE_BUFFER_EXHAUSTION	Request to L2 stalled due to the lack of a write buffer. This is set for scalar and vectore stores.
+213	L2_DU_STORE_COALESCE	Events from 139 that were coalesced
+214	L2_STORE_LINK	Counts the number of times a new store links to something else in the scoreboard.
+215	L2_SCOREBOARD_70_PERCENT_FULL	Increments by 1 every cycle that the L2 scoreboard is at least 70% full. For a 32-entry scoreboard, this would mean 23 or more entries are consumed. This event continues to count even if the scoreboard is more than 80% full. For more than one interleave, this event only considers the scoreboard that has the most entries consumed.
+216	L2_SCOREBOARD_80_PERCENT_FULL	Increments by 1 every cycle that the L2 scoreboard is at least 80% full. For a 32-entry scoreboard, this would mean 26 or more entries are consumed. This event continues to count even if the scoreboard is more than 90% full. For more than one interleave, this event only considers the scoreboard that has the most entries consumed.
+217	L2_SCOREBOARD_90_PERCENT_FULL	Increments by 1 every cycle that the L2 scoreboard is at least 90% full. For a 32-entry scoreboard, this would mean 29 or more entries are consumed. For more than one interleave, this event only considers the scoreboard that has the most entries consumed.
+218	L2_SCOREBOARD_FULL_REJECT	The L2 scoreboard is too full to accept a selector request and the selector has a request.
+219	L2_DU_RETURN_REPLAYED	L2 return (demand or pre-fetch) replayed due to DU congestion.
+220	L2_EVICTION_BUFFERS_FULL	Counts every cycle when all eviction buffers in any interleave are occupied.
+221	AHB_MULTI_BEAT_READ_REQUEST	A 32 byte multi-beat AHB read was made.
+223	L2_DU_LOAD_SECONDARY_MISS_ON_SW_PREFETCH	Of the events in 0x90, the ones where the primary miss was a DCFETCH or L2FETCH.
+224	L2FETCH_DROP	L2Fetch data dropped since prior eviction has not completed
+225	REPLAY_MAXIMUM_FORCE	Maximum number of DU replays reached and this thread is forced through the DU by stalling the other threads
+226	SCHEDULER_WATCHDOG_FORCE	Number of times the CU scheduler watchdog forced a threadpick. This threadpick can be overriden by the livelock warning randomizer.
+227	LIVELOCK_REFETCH	Number of times the livelock detector triggered a refetch of all threads
+228	CYCLES_LIVELOCK_WARNING	Cycles core is randomizing scheduler due to passing livelock warning watermark. This could be a sign the core was not making forward progress, or simply that the watermark was set too low for legitimate stalls in the system.
+229	THREAD_OFF_PVIEW_CYCLES	Cycles cluster could not commit due to thread off or wait.
+230	ARCH_LOCK_PVIEW_CYCLES	Cycles cluster could not commit due to kernel lock or TLB lock.
+231	REDIRECT_PVIEW_CYCLES	Cycles cluster could not commit due to redirects such as branch mispredict.
+232	IU_NO_PKT_PVIEW_CYCLES	Cycles cluster could not commit due to IQ being empty.
+233	DU_CACHE_MISS_PVIEW_CYCLES	Cycles cluster could not commit due to D-cache cacheable miss.
+234	DU_BUSY_OTHER_PVIEW_CYCLES	Cycles cluster could not commit due to DU replay or DU bubble or DTLB miss.
+235	CU_BUSY_PVIEW_CYCLES	Cycles cluster could not commit due to register interlock, register port conflict, bubbles due to timing class such as tc_3stall, no B2B HVX, or HVX FIFO full.
+236	SMT_DU_CONFLICT_PVIEW_CYCLES	Cycles cluster could not commit because of DU resource conflict
+237	COPROC_BUSY_PVIEW_CYCLES	Cycles cluster could not commit because of coprocessor busy
+238	DU_UNCACHED_PVIEW_CYCLES	Cycles cluster could not commit due to D-cache uncacheable access.
+239	SYSTEM_BUSY_PVIEW_CYCLES	Cycles cluster could not commit due to system level stalls including DMA synchronization, ETM full, Qtimer read not ready, AXI bus busy, and global cache op synchronization.
+255	VOLTAGE_CLOCK_GATING_CYCLES	Cycles that core enabled voltage clock gating to mitigate a voltage droop event
+256	HVX_ACTIVE	VFIFO not empty
+257	HVX_WAIT_EMPTY	waiting context, qualified with cross-context VFIFO active
+258	HVX_EMPTY	VFIFO empty
+259	HVX_WAIT	Pipeline reserved by another context
+260	HVX_REG_ORDER	Increments by 2 per cycle in 128-byte mode. Stall cycles due to interlocks
+261	HVX_LD_VTCM_OUTSTANDING	Increments by 2 per cycle in 128-byte mode. Stall cycles due to vtcm load pending
+262	HVX_LD_L2_OUTSTANDING	Increments by 2 per cycle in 128-byte mode. Stall cycles due to load pending
+263	HVX_ST_VTCM_OUTSTANDING	Increments by 2 per cycle in 128-byte mode. Stall cycles due to store not yet allocated in L2
+264	HVX_ST_L2_OUTSTANDING	Increments by 2 per cycle in 128-byte mode. Stall cycles due to store not yet allocated in L2
+265	HVX_SCATGATH_OUTSTANDING	Scatter/gather: Network scoreboard not updated
+266	HVX_SCATGATH_SHARED_FULL	scatter/gather input buffer full
+267	HVX_ST_L2_SHARED_FULL	Increments by 2 per cycle in 128-byte mode. Insufficient space for data return to L2
+268	HVX_ST_ST_BANK_CONFLICT	VFIFO stall due to VTCM ST bank conflict with ST
+269	HVX_VTCM_BANDWIDTH_OVER	Bank Bandwidth exceeded
+270	HVX_OTHER_PART_OUTSTANDING	Other part of the packet in another context not ready in 128 Byte mode
+271	HVX_VOLTAGE_VIRUS_OVER	Throttling: Voltage virus overshoot
+272	HVX_VOLTAGE_UNDER	Increments by 2 per cycle in 128-byte mode. Throttling: Voltage model would exceed undershoot threshold
+273	HVX_POWER_OVER	Throttling: Sustained power exceeds budget
+274	HVX_PARTIAL_PKT	Increments by 2 per cycle in 128-byte mode. Stall cycles due to multi-issue packet
+275	HVX_PKT	Increments by 2 per packet in 128-byte mode. Packets with HVX instructions
+276	HVX_ST_DWR_BANK_CONFLICT	Store stall due to a DMA WR bank conflict
+280	HVX_PKT_THREAD	Committed packets on a thread with the XE bit set, whether executed in Q6 or coprocessor
+281	HVX_CORE_VFIFO_FULL_STALL	Number of cycles a thread had to stall due to VFIFO or SFIFO full
+282	HVX_L2_STORE_ACCESS	L2 cacheable store access from HVX. Any store access from HVX that may cause a lookup in the L2 cache. Excludes cache ops, uncacheables, scalar stores
+283	HVX_L2_STORE_MISS	L2 cacheable miss from HVX. Of the events qualified by 0xF9, the ones that resulted in a miss. Specifically the cases where the 64-byte-line address is not in the tag or a coalesce buffer. DCZero does not count as a miss, if it allocates without a backing store fetch
+284	HVX_L2_LOAD_ACCESS	L2 cacheable load access from HVX. Any load access from HVX that may cause a lookup in the L2 cache. Excludes cache ops, uncacheables, scalars
+285	HVX_L2_LOAD_MISS	L2 cacheable miss from HVX. Of the events qualified by 0xFB, the ones that resulted in a miss i.e. the 64-byte address was not previously allocated in the L2 tag array and data will be fetched from backing memory
+286	HVX_L2_LOAD_SECONDARY_MISS	Of the events in 0xFB, the ones where the load could not be returned due to the immediatately prior access for the line being a pending load or pending L2Fetch
+287	HVX_TCM_STORE_ACCESS	TCM store access for HVX. HVX store to the L2 tcm space
+288	HVX_TCM_LOAD_ACCESS	TCM load access for HVX. HVX load from the L2 tcm space
+296	VTCM_VECTOR_EXHAUSTED	VFIFO exhausted
+297	VTCM_VECTOR_SCALAR_ORDER	Scalar access needed first
+298	VTCM_VECTOR_LD_GATH_ORDER	RAW hazard with older gather or release store
+299	VTCM_VECTOR_LD_ST_ORDER	RAW hazard with older vector store
+300	VTCM_VECTOR_LD_FULL	load buffer full
+301	VTCM_VECTOR_SCATGATH_FULL	scatter/gather scoreboard full
+302	VTCM_VECTOR_ST_FULL	st scoreboard full
+303	VTCM_VECTOR_LD_ST_BANK_CONFLICT	bank blocked by an older vector store
+304	VTCM_VECTOR_LD_LD_BANK_CONFLICT	bank conflict with another vector load
+305	VTCM_VECTOR_LD_PARTIAL_PKT	Access without advancing VFIFO
+306	VTCM_VECTOR_ST_PARTIAL_PKT	Access without advancing VFIFO
+307	VTCM_VECTOR_LD_PKT	Access and advance to next VFIFO entry
+308	VTCM_VECTOR_ST_PKT	Access and advance to next VFIFO entry
+309	VTCM_VECTOR_SCATGATH_PKT	Access and advance to next VFIFO entry
+310	VTCM_VECTOR_NULL_PKT	Access and advance to next VFIFO entry
+311	VTCM_VECTOR_LD_DWR_BANK_CONFLICT	VTCM Bank conflict with DMA Write
+312	VTCM_VECTOR_LD_DWR_ORDER	VTCM Load is dependent with DMA Write
+313	VTCM_SCALAR_ACTIVE	Any VTCM Scalar interleave not empty
+314	VTCM_SCALAR_EMPTY	SFIFO empty, qualified with cross-interleave VTCM scalar active
+315	VTCM_SCALAR_PORT_CONFLICT	Hazard port conflict with other interleave if any storeboards are occupied
+316	VTCM_SCALAR_ST_ORDER	Hazard with older vector store
+317	VTCM_SCALAR_VECTOR_ORDER	Vector VTCM Scheduler not ordered with scalar access yet
+318	VTCM_SCALAR_LD_OUTSTANDING	L2 request not received
+319	VTCM_SCALAR_LD_SHARED_FULL	Insufficient space for data return to L2
+320	VTCM_SCALAR_BANK_CONFLICT	Bank conflict with an older vector store
+321	VTCM_SCALAR_LD_PIPELINE_CONFLICT	data return path to L2 occupied
+322	VTCM_SCALAR_BANDWIDTH_OVER	VTCM per bank bandwidth for scalar will exceed the global bandwidth limit
+323	VTCM_SCALAR_LD	Advance Scalar VTCM FIFO on load
+324	VTCM_SCALAR_LDHIT	Advance Scalar VTCM FIFO on load hit
+325	VTCM_SCALAR_ST	Advance Scalar VTCM FIFO on store
+326	VTCM_SCALAR_DWR	Advance Scalar VTCM FIFO on DMA command write
+328	SCATGATH_SB_ACTIVE	Any context scoreboard or the input buffer is not empty in a partition
+329	SCATGATH_SB_WAIT_EMPTY	waiting context, qualified with cross-context network scoreboard active
+330	SCATGATH_SB_EMPTY	selected context, qualified with cross-context network scoreboard active
+331	SCATGATH_SB_WAIT	Transaction counting hardware in use by another context
+332	SCATGATH_SB_OUTSTANDING	Outstanding transactions
+333	SCATGATH_SB	Vector deallocate
+336	SCATGATH_IN_EMPTY	Empty, qualified with any scatter/gather scoreboard not empty for partition
+337	SCATGATH_IN_OUTSTANDING	Outstanding elements
+338	SCATGATH_IN	Vector deallocate
+344	HVX_VREG_RD_EARLY_WR_1PKT	Vector operand read early with 1 cycle hazard
+345	HVX_VREG_RD_EARLY_WR_2PKT	Vector operand read early with 2 cycle hazard
+346	HVX_VREG_RD_EARLY_WR	Vector operand read early with no hazard
+347	HVX_VREG_RD_LATE_WR_1PKT	Vector operand read late with 1 cycle hazard
+348	HVX_VREG_RD_LATE_WR_2PKT	Vector operand read late with 2 cycle hazard
+349	HVX_VREG_RD_LATE_WR	Vector operand read late with no hazard
+350	HVX_VREG_WR_EARLY_WR_1PKT	Vector operand write early with 1 cycle hazard
+351	HVX_VREG_WR_EARLY_WR_2PKT	Vector operand write early with 2 cycle hazard
+352	HVX_VREG_WR_EARLY_WR	Vector operand write early with no hazard
+353	HVX_VREG_WR_LAT_WR_1PKT	Vector operand write late with 1 cycle hazard
+354	HVX_VREG_WR_LATE_WR_2PKT	Vector operand write late with 2 cycle hazard
+355	HVX_VREG_WR_LATE_WR	Vector operand write late with no hazard
+357	HVX_MAX_VOLT_UNDERSHOOT	Maximum Voltage Undershoot
+358	VDWB_EMPTY	DMA Write Buffer Empty
+359	VDWB_WR_ST_BANK_CONFLICT	DMA Write Buffer Empty
+360	VDWB_WR	DMA Write
+361	DMA_WR_SB_VALID	DMA Write Scoreboard valid
+362	HVX_VREG_RD_EARLY_WR_3PKT	Vector operand read late with 3 cycle hazard
+363	HVX_VREG_RD_LATE_WR_3PKT	Vector operand read late with 3 cycle hazard
+364	HVX_VREG_WR_EARLY_WR_3PKT	Vector operand write late with 3 cycle hazard
+365	HVX_VREG_WR_LATE_WR_3PKT	Vector operand write late with 3 cycle hazard
+1000	HVX_L2_STORE_ACCESS_UARCH	L2 cacheable store access from HVX. Any store access from HVX that may cause a lookup in the L2 cache. Excludes cache ops, uncacheables, scalar stores. This is the uarch side event
+1001	DU_BACKPRESSURE_CYCLES	Cycles lost due to du being unable to make a request to l2 due to l2fifo being full
+1002	SYNCHT_CYCLES	Pcycle stalls due to syncht instruction.
+1003	IU_CYCLES	Pcycle stalls due to IU not being able to deliver a packet.
+1004	PAUSE_CYCLES	Pcycle stalls due thread in pause state.
+1005	WAIT_CYCLES	Pcycle stalls due thread in wait state.
+1006	vecx_regdep	Pcycle stalls due thread vector register dependency
+1007	CYCLES_0_THREAD_RUNNING	Processor cycles that 0 threads running. In all wait or stop
+1008	FP_CYCLES	Pcycle stalls due to FP stall (should be deprecated)
+1009	PREDICATE_KILLS	Instructions canceled due to false conditions. Excludes control-flow instructions. Increments by up to 8 per cycle.
+1010	HVX_L2_LOAD_ACCESS_UARCH	L2 cacheable load access from HVX. Any load access from HVX that may cause a lookup in the L2 cache. Excludes cache ops, uncacheables, scalars. This is the uarch side event
+1011	HVX_TCM_STORE_ACCESS_UARCH	TCM store access for HVX. HVX store to the L2 tcm space. This is the uarch side event
+1012	HVX_TCM_LOAD_ACCESS_UARCH	TCM load access for HVX. HVX load from the L2 tcm space. This is the uarch side event
+1013	SCATGATH_SB_UARCH	Vector deallocate. This is the uarch side event
+1014	SCATGATH_IN_UARCH	Vector deallocate. This is the uarch side event
+1015	VTCM_SCALAR_LD_UARCH	Advance Scalar VTCM FIFO on load. This is the uarch side event
+1016	VTCM_SCALAR_ST_UARCH	Advance Scalar VTCM FIFO on store. This is the uarch side event
+1017	VTCM_VECTOR_SCATGATH_PKT_UARCH	Access and advance to next VFIFO entry. This is the uarch side event
+1018	VTCM_VECTOR_NULL_PKT_UARCH	Access and advance to next VFIFO entry. This is the uarch side event
+1019	VTCM_VECTOR_LD_PKT_UARCH	Access and advance to next VFIFO entry. This is the uarch side event
+1020	DU_UNCACHED_ALREADY_IN_DCACHE	Access marked uncached was already in D$, should be 0
+1021	IU_L1S_REQUEST_QOS	IU Fetch from L1S had to be arbitrated
+1022	DU_LOAD_MISS_CYCLES	Stalls due to load misses in L1 Dcache and L2.
+1023	DU_STORE_MISS_CYCLES	Stalls due to store misses in L1 Dcache.
+1024	DCACHE_STORE_ALLOCATES_REUSED	No. of times a store allocate was reused by a load
+1025	COPROC_CORE_DU_UNREADY_CYCLES	Number of cycles a thread had to stall due to coprocessor DU resource limits
+1026	HVX_L2FIFO_CYCLES	HVX interface needs retry b/c of l2fifo resource limits.
+1027	HVX_DU_RESOURCE_CYCLES	Coproc interface needs retry b/c of backend (i.e. R state in D$).
+1028	HVX_VFIFO_UNREADY_CYCLES	Coproc interface stalls due to VFIFO bandwidth limits. Should not occur in v60.
+1029	HVX_VFIFO_FULL_CYCLES	Coproc interface stalls due to VFIFO full, as seen by HVX
+1030	COPROC_CORE_EXT_BUSY_CYCLES	Number of cycles a thread had to stall due to non-DU coprocessor resource limits
+1031	DU_WAY_RESERVED_CYCLES	Stalls due to dcache way being reserved
+1032	CU_DU_UNCACHED_CYCLES	CU Scheduler no dispatch due to du uncached acceses.
+1033	DU_BANK_CONFLICT_CYCLES	Stalls due to DU bank conflict.
+1034	DU_UTLB_MISS_CYCLES	Stalls due to misses in the D's uTLB.
+1035	DU_PAGE_CROSS_CYCLES	Stalls due page crossover.
+1036	DU_STORE_BUFFER_FULL_CYCLES	Stall due to DU store buffer full.
+1037	DU_STORE_BUFFER_HIT_REPLAY_CYCLES	Number of stalls due to a load hitting in a store buffer.
+1038	DU_STORE_BUFFER_FORCE_REPLAY_CYCLES	Number of stalls due to a force drain of a store buffer.
+1039	PAGE_COLOR_MISMATCH	Number of page color mismatches
+1040	JU_TOTAL_WAIT_CYCLES	Sum of all the cycles all accesses spent waiting for jtlb access. This can be divided by the sum of itlb miss and dtlb miss to calculate average wait time.
+1041	L2TAG_OP_STALL_CYCLES	Stalls due to a L2tag operation
+1042	CU_INTERLOCK_CYCLES	Register interlock stall.
+1043	COPROC_FIFO_FULL_CYCLES	Number of cycles a thread had to replay due to scalar ext-fifo being full
+1045	BE_DUMMY_STALL_CYCLES	Used in trace mode to show commits.
+1046	BE_BRANCH_DELAY_CYCLES	It takes 2 cycles for the branch information to go to the FE.
+1047	DU_ALL_WAY_RESERVED	Number of time all D$ ways were reserved
+1048	CU_VFIFO_FULL_CYCLES	Stalls due to vfifo full.
+1050	INDIRECT_JUMP_CYCLES	Stalls due to indirect jumps
+1051	DU_FILL_CNFLT_CYCLES	Stalls from getting kicked out of the cache line even before the cache line was used.
+1052	VTCM_VECTOR_ST_PKT_UARCH	Access and advance to next VFIFO entry. This is the uarch side event
+1054	CU_NO_DISPATCH_CYCLES	Thread was not schedule by CU Dispatch for execution. This thread has no other stall.
+1055	CU_THREAD_OFF_CYCLES	CU Scheduler no dispatch due to thread off.
+1056	CU_ARCH_LOCK_CYCLES	CU Scheduler no dispatch due to cu locked.
+1057	CU_IQ_EMPTY_CYCLES	CU Scheduler no dispatch due to iq empty
+1058	CU_IU_BRANCH_MISS_CYCLES	CU Scheduler no dispatch due to branch mispredict.
+1059	CU_DU_MISS_CYCLES	CU Scheduler no dispatch due to du misses.
+1060	CU_DU_BUSY_CYCLES	CU Scheduler no dispatch due to du replays.
+1061	CU_REG_INTERLOCK_CYCLES	CU Scheduler no dispatch due to reg interlock.
+1062	CU_BE_NOB2B_CYCLES	CU Scheduler no dispatch due to no b2b interlock.
+1063	CU_LATE_READ_CYCLES	CU scheduler no dispatch due to late read interlock.
+1064	CU_EARLY_WRITE_CYCLES	CU Scheduler no dispatch due to early write interlock.
+1065	CU_NOB2B_EXTENSION_CYCLES	CU Scheduler no dispatch due to extension having no b2b restriction.
+1066	CU_RC_LDST_CYCLES	CU Scheduler no dispatch due to ldst resource conflict.
+1067	CU_RC_XU_CYCLES	CU Scheduler no dispatch due to xu resource conflict.
+1068	CU_RC_SLOT_CYCLES	CU Scheduler no dispatch due to no slots available.
+1069	CU_RC_EXTENSION_CYCLES	CU scheduler no dispatch due to no extension resource conflicts.
+1070	CU_RC_SOLO_CYCLES	CU scheduler no dispatch due to solo instruction restrictions.
+1071	CU_RC_FILL_CYCLES	CU Scheduler no dispatch due to fill
+1073	CU_LOCKED_CYCLES	Stalls from TLB lock contention.
+1074	MISPREDICT_TIME_CYCLES	CU penalty due to mispredicts.
+1075	NOT_SELECTED_CYCLES	Cycle spent sitting around not getting selected in non timing mode.
+1076	TOFF_CYCLES	Cycles for this thread in off mode.
+1077	K0LOCKED_CYCLES	Cycles stalled due to kernel lock.
+1078	BE_DUMMY_EXCEPT_STALL_CYCLES	TBD
+1079	FE_NEWVALUE_MISPREDICT_CYCLES	Stalls due to new value mispredict
+1080	CU_RXX_INTERLOCK_CYCLES	Interlock caused due to no b2b rxx network
+1081	POST_REPLAY_B2B_BLOCK	CU scheduling penalty for du miss or du busy
+1082	CU_DU_EVICT_CYCLES	CU scheduler no dispatch due to pending du evictions
+1083	DU_EVICT_PLACEHOLDER	Placeholder DU evict staller to trigger CU penalty
+1084	IU_FETCH_CROSS_CYCLES	Stalls due to jump target packet crossing 128 bit alignment.
+1085	IU_WAY_RESERVED_CYCLES	Stalls due to iu way being reserved.
+1086	IU_BACKPRESSURE_CYCLES	Stalls from BU back pressure
+1087	IU_UTLB_MISS_CYCLES	Stalls due miss in the I microTLB.
+1088	CU_JUMP_MISSPEC_CYCLES	Stalls due miss speculated jumps.
+1089	DU_MISS_CYCLES	Stalls due to misses in L1 Dcache and L2.
+1090	DU_P0_STBUF_FULL	Number of times port 0 store buffer was found full when needed
+1091	DU_P1_STBUF_FULL	Number of times port 1 store buffer was found full when needed
+1092	DU_SECMISS_CYCLES	Stalls waiting for inflight dcache line.
+1094	DU_PORT_CONFLICT_CYCLES	Stalls due to port conflict.
+1095	DU_FILL_CONFLICT_CYCLES	Replay due to a fill in the dcache in the same cycle.
+1096	COPROC_STORE_BUFFER_REPLAY	Replay due to Silver Store Buffer
+1097	DU_STATE_CONFLICT_CYCLES	Stalls due to state conflict.
+1098	DU_INDEX_CONFLICT_CYCLES	Stalls due to index conflict.
+1102	IU_RAS_MISS_CYCLES	Stalls due to miss in the Return Address Stack (RAS).
+1104	IU_UNCACHED_CYCLES	Stalls due to IU uncached.
+1106	IU_PAGE_CROSS_CYCLES	Stalls due IU page cross
+1107	L2FETCH_BACKPRESSURE_CYCLES	Number of l2fetches that were stalled due to previous one incomplete.
+1112	IU_HIT_CYCLES	IU_hit latency.
+1113	CU_BE_NOBSB_CYCLES	Packet could not issued because previous packed was not a bsb type packet. Example NCJ.
+1114	L2BUS_WAY_RESERVED_CYCLES	Stall due to L2bus way reserved for demand reads.
+1118	FE_MISPREDICT_TIME_CYCLES	FE penalty due to mispredicts.
+1119	IU_DEALLOC_RETURN_CYCLES	Number of stalls due to dealloc return.
+1121	COPROC_SILVER_EXTRACT_CYCLES	for extract cycles staller
+1122	VECX_REGREAD_CYCLES	Vector unit not issuing
+1123	IU_FILL_REPLAY_CYCLES	Stalls due to replay from a fill in the icache in the same cycle as the demand.
+1124	COPROC_SILVER_VIDX_CYCLES	Vector pipeline for vidx instruction.
+1125	COPROC_SILVER_L1S_CYCLES	L1S busy cannot service vfifo.
+1126	COPROC_SILVER_ALIGN_CYCLES	FIFO head waiting for 4 cycle alignment.
+1127	COPROC_SILVER_L1S_LOOKUP_CYCLES	L1S busy servicing vfifo, mlm, slave.
+1128	COPROC_SILVER_IDLE_CYCLES	For idle stats for staller
+1129	COPROC_SILVER_NOP_CYCLES	Vecx is putting in a nop bubble.
+1130	IU_TLB_MISS_CYCLES	Stalls due to I-side access to the smmu.
+1131	DU_TLB_MISS_CYCLES	Stalls due to D-side access to the smmu.
+1132	WALKER_DU_HIT_CYCLES	Stalls due to TLB walker hits in D$.
+1133	WALKER_DU_MISS_CYCLES	Stalls due to TLB walker misses in D$.
+1134	WALKER_DU_RETRY_CYCLES	Stalls due to TLB walker must retry D$.
+1135	L2F_UTLB_MISS_CYCLES	Stalls due to misses in L2FETCH's uTLB.
+1136	L2F_TLB_MISS_CYCLES	Stalls due to misses in L2FETCH's TLB.
+1137	IU_TLB_WALK_DUPLICATE_CYCLES	Stalls from back pressure from duplicate walks to same 4K page
+1138	DU_TLB_WALK_DUPLICATE_CYCLES	Stalls from back pressure from duplicate walks to same 4K page
+1139	L2F_TLB_WALK_DUPLICATE_CYCLES	Stalls from back pressure from duplicate walks to same 4K page
+1140	IU_TLB_WALK_CONTEXTS_FULL_CYCLES	Stalls from back pressure from unavailable tlb (full)
+1141	DU_TLB_WALK_CONTEXTS_FULL_CYCLES	Stalls from back pressure from unavailable tlb (full)
+1142	L2F_TLB_WALK_CONTEXTS_FULL_CYCLES	Stalls from back pressure from unavailable tlb (full)
+1143	COPROC_SILVER_IF_VFIFO_FULL_CYCLES	Silver interface is busy.
+1144	COPROC_MMVEC_ENGINE_POP_CYCLES	popped from vfifo
+1145	COPROC_MMVEC_ENGINE_IDLE_CYCLES	HVX engine Idle
+1146	L2CACHE_BACKPRESSURE_CYCLES	L2backpressure
+1147	L2CACHE_BUSY_CYCLES	L2busy
+1148	L2CACHE_IDLE_CYCLES	L2idle
+1149	FE_STALL_CYCLES	Fe stopped due 2 endloop fetch or indirect jump or FE fetch has not happened
+1150	CU_DU_XU_NO_FWD_CYCLES	No B2B network between DU and XU
+1151	CU_FP_RX_NO_NTWK_CYCLES	Interlock caused due to no FP->rxx network
+1153	CU_PREG_INTERLOCK_CYCLES	Predicate RAW hazard
+1154	DCACHE_DEMAND_MISS_CYCLES	Cycles for the stalls due demand misses.
+1155	COPROC_VFIFO_ENQUEUE	A packet was enqueued to the coprocessor vfifo.
+1156	IU_POP	
+1157	IU_POP_CYCLES	
+1158	ICACHE_DEMAND_MISS_CYCLES	Cycles for the stall that event 18 creates. Each cycle, incrementes by the number of threads currently stalling on an I-cache miss.
+1159	CU_LOOP_MISPREDICT_CYCLES	Stall due to loop setup refetch
+1160	CU_MAX_DISPATCH_CYCLES	Stall due to IQ full, all packets dispatched
+1161	CU_QOS_NODISPATCH_CYCLES	CU Scheduler no dispatch due to qos
+1162	BPUPDATE_SENT	Branch predictor update sent to L2
+1163	BPUPDATE_APPLIED	Branch predictor applied to L2
+1164	BPUPDATE_RETRIEVED	Branch predictor update retrieved by fetch to L2
+1165	CU_RC_SBFD_CYCLES	CU Scheduler no dispatch due to store buffer forced drain
+1166	PCTRACE_UNACCOUNTED_MISPREDICTS	Mispredicts that are not due COF instructions. Typically packet drops, or interrupts.
+1167	PCTRACE_UNACCOUNTED_MISPREDICTS_INTERRUPTS	Mispredicts that are not due COF instructions. Typically due to interrupts.
+1168	COMMITTED_PKT_TRACE	Committed pkt has trace instruction.
+1169	COMMITTED_PKT_TRAP	Committed pkt has trap instruction.
+1170	IPREFETCH_DROP_L2_MISS	iprefetch drops prefetch as the line is not in L2
+1171	CU_FP_GRANDPARENT_BLOCK_CYCLES	FP scheduling block for grandparent rules
+1172	DU_DEALLOC_SECURITY_REPLAY_CYCLES	DU takes replay due to dealloc instruction with framekey != 0.
+1173	REQUEST_STALL_SB_ENTRY_EXHAUSTION	Request to L2 stalled due to the lack of a scoreboard entry.
+1174	L2SB_PIPELINE_LOADS	Number of loads that were hit-hit pipelines
+1175	PKT_HAS_DUAL_WRITES_TO_SAME_REG	Number of times dual writes to same register were observed
+1176	PKT_HAS_DUAL_WRITES_TO_SAME_REG_AND_DEP	Number of times dual writes to same register were observedAND the next packet dependent on this register.
+1177	CU_DUAL_WRITE_INTERLOCK_CYCLES	Cycles unable to commit due to packets dependent of results of dual write cannot go BSB or B2B.
+1178	BPUPDATE_DROPPED	Branch predictor update dropped due to l2fifo being full
+1179	COPROC_SILVER_ENGINE_POP_CYCLES	popped from silver vfifo
+1180	L2FIFO_STORE_COALESCED	No. of times a store/memop was coalesced into l2fifo with a pending prior store/memop
+1181	COPROC_SILVER_ENGINE_REG_INTERLOCK_CYCLES	Silver engine register dependecy
+1182	COPROC_SILVER_ENGINE_BUSY_CYCLES	Silver engine busy
+1183	COPROC_SILVER_IF_VFIFO_UNREADY_CYCLES	Silver vfifo is not ready
+1185	SBUF_DUAL_DRAIN	No. of times both store buffers drained
+1186	SBUF_FWD_ON_LOAD_HIT	No. of times a store buffer entry was forwarded for a younger load on fully overlapping match (ld was subset of stbuf entry)
+1187	SBUF_STORE_MATCH	Number of times a store had a complete overlap with a store buffer entry
+1188	L2_MEMCOPY_BUSY_CYCLES	Cycles memcpy instructions couldn't issue because another one was active
+1189	HVX_Z_LOADS	Total number of HVX Z register loads
+1190	HVX_Z_LOADS_CANCELLED	Number of cancelled HVX Z register loads
+1191	HMX_BUSY_CYCLES	Cycles hmx instructions couldn't issue because it was stalled at du/vtcm interface or two many outstanding
+1192	COPROC_NETWORK_OP_LATENCY_CYCLES	Number of latency cycle for all network operations
+1194	IU_PKTQ_FULL	We came out of temporary IU stall, but pktq was full.
+1199	IU_PREFETCH_ACCESS	IU prefetch accesses
+1200	IU_PREFETCH_USED	Number of IU prefetches used
+1201	FPKR_IPREF_OVER_FNEXT	Fetch picker chose ipref over competing fetch-next request
+1202	DUNCACHED_DEMAND_MISS_CYCLES	Cycles for the stalls due demand misses that are uncached.
+1203	ENDLOOP_CYCLES	Stalls due to endloop speculation
+1204	EXCEPTION_CYCLES	Stalls due to exception flush
+1205	BTB_ACCEL_PIPELINE_SCHEDULED	Scheduled a faster btb pipeline (speculative)
+1206	BTB_ACCEL_PIPELINE_PICKED	Picked chose faster btb pipeline
+1212	CYCLES_7_THREAD_RUNNING	Processor cycles that exactly 7 thread is running. Running means not in wait or stop
+1213	CYCLES_8_THREAD_RUNNING	Processor cycles that exactly 8 thread is running. Running means not in wait or stop
+1214	COMMITTED_PKT_5_THREAD_RUNNING	Committed pkts with 5 threads running. Not in stop/wait
+1215	COMMITTED_PKT_6_THREAD_RUNNING	Committed pkts with 6 threads running. Not in stop/wait
+1216	COMMITTED_PKT_7_THREAD_RUNNING	Committed pkts with 7 threads running. Not in stop/wait
+1217	COMMITTED_PKT_8_THREAD_RUNNING	Committed pkts with 8 threads running. Not in stop/wait
+1218	FE_PICK_OTHER	Fetch picker chose another thread to go.
+1219	FE_PICK_IPREFETCH	Fetch picker chose iprefetch in small window after iu miss return.
+1220	FE_PICK_L2FILL	Fetch picker busy doing l2fill.
+1221	FE_TAG_CONFLICT	FE had conflict between 1D write and 1B read
+1222	DU_SLOT0_REPLAY	Slot 0 load replays when slot 1 fill comes on bank match
+1223	CU_RC_DUREP_CYCLES	CU Scheduler no dispatch due to DU replay
+1224	BTB_HIT_WRONG_SRC	
+1225	BTB_HIT_RIGHT_DEST_ICACHE_MISS	
+1226	BTB_HIT_WRONG_DST_PC	
+1227	BTB_MISS_ICACHE_MISS	
+1228	DCACHE_DEMAND_LOAD_MISS_CYCLES	Cycles for the stalls due to demand load misses.
+1229	DCACHE_DEMAND_STORE_MISS_CYCLES	Cycles for the stalls due demand store misses for write-allocate D$
+1230	DCACHE_L2HIT_DEMAND_LOAD_MISS_CYCLES	Cycles for the stalls due demand load misses that hit in L2.
+1231	DCACHE_L2HIT_DEMAND_STORE_MISS_CYCLES	Cycles for the stalls due demand store misses that hit in L2.
+1232	DCACHE_TCM_DEMAND_LOAD_MISS_CYCLES	Cycles for the stalls due demand load misses in L1D and TCM.
+1233	DCACHE_TCM_DEMAND_STORE_MISS_CYCLES	Cycles for the stalls due demand store misses in L1D and TCM.
+1234	DCACHE_AXI_DEMAND_LOAD_MISS_CYCLES	Cycles for the stalls due demand load misses coming over AXI.
+1235	DCACHE_AXI_DEMAND_STORE_MISS_CYCLES	Cycles for the stalls due demand store misses coming over AXI.
+1236	DCACHE_AXI2_DEMAND_LOAD_MISS_CYCLES	Cycles for the stalls due demand load misses coming over AXI2.
+1237	DCACHE_AXI2_DEMAND_STORE_MISS_CYCLES	Cycles for the stalls due demand store misses coming over AXI2.
+1238	DCACHE_AHB_DEMAND_LOAD_MISS_CYCLES	Cycles for the stalls due demand load misses coming over AHB.
+1239	DCACHE_AHB_DEMAND_STORE_MISS_CYCLES	Cycles for the stalls due demand store misses coming over AHB.
+1240	DUNCACHED_TCM_DEMAND_MISS_CYCLES	Cycles for the stalls due demand misses that are uncached in D$ and come from TCM.
+1241	DUNCACHED_AXI_DEMAND_MISS_CYCLES	Cycles for the stalls due demand misses that are uncached coming over AXI.
+1242	DUNCACHED_AXI2_DEMAND_MISS_CYCLES	Cycles for the stalls due demand misses that are uncached coming over AXI2.
+1243	DUNCACHED_AHB_DEMAND_MISS_CYCLES	Cycles for the stalls due demand misses that are uncached coming over AHB.
+1245	LOAD_ON_STORE_HIT_REPLAY	Number of loads and memops taking store buffer hit replays
+1246	STORE_ON_STORE_HIT_REPLAY	Number of stores taking store buffer hit replays
+1247	DU_SECMISS_REPLAY_CYCLES	Number of DU secmiss replays
+1248	COMMITTED_DWORD_LOADS	Committed dword load instructions. Includes cached and uncached. Increments by 2 for dual dword loads. Excludes prefetches, memops, and coprocessor loads.
+1249	COMMITTED_DWORD_STORES	Committed dword store instructions. Includes cached and uncached. Increments by 2 for dual dword stores. Excludes memops and coprocessor stores.
+1250	COMMITTED_INSNS_TC1	Committed tc_1 instructions
+1251	COMMITTED_INSNS_TC2	Committed tc_2 instructions
+1252	COMMITTED_INSNS_TC2LATEPRED	Committed tc_2latepred instructions
+1253	COMMITTED_INSNS_TC3	Committed tc_3 instructions
+1254	COMMITTED_INSNS_TC3X	Committed tc_3x instructions
+1255	COMMITTED_INSNS_TCNEWVJUMP	Committed tc_newvjump instructions
+1256	COMMITTED_INSNS_TC3STALL	Committed tc_3stall instructions
+1257	COMMITTED_INSNS_TCLD	Committed tc_ld instructions
+1258	COMMITTED_INSNS_TCST	Committed tc_st instructions
+1259	COMMITTED_INSNS_TC2EARLY	Committed tc_2early instructions
+1260	COMMITTED_INSNS_TC4X	Committed tc_4x instructions
+1261	COMMITTED_INSNS_TCLATEPRED_LDAIA	Committed tc_larepredldaia instructions
+1262	COMMITTED_INSNS_TCLATEPRED_STAIA	Committed tc_latepredstaia instructions
+1263	CANCELED_DOTNEWLOADS_EXCEPTION	Pred Cancelled Dot-new Load which would have caused an exception
+1264	CANCELED_DOTNEWSTORES_EXCEPTION	Pred Cancelled Dot-new Stores which would have caused an exception
+1265	UTRACE_LD_FORCED_WIDTH_1	Number of times loads were forced to have a width of 1 because width did not match address alignment
+1266	UTRACE_ST_FORCED_WIDTH_1	Number of times stores were forced to have a width of 1 because width did not match address alignment
+1267	PKT_HAS_NONSOLO_RETURN	Packet has return and some other instruction. Counts cancel ret as well
+1268	DCACHE_ACCESS	Number of instructions that accessed the D$ databank, memops counted once
+1269	CONSECUTIVE_SAMELINE_DCACCESS	Number of times same D$ line was accesssed by consecutive memory instructions
+1270	REDIRECT_MISC_UNEXPLAINED	Control flow redirect for a reason other than events 81, 82, and 83. Includes exceptions, traps, interrupts, non-R31 jumps, and others.
+1271	REDIRECT_MISC_JUMPR	Control flow redirect for non-R31 jumps.
+1272	REDIRECT_MISC_TRAP	Control flow redirect for a traps.
+1273	REDIRECT_MISC_EXCEPTION	Control flow redirect for exceptions and rte.
+1274	ASID_VAHIGH_MISMATCH_SBUF	Number of times there was an ASID or VA 31:12 mismatch while comparing a load/store with entries of store buffer that caused a replay
+1275	MEMCPY_CYCLES_ACTIVE	Cycles the memcpy engine is sending a request to the bus
+1276	MEMCPY_CYCLES_STALLED	Cycles the memcpy engine is stalled due to another bus access
+1277	MEMCPY_CYCLES_IDLE	Cycles the memcpy engine is idle
+1278	L2_ECC_PARTIAL_STORES	Stores in L2 that require merge of data during store lookup
+1288	INTERTHREAD_SBUF_HIT_REPLAY	Thread took a store buffer hit replay due to a match with another thread's store buffer entry
+1289	ICACHE_L2HIT_DEMAND_MISS_CYCLES	Cycles for the stalls due demand fetches.
+1290	ICACHE_L2MISS_DEMAND_MISS_CYCLES	Cycles for the stalls due demand fetches.
+1291	FE_POPQ	Can't dispatch, too many returns in flight.
+1292	REDIRECT_MISC_INITLOOP	Multiple initloops in flight.
+1293	L2SB_STORE_TO_LOAD_FWD	Load got data from store buffer.
+1294	CU_CREG_INTERLOCK_CYCLES	CR RAW hazard
+1295	FE_PKTQ_FULL	PKTQ full, stop fetching
+1296	FE_ISYNC	Can't dispatch, waiting for cu_redirect after getting isync.
+1297	MISC_STALL	Miscellaneous stall
+1298	TFE_CU_LOOP_RACE	Race
+1299	IU_NOTHIT_STOP_STALL	Private, should not count as staller should override stop reason.
+1300	IU_HIT_STOP_PKTQ_FULL	Fetch hole b/c pktq was full.
+1301	IU_HIT_STOP_BTB_HIT	Fetch hole b/c btb hit (jump).
+1302	IU_HIT_STOP_BTB_MISS	Fetch hole b/c btb miss (jump).
+1303	IU_HIT_STOP_JUMP_UNKNOWN	Fetch hole b/c trace did funky jump for unknown reason.
+1304	IU_HIT_STOP_ENDLOOP_TAKEN	Fetch hole b/c taken endloop jump.
+1305	IU_HIT_STOP_ENDLOOP_FALLTHROUGH	Fetch hole b/c endloop fallthrough on first iterations or last iterations.
+1306	IU_HIT_STOP_ISSUE_MAX	Fetch hole b/c endloop issued 3 pkts for a 4 cycle fetch (currently not possible?).
+1307	IU_HIT_STOP_PARTIAL	Fetch hole b/c we encountered partial pkt.
+1308	IU_HIT_STOP_EOL	Fetch hole b/c we fetched last packet in line and could not fetch further.
+1309	IU_HIT_STOP_RETURN	Fetch hole b/c we encountered return jump.
+1310	IU_HIT_STOP_PARTIAL_BOL	Fetch hole b/c we started at partial or bol and are going sequentially, fetched 1 or 2 pkts and hit end condition, so next fetch is in 3 cycles.
+1311	IU_HIT_STOP_ISSUE_MAX_NEXT_NONPARTIAL	Fetch hole b/c we issued 3, next pkt is full pkt in line and we go in 4 cycle.
+1312	IU_RAS_ADDR_UNAVAILABLE	Stalls due to miss in the Return Address Stack (RAS).
+1313	BTB_HIT_SLOWDOWN_SAME_PAGE_CHECK	Number of times BTB hit, but had to slow down due to not in same page.
+1314	CU_WRITE_PORT_BLOCK_CYCLES	CU Scheduler no dispatch a non tc4x insts due to write port blocked by B2B tc4x inst, which must be on the same slot.
+1315	CU_WRITE_REG_BLOCK_CYCLES	CU Scheduler no dispatch a non tc4x inst following a tc4x inst that write to the same register.
+1316	CU_BE_NO_IMT3_NCJ_CYCLES	CU Scheduler do IMT3 if a change of flow or imt solo follows a NCJ.
+1317	TAIA_FWD_SLOT0_TO_SLOT0	AIA forward from slot 0 to slot 0
+1318	TAIA_FWD_SLOT0_TO_SLOT1	AIA forward from slot 0 to slot 1
+1319	TAIA_FWD_SLOT1_TO_SLOT0	AIA forward from slot 1 to slot 0
+1320	TAIA_FWD_SLOT1_TO_SLOT1	AIA forward from slot 1 to slot 1
+1321	TPREDUSE_BSB	count of stall due to A_PREDUSE_BSB
+1322	CU_VEXTRACT_CYCLES	Stalls due to vextract full.
+1323	CU_NON_LAST_SUBPKT_CYCLES	CU Scheduler dispatch non last subpkt, real dispatch in RTL, logged as stall in ISS
+1324	FE_PKT_DRAIN	Can't dispatch, waiting for cu_redirect after getting packet draining.
+1325	CU_REVERSED_PREDICATE_CYCLES	No forward network for register generated in conditional exeuction (Pu.dotnew) instruction, which is in the first crack, while the predictor is in the second crack
+1326	FE_WAY_DELAY_FOR_BTB_MISS	FE don't know way for next cacheline due to btb miss
+1327	FE_WAY_DELAY_FOR_ENDLOOP_TAKEN	FE don't know way for next cacheline due to endloop taken, not hit in loop0cache
+1328	FE_WAY_DELAY_FOR_FIRST_CROSS	FE don't know way for next cacheline due to first cross one cacheline after being fetched
+1329	FE_WAY_DELAY_FOR_CU_REDIRECT	FE don't know way for next cacheline due to cu redirect
+1400	TCU_WRITE_PORT_BLOCK	CU Scheduler no dispatch a non tc4x inst following a tc4x inst that write through the same port.
+1401	TCU_EARLY_WRITE_PORT_BLOCK	CU Scheduler no dispatch an aia inst that has write port conflict with previous inst.
+1402	TCU_WRITE_PORT_USAGE_0	count the number of write ports is used per thread
+1403	TCU_WRITE_PORT_USAGE_1	count the number of write ports is used per thread
+1404	TCU_WRITE_PORT_USAGE_2	count the number of write ports is used per thread
+1405	TCU_WRITE_PORT_USAGE_3	count the number of write ports is used per thread
+1406	TCU_WRITE_PORT_USAGE_4	count the number of write ports is used per thread
+1407	TCU_WRITE_PORT_USAGE_5	count the number of write ports is used per thread
+1408	TCU_WRITE_PORT_USAGE_6	count the number of write ports is used per thread
+1409	TCU_WRITE_PORT_USAGE_7	count the number of write ports is used per thread
+1410	TCU_WRITE_PORT_USAGE_8	count the number of write ports is used per thread
+1411	TCU_WRITE_PORT_USAGE_MORE_THAN_8	count the number of write ports is used per thread
+1412	TCU_READ_PORT_USAGE_0	count the number of read ports is used per thread
+1413	TCU_READ_PORT_USAGE_1	count the number of read ports is used per thread
+1414	TCU_READ_PORT_USAGE_2	count the number of read ports is used per thread
+1415	TCU_READ_PORT_USAGE_3	count the number of read ports is used per thread
+1416	TCU_READ_PORT_USAGE_4	count the number of read ports is used per thread
+1417	TCU_READ_PORT_USAGE_5	count the number of read ports is used per thread
+1418	TCU_READ_PORT_USAGE_6	count the number of read ports is used per thread
+1419	TCU_READ_PORT_USAGE_7	count the number of read ports is used per thread
+1420	TCU_READ_PORT_USAGE_8	count the number of read ports is used per thread
+1421	TCU_READ_PORT_USAGE_MORE_THAN_8	count the number of read ports is used per thread
+1422	TCU_FWD_NTWK_USAGE_0	count the number of foward networks is used per thread
+1423	TCU_FWD_NTWK_USAGE_1	count the number of foward networks is used per thread
+1424	TCU_FWD_NTWK_USAGE_2	count the number of foward networks is used per thread
+1425	TCU_FWD_NTWK_USAGE_3	count the number of foward networks is used per thread
+1426	TCU_FWD_NTWK_USAGE_4	count the number of foward networks is used per thread
+1427	TCU_FWD_NTWK_USAGE_5	count the number of foward networks is used per thread
+1428	TCU_FWD_NTWK_USAGE_6	count the number of foward networks is used per thread
+1429	TCU_FWD_NTWK_USAGE_7	count the number of foward networks is used per thread
+1430	TCU_FWD_NTWK_USAGE_8	count the number of foward networks is used per thread
+1431	TCU_FWD_NTWK_USAGE_MORE_THAN_8	count the number of foward networks is used per thread
+1432	DC_FLUSHOP_COUNT	count the number of dcache flush instructions (dclean, dcleaninv, etc) committed
+1433	HVX_PKT_1_VA_OP	Packet has 1 VA Resource OP
+1434	HVX_PKT_2_VA_OP	Packet has 2 VA Resource OPs
+1435	HVX_PKT_3_VA_OP	Packet has 3 VA Resource OPs
+1436	HVX_PKT_4_VA_OP	Packet has 4 VA Resource OPs
+1437	HVX_PKT_1_VX_OP	Packet has 1 VX Resource OP
+1438	HVX_PKT_2_VX_OP	Packet has 2 VX Resource OPs
+1439	HVX_PKT_1_VS_OP	Packet has 1 VS Resource OP
+1440	HVX_PKT_1_VP_OP	Packet has 1 VP Resource OPs
+1441	HVX_PKT_1_VP_VS_OP	Packet has 1 VP VS Resource OPs
+1442	HVX_PKT_1_VA_DV_OP	Packet has 1 VA DV Resource OPs
+1443	HVX_PKT_2_VA_DV_OP	Packet has 2 VA DV Resource OPs
+1444	HVX_PKT_1_VX_DV_OP	Packet has 1 VX DV Resource OPs
+1445	HVX_PKT_4SLOT_OP	Packet has 1 4SLOT OPs
+1446	L2FETCH_EVICTED	L2 Fetched data was evicted before it was used
+1447	VTCM_SC_LD_DWR_ORDER	VTCM Load is dependent with DMA Write
+1448	VTCM_S_ST_DWR_ORDER	VTCM Load is dependent with DMA Write
+1449	VTCM_VECTOR_SC_LD_GATH_ORDER	RAW hazard with older gather or release store
+1450	VTCM_VECTOR_SC_ST_GATH_ORDER	RAW hazard with older gather or release store
+1451	VTCM_VECTOR_SC_LD_ST_ORDER	RAW hazard with older gather or release store
+1452	VTCM_VECTOR_SC_ST_ST_ORDER	RAW hazard with older gather or release store
+1453	VTCM_VECTOR_SC_LD_ST_BANK_CONFLICT	bank blocked by an older vector store
+1454	VTCM_VECTOR_SC_ST_ST_BANK_CONFLICT	bank blocked by an older vector store
+1455	VTCM_VECTOR_NO_ADVANCE_LD_LD	fifo not advancing due to load followed by load
+1456	VTCM_VECTOR_NO_ADVANCE_ST_ST	fifo not advancing due to store followed by store

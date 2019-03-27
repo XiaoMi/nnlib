@@ -1,10 +1,13 @@
 
-Coming up soon: 
-	* New internal data format
-	* Require max output shapes instead of just max output total byte sizes
-
 Experiment with block floating point instead, then we would just need to carry
 around exponent instead of min/max, and computations get much easier.
+
+If we don't have ReluX nodes, start with a guess max value (0.5?) and if we
+ever exceed it, double the max value and start the node all over.  Bonus: by
+removing all the ReluX nodes we get the accuracy that Block FP would give us
+
+
+Add a bunch more FP ops: Conv2D, Relu, BiasAdd, Reshape, etc.
 
 Cleanup Reshape/Flatten+Min+Max+Quantize into new Quantize node
 

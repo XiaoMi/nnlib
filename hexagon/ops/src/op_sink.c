@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -53,10 +53,39 @@ static int sink_check(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
+static int sink_dtor(struct nn_node *self, struct nn_graph *nn)
+{
+	self->opaque = NULL;
+	return node_free_common(self,nn);
+}
+
+static int sink_earlywork_register(struct nn_node *self, struct nn_graph *nn, struct nn_early_work *work)
+{
+	if (self->opaque == NULL) {
+		/* Maybe this should just be a logmsg and return instead of returning error */
+		logmsg(nn,2,"node %p: Oops, no predecessor registered.",self);
+		return 0;
+	}
+	struct nn_node *pred = self->opaque;
+	/* Now, pass the buck */
+	return pred->ops->earlywork_register(pred,nn,work);
+}
+
+static int sink_earlywork_note_pred(struct nn_node *self, struct nn_graph *nn, struct nn_node *predecessor)
+{
+	if (predecessor == NULL) return errlog(nn,"Oops: NULL predecessor");
+	logmsg(nn,2,"node %p: note predecessor %p",self,predecessor);
+	if (predecessor->ops->earlywork_register != NULL) self->opaque = predecessor;
+	else logmsg(nn,2,"predecessor %p has no early work registration function",predecessor);
+	return 0;
+}
+
 struct nn_node_ops nn_ops_for_Sink = {
 	.execute = sink_execute,
 	.check = sink_check,
 	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	.dtor = sink_dtor,
+	.earlywork_note_pred = sink_earlywork_note_pred,
+	.earlywork_register = sink_earlywork_register,
 };
 

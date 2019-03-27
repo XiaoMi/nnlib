@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -52,8 +52,10 @@ static int flatten_execute(struct nn_node *self, struct nn_graph *nn)
 	uint32_t width = self->inputs[0]->shape.width;
 	uint32_t depth = self->inputs[0]->shape.depth;
 	uint32_t elements = batches*height*width*depth;
+	uint32_t data_size = in_tensor->data_size;
+
 	logmsg(nn,2,"flatten execute. self=%p ",self);
-	if (out_tensor->max_size < in_tensor->data_size) {
+	if (out_tensor->max_size < data_size) {
 		return errlog(nn,"out too small. %p  Need %d, have %d. (for %d*%d*%d*%d)",
 			      out_tensor,
 			      in_tensor->data_size,
@@ -61,13 +63,19 @@ static int flatten_execute(struct nn_node *self, struct nn_graph *nn)
 			      batches, height, width, depth
 			);
 	}
-	/* TODO: check if input is D32 */
 	/* Copy input tensor to output */
 	tensor_set_shape(out_tensor,1,1,1,elements);
 	out_tensor->format = in_tensor->format;
-	out_tensor->data_size = in_tensor->data_size;
-	memcpy(out_tensor->data,in_tensor->data,in_tensor->data_size);
-	logmsg(nn,2,"copied tensor %d bytes of data",in_tensor->data_size);
+	out_tensor->data_size = data_size;
+	if( data_size> 0 && in_tensor->data != out_tensor->data){
+		struct nn_memcpy_manager  mcman;
+		nn_mcmanager_init(nn, &mcman );
+		nn_mcmanager_vmemcpy( nn, &mcman, out_tensor->data, in_tensor->data, data_size );
+		// wait for copy thread(s) if any
+		nn_mcmanager_wait( nn, &mcman );
+		//memcpy(out_tensor->data,in_tensor->data,in_tensor->data_size);
+	}
+	logmsg(nn,2,"copied tensor %d bytes of data",data_size);
 	return 0;
 }
 
@@ -80,19 +88,27 @@ static int qflatten_execute(struct nn_node *self, struct nn_graph *nn)
 	uint32_t width = self->inputs[0]->shape.width;
 	uint32_t depth = self->inputs[0]->shape.depth;
 	uint32_t elements = batches*height*width*depth;
+	uint32_t data_size = in_tensor->data_size;
+
 	logmsg(nn,2,"qflatten execute. self=%p ",self);
-	if (out_tensor->max_size < in_tensor->data_size) {
+	if (out_tensor->max_size < data_size) {
 		return errlog(nn,"out too small");
 	}
-	/* TODO: check if input is D32 */
 	/* Copy input tensor to output */
 	tensor_set_shape(out_tensor,1,1,1,elements);
 	out_tensor->format = in_tensor->format;
-	out_tensor->data_size = in_tensor->data_size;
-	memcpy(out_tensor->data,in_tensor->data,in_tensor->data_size);
+	out_tensor->data_size = data_size;
+	if( data_size> 0 && in_tensor->data != out_tensor->data){
+		struct nn_memcpy_manager  mcman;
+		nn_mcmanager_init(nn, &mcman );
+		nn_mcmanager_vmemcpy( nn, &mcman, out_tensor->data, in_tensor->data, data_size );
+		// wait for copy thread(s) if any
+		nn_mcmanager_wait( nn, &mcman );
+		//memcpy(out_tensor->data,in_tensor->data,in_tensor->data_size);
+	}
 	tensor_copy(self->outputs[1],self->inputs[1]);
 	tensor_copy(self->outputs[2],self->inputs[2]);
-	logmsg(nn,2,"copied tensor %d bytes of data",in_tensor->data_size);
+	logmsg(nn,2,"copied tensor %d bytes of data",data_size);
 	return 0;
 }
 
@@ -116,11 +132,15 @@ static int qflatten_check(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
+// supports aliasing: so it is possible the input and output
+// tensors will be at the same address.
+
 struct nn_node_ops nn_ops_for_Flatten = {
 	.execute = flatten_execute,
 	.check = flatten_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.flags = NN_NODE_FLAG_CLS_SUPPORTS_ALIAS
 };
 
 struct nn_node_ops nn_ops_for_QuantizedFlatten = {
@@ -128,5 +148,6 @@ struct nn_node_ops nn_ops_for_QuantizedFlatten = {
 	.check = qflatten_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.flags = NN_NODE_FLAG_CLS_SUPPORTS_ALIAS
 };
 

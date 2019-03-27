@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -50,16 +50,11 @@ static int split_impl(
 	int element_size,
 	int n_outs)
 {
-	//const struct tensor *dimdef_tensor = self->inputs[0];
+	const struct tensor *dimdef_tensor = self->inputs[0];
 	const struct tensor *data_tensor = self->inputs[1];
 	struct tensor **outs = self->outputs;
 	// @@ seems that cnns_alexnet.c is built using Split with in[0] == in[1]
-	int32_t dimdef = 3;// tensor_get_int32(dimdef_tensor,0);
-	int32_t depth = data_tensor->shape.depth;
-	int32_t width = data_tensor->shape.width;
-	int32_t height = data_tensor->shape.height;
-	int32_t batches = data_tensor->shape.batches;
-	int32_t out_depth = depth / n_outs;
+	int32_t dimdef = (dimdef_tensor == data_tensor)? 3:  tensor_get_int32(dimdef_tensor,0);
 	const char *in_data = (const char *) data_tensor->data;
 	const char *inptr;
 	char *outptr;
@@ -69,33 +64,72 @@ static int split_impl(
 	int copyn;
 	
 
-	logmsg(nn,2,"split node %p execute",self);
-	if( dimdef != 3){
-		return errlog(nn, "only works on depth");		// FIXME
-	}
-	if( out_depth*n_outs !=  depth){
-		return errlog(nn, "uneven split: %d / %d", depth, n_outs);
+	logmsg(nn,2,"split node %p execute, dim %d",self, (int)dimdef);
+
+	if( ! ( 0 <= dimdef && dimdef <= 3)){
+		return errlog(nn, "split dimension out of range");
 	}
 	if (n_outs == 1) {
-		return tensor_copy(outs[0],data_tensor);
+		struct nn_memcpy_manager mcman;
+		nn_mcmanager_init(nn, &mcman );
+		int res = nn_mcmanager_tensor_copy(nn,&mcman,outs[0],data_tensor);
+		nn_mcmanager_wait(nn, &mcman);
+		if( res != 0)errlog(nn,"out too small");
+		return res;
 	}
+	struct shape outshape = data_tensor->shape;
+	int old_dim = outshape.dimension[dimdef];
+	int new_dim =  old_dim / n_outs;
+	if( new_dim * n_outs != old_dim){
+		return errlog(nn, "uneven split: %d / %d", old_dim, n_outs);
+	}
+	outshape.dimension[dimdef] = new_dim;
 
 	for (i = 0; i < n_outs; i++) {
-		if( tensor_out_prepare_normal( outs[i],batches,height,width,out_depth, element_type )!=0)
+		if( tensor_out_prepare_normal_fromshape( outs[i],&outshape, element_type )!=0)
 			return errlog(nn,"out %d too small",i);
 	}
-	copyn = batches*height*width;	// # of distinct copies per output
-	bytestride = out_depth * element_size;	 // length per copy
+	// each copy is 'copyn' copies of size 'inner_count * element_size'
+	copyn = 1;
+	int inner_count = 1;
+	for( i = 0; i < 4; i++ ){
+		if( i == dimdef){
+			copyn = inner_count;
+			inner_count = 1;
+		}
+		inner_count *= outshape.dimension[i];
+	}
+	bytestride = inner_count * element_size; // length per copy
+
+	// use multi-copy manager to run the copies in vector threads.
+	struct nn_memcpy_manager  mcman;
+	nn_mcmanager_init(nn, &mcman );
 
 	for (j = 0; j < n_outs; j++) {
 		inptr = in_data + j*bytestride;
 		outptr = (char *)outs[j]->data;
+
+		if(copyn == 1){
+			nn_mcmanager_vmemcpy( nn, &mcman, outptr, inptr, bytestride );
+		}else{
+			// TODDO: break large copies up into smaller parts.
+			nn_mcmanager_vmemcpy_2d( nn, &mcman,
+					bytestride, copyn,			// width, height
+					outptr,bytestride,			// output & stride
+					inptr,	bytestride *n_outs );	// input & stride
+		}
+
+	/* scalar version
 		for (i = 0; i < copyn; i++) {
 			memcpy(outptr,inptr,bytestride);
 			outptr += bytestride;
 			inptr += (bytestride * n_outs);
 		}
+	 */
 	}
+
+	nn_mcmanager_wait( nn, &mcman );
+
 	return 0;
 }
 

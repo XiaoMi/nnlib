@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -87,6 +87,8 @@ void option_init(struct options *options);
 int is_option_flag(const char *flag);
 int do_option(struct options *options, int argc, const char **argv, int i);
 void option_print_help();
-void imagenet_top5(float *data, int length);
+void top5(float *data, int length);
+int load_labels(const char *labels_filename);
+void free_labels();
 
 #endif

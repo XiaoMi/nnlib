@@ -40,12 +40,16 @@
 typedef struct input hexagon_nn_input;
 typedef struct output hexagon_nn_output;
 typedef struct perfinfo hexagon_nn_perfinfo;
+typedef struct initinfo hexagon_nn_initinfo;
 
 typedef int32_t hexagon_nn_nn_id;
 typedef int32_t hexagon_nn_padding_type;
 
 #ifndef HEXAGON_NN_NO_RUNTIME
 #include <nn_graph.h>
+#if defined(__hexagon__)
+#include <pmu_control_linux.h>
+#endif
 #endif
 
  

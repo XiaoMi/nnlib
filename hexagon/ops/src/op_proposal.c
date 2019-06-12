@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -326,17 +326,12 @@ static int proposal_execute_f(struct nn_node *self, struct nn_graph *nn){
     return 0;
 }
 
-static int proposal_check_f(struct nn_node *self, struct nn_graph *nn){
-    logmsg(nn,2,"Checking proposal node %p",self);
-    if (self->n_inputs != 9 && self->n_inputs != 10) return errlog(nn,"proposal check: wrong # inputs");
-    if (self->n_outputs != 2 && self->n_outputs != 3) return errlog(nn,"proposal check: wrong # outputs");
-    logmsg(nn,2,"proposal node %p check OK",self);
-    return 0;
-}
 
 struct nn_node_ops nn_ops_for_Proposal_f = {
     .execute = proposal_execute_f,
-    .check = proposal_check_f,
+    .check = NULL,
     .ctor = node_alloc_common,
     .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT_RANGE(9,10),
+    .n_outputs = NN_IOCOUNT_RANGE(2,3),
 };

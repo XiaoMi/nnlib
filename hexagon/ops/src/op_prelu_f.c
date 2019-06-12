@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -83,19 +83,12 @@ static int prelu_execute(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-static int prelu_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking prelu node %p",self);
-	if (self->n_inputs != 2) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"prelu node %p check OK",self);
-	return 0;
-}
 
 struct nn_node_ops nn_ops_for_PRelu_f = {
 	.execute = prelu_execute,
-	.check = prelu_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(2),
+	.n_outputs = NN_IOCOUNT(1),
 };
-

@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -50,6 +50,8 @@ static int output_execute(struct nn_node *self, struct nn_graph *nn)
 	int i;
 	struct tensor *out;
 	const struct tensor *in;
+	if( nn_option_get(nn,debug_skip_output))  return 0;
+
 	logmsg(nn,2,"output execute. self=%p ",self);
 	if (nn->n_outputs != self->n_inputs) return errlog(nn,"bad # outputs");
 
@@ -62,15 +64,40 @@ static int output_execute(struct nn_node *self, struct nn_graph *nn)
 	for (i = 0; i < nn->n_outputs; i++) {
 		in = self->inputs[i];
 		out = &nn->outputs[i];
-		if (out->max_size < in->data_size) {
-			return errlog(nn,"output %d too small (%zu < %zu)",i, out->max_size, in->data_size);
-		}
-		out->shape = in->shape;
-		out->data_size = in->data_size;
+
 		if( in->data_size > 0){
-			nn_mcmanager_vmemcpy( nn, &mcman, out->data, in->data, in->data_size);
+			if(nn->loopstack.n > 0 && nn_graph_output_expanded(nn, i)){
+                uint32_t offset = nn_loopstack_get_offset(nn, i);
+
+                if (out->max_size < in->data_size + offset) {
+                    return errlog(nn,"output %d too small (%zu < %zu)",i, out->max_size, in->data_size + offset);
+                }
+
+                uint32_t iteration = nn_loopstack_get_itercount(nn);
+
+                if(iteration == 0){
+                    out->shape = in->shape;
+                    out->data_size = in->data_size;
+                }
+                else{
+                    out->shape.batches += in->shape.batches;
+                    out->data_size += in->data_size;
+                }
+
+                uint8_t* out_data = out->data;
+
+				nn_mcmanager_vmemcpy( nn, &mcman, out_data+offset, in->data, in->data_size);
+				nn_loopstack_increment_offset(nn, i, in->data_size);
+			}
+			else{
+                if (out->max_size < in->data_size) {
+                    return errlog(nn,"output %d too small (%zu < %zu)",i, out->max_size, in->data_size);
+                }
+                out->shape = in->shape;
+				out->data_size = in->data_size;
+				nn_mcmanager_vmemcpy( nn, &mcman, out->data, in->data, in->data_size);
+			}
 		}
-		//memcpy(out->data,in->data,in->data_size);
 	}
 	nn_mcmanager_wait( nn, &mcman);
 	/* Copy input tensor to output */
@@ -86,6 +113,8 @@ static int output_execute_multibatch(struct nn_node *self, struct nn_graph *nn)
 	int total_batches = nn->batchseq.total_batches;
 	int iter_batches = nn->batchseq.batchn;
 	
+	if( n_out < 1) return errlog(nn,"batch seq requires >=1 output!");
+
 	if( iterno == 0 ){	// first time through: find all the batch sizes.
 		if( outseq_desc == NULL ){		// need to allocate these
 			outseq_desc = (struct nn_batchseq_portdesc *)nn_calloc( n_out, sizeof(struct nn_batchseq_portdesc));
@@ -182,21 +211,13 @@ static int output_execute_multibatch(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-static int output_check(struct nn_node *self, struct nn_graph *nn)
-{
-	int i;
-	logmsg(nn,2,"Checking output node %p",self);
-	for (i = 0; i < self->n_inputs; i++) {
-		if (self->inputs[i] == NULL) return errlog(nn,"output: NULL input");
-	}
-	logmsg(nn,2,"output node %p check OK",self);
-	return 0;
-}
 
 struct nn_node_ops nn_ops_for_OUTPUT = {
 	.execute = output_execute,
-	.check = output_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_GE(0),	// could have 0 inputs.. not very useful
+	.n_outputs = NN_IOCOUNT(0),
 };
 

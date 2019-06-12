@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -136,32 +136,13 @@ static int avgpool_execute(struct nn_node *self, struct nn_graph *nn)
 
 
 
-
-static int avgpool_check(struct nn_node *self, struct nn_graph *nn)
-{
-	int i;
-	logmsg(nn,2,"Checking avgpool node %p",self);
-	if (self->n_inputs != 3) return errlog(nn,"avgpool wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"avgpool wrong # outs");
-	for (i = 0; i < self->n_inputs; i++) {
-		if (self->inputs[i] == NULL) {
-			return errlog(nn,"avgpool NULL input %d",i);
-		}
-	}
-	for (i = 0; i < self->n_outputs; i++) {
-		if (self->outputs[i] == NULL) {
-			return errlog(nn,"avgpool NULL output %d",i);
-		}
-	}
-	logmsg(nn,2,"avgpool node %p check OK",self);
-	return 0;
-}
-
 struct nn_node_ops nn_ops_for_AvgPool_f = {
 	.execute = avgpool_execute,
-	.check = avgpool_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 

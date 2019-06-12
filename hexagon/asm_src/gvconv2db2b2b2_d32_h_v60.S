@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -298,7 +298,11 @@ gvconv2db2b2b2u_d32_asm:
       sumainc_sumat = memd(r29+#APTR+32)            //
     }
     { memd(r29+#off_in_bufe) = in_bufoet            //
+#if defined(SPLIT_OUTPUT)
       out_bufet = add(ptr_ze,next_out_width)        //
+#else
+      out_bufet = addasl(ptr_ze,next_out_width,#1)  //
+#endif
       out_bufot = add(ptr_zo,next_out_width)        //
       sumat = add(sumat,sumainc)                    //
     }
@@ -473,10 +477,18 @@ gvconv2db2b2b2u_d32_asm:
       shh2.w = vadd(wsum.w,vsuma2.w)                //
       shh3.w = vadd(wsum.w,vsuma3.w)                //
     }
+#if defined(SPLIT_OUTPUT)
     { y1y0 = vdeal(y3,y1,c_1w)                      //
       vmem(ptr_ze++#1) = y0.new                     //
+#else
+    { vmem(ptr_ze++#1) = y1                         //
+#endif
     }
+#if defined(SPLIT_OUTPUT)
     { vmem(ptr_zo++#1) = y1                         //
+#else
+    { vmem(ptr_ze++#1) = y3                         //
+#endif
       if (p1) jump:t .L_width                       //
       out_x4 = add(out_x4,#-4)                      //[p2]
       p1 = cmp.gt(out_x4,#4)                        //[p2] last iteration

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -208,18 +208,9 @@ static int lrn_f_execute(struct nn_node *self, struct nn_graph *nn)
 static int lrn_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking lrn node %p",self);
-	if (self->n_inputs != 5) return errlog(nn,"LRN wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"LRN wrong # outs");
-	if (self->inputs == NULL) return errlog(nn,"NULL inputs");
-	if (self->outputs == NULL) return errlog(nn,"NULL outputs");
-	for (uint32_t i = 0; i < self->n_inputs; i++) {
-		if (self->inputs[i] == NULL) {
-			return errlog(nn,"input %d NULL",i);
-		}
-	}
-	for (uint32_t i = 0; i < self->n_outputs; i++) {
-		if (self->outputs[i] == NULL) {
-			return errlog(nn,"output %d NULL",i);
+	for (uint32_t i = 1; i < 5; i++) {
+		if (self->inputs[i]->data == NULL) {
+			return errlog(nn,"input %d not const",i);
 		}
 	}
 	const int32_t window_size = (int32_t) tensor_get_float(self->inputs[1], 0);
@@ -255,6 +246,8 @@ struct nn_node_ops nn_ops_for_LRN_f = {
 	.check = lrn_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 

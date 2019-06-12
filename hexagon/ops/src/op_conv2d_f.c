@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -150,34 +150,13 @@ static int conv2d_f_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-
-static int conv2d_check_ref(struct nn_node *self, struct nn_graph *nn)
-{
-	int i;
-	logmsg(nn,2,"Checking conv2d node %p",self);
-	if (self->n_inputs != 3) return errlog(nn,"conv2d id %x wrong # inputs",self->node_id);
-	if (self->n_outputs != 1) return errlog(nn,"conv2d wrong # outputs");
-	if (self->inputs == NULL) return errlog(nn,"NULL inputs");
-	if (self->outputs == NULL) return errlog(nn,"NULL outputs");
-	for (i = 0; i < self->n_inputs; i++) {
-		if (self->inputs[i] == NULL) {
-			return errlog(nn,"input %d NULL",i);
-		}
-	}
-	for (i = 0; i < self->n_outputs; i++) {
-		if (self->outputs[i] == NULL) {
-			return errlog(nn,"output %d NULL",i);
-		}
-	}
-	logmsg(nn,2,"conv2d node %p check OK",self);
-	return 0;
-}
-
 struct nn_node_ops nn_ops_for_Conv2d_f = {
 	.execute = conv2d_f_execute_ref,
-	.check = conv2d_check_ref,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 

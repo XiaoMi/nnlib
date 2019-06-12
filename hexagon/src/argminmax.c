@@ -32,6 +32,7 @@
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
+
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -174,6 +175,213 @@ hvx_argmin_or_max_in_rows( uint8_t const * data, int rows, int cols, int row_str
 	funnelreduce_flush_pipe( &frstate, outp + rows);
 }
 
+//The range of the indices is taken care of by the caller. indices are always valid
+//rowno is the width idx among the total number of width including back paddings(not including front paddings)
+//real_data_h is the pointer to the current height block
+//the widths in the same height block are connected (no paddings), so read the block based on the width index (w_idx)
+void get_4_width_block(int *rowno, int * h_idx, int * b_idx, int dim_w, int dim_h, struct tensor const * data_tensor,
+                       int dim_w_aligned, int h_stride, uint8_t **real_data_h,
+                       uint8_t ** out_row_p, int * out_num_valid_rows) {
+
+    //real_data_h points to the current h block
+    //figure out if should move to the next h block
+    int w_idx;
+    if(dim_w < 4) { //every 4w block is in a new h block
+        w_idx = 0;
+    }
+    else {
+        w_idx = *rowno % dim_w_aligned;// rowno can only be 0, 4, 8, 12,...; dim_w_aligned: round up dim_w to multiple of 4
+    }
+    *out_row_p = (uint8_t*)*real_data_h + w_idx*32;
+
+    //check if this is the last 4w of an h block
+    *out_num_valid_rows = 4;
+    if(w_idx + 4 >= dim_w) { //last 4w in h, or dim_w < 4
+        //update the pointer to the h block for the next function call
+        ++(*h_idx);
+        *real_data_h += h_stride;   //next height
+        if( (*h_idx) == dim_h) {
+            (*h_idx) = 0;
+            ++(*b_idx);
+            *real_data_h = tensor_location_bhw_d32(data_tensor,*b_idx,0,0); //next batch
+        }
+
+        if(w_idx + 4 > dim_w) {
+            *out_num_valid_rows = dim_w - w_idx;
+        }
+    }
+}
+
+//argmin/max along depth for d32 format
+void
+hvx_argmin_or_max_d_8_d32(struct tensor const * data_tensor, int32_t * outp, int find_argmax) {
+
+    HVX_Vector indices = *(HVX_Vector const *) const_Count32;        // bytes {0..31, 0..31, 0..31, 0..31}
+    indices = Q6_V_vand_VV(indices, Q6_V_vsplat_R(0xFF));            // { 0,4,8,..28, 0..28, 0..28, 0..28 } in w lanes.
+
+    // if we are finding min instead of max, invert all the  values as we read them.
+    HVX_Vector invert_input = Q6_V_vsplat_R(find_argmax ? 0 : -1);
+
+    int dim_b = data_tensor->shape.batches;
+    int dim_w = data_tensor->shape.width;
+    int dim_h = data_tensor->shape.height;
+    int dim_d = data_tensor->shape.depth;
+
+    int h_stride = tensor_row_stride_d32(data_tensor);
+
+    int rows;
+    int dim_w_aligned = (dim_w+3)& ~0x03;//round up dim_w to multiple of 4
+    rows = dim_b * dim_h * dim_w_aligned; //number of rows with paddings
+
+    int dim_d32blocks = (dim_d + 31) / 32;
+    int d32_block_stride =  tensor_d32_stride_d32(data_tensor);
+    uint8_t * real_data_h = tensor_location_bhw_d32(data_tensor,0,0,0); //points to each height block
+
+    int b_idx = 0;
+    int h_idx = 0;
+    int only_one = 0;
+
+    static const unsigned char vrdelta_controls[] __attribute__((aligned(128))) = {
+            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+            0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,
+            0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,
+            0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,
+            0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,
+            0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,
+            0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,
+    };
+
+    HVX_Vector depth_pattern =*(HVX_Vector*) vrdelta_controls;
+
+    HVX_VectorPred depth_mask_ub_last_d32 = Q6_Q_vsetq_R(dim_d%32u);
+    depth_mask_ub_last_d32 = Q6_V_vrdelta_VV(depth_mask_ub_last_d32, depth_pattern);  //mask of the last depth block
+    HVX_Vector depth_mask_ub = Q6_V_vand_QR(depth_mask_ub_last_d32, 0xFFFFFFFF);
+
+    uint8_t * new_4w0;
+    uint8_t * new_4w1;
+
+    int output_offset = 0;
+    int output_increment0 = 0;//dim_w % 4 == 0 ? 16 : (dim_w % 4) * 4;//num of bytes to output per 4 widths
+    int output_increment1 = 0;
+
+    for (int rowno = 0; rowno < rows; rowno += 4) {
+
+        // Read data block of every 4 widths. There are 32 quantized 8 values in one width. An HVX Vector can contain 4 widths
+        get_4_width_block(&rowno, &h_idx, &b_idx, dim_w, dim_h, data_tensor,
+                          dim_w_aligned, h_stride, &real_data_h, &new_4w0, &output_increment0);
+        only_one = (rowno + 4) >= rows; //only one rwo (4 widths) to be processed
+
+        if(only_one) {
+            new_4w1 = new_4w0;
+            output_increment1 = 0;
+        }
+        else {
+            rowno += 4;
+            get_4_width_block(&rowno, &h_idx, &b_idx, dim_w, dim_h, data_tensor,
+                              dim_w_aligned, h_stride, &real_data_h, &new_4w1, &output_increment1);
+        }
+
+        output_increment0 *= 4;  //num_valid_rows * 4-byte output per row
+        output_increment1 *= 4;
+
+        // prepare for a pass across
+        HVX_Vector allmin = Q6_V_vsplat_R(0x7FFFFFFF);
+
+        HVX_Vector curr_index = indices;
+        for (int i = 0; i < dim_d32blocks; i++) {
+
+            HVX_Vector vin0 = q6op_V_vldu_A((HVX_Vector *)&new_4w0[i * d32_block_stride]);
+            HVX_Vector vin1 = q6op_V_vldu_A((HVX_Vector *)&new_4w1[i * d32_block_stride]);
+
+            vin0 = Q6_V_vxor_VV(vin0, invert_input);
+            vin1 = Q6_V_vxor_VV(vin1, invert_input);
+
+            //update depth mask for the last d32 block
+            if((i+1) == dim_d32blocks && (dim_d % 32 != 0)) { //if dim_d %32 == 0, no garbage to mask out
+
+                vin0 = Q6_V_vand_VV(depth_mask_ub, vin0);   //keep valid depth values
+                vin1 = Q6_V_vand_VV(depth_mask_ub, vin1);
+            }
+
+            // Have loaded 4 widths of d32 data in an HVX vector
+            // Find min/max in every 4 bytes, and keep the min/max in the first byte. The rest is for keeping its index
+            HVX_VectorPair vshuf = Q6_Wb_vshuffoe_VbVb(vin1,
+                                                       vin0); //gather odd lanes in lo_W vshuf, even lanes in hi
+
+            HVX_Vector vmax = Q6_Vub_vmax_VubVub(Q6_V_lo_W(vshuf),
+                                                 Q6_V_hi_W(vshuf)); //reduce between odds and evens within vin_block
+
+            HVX_VectorPred oddcol = Q6_Q_vcmp_gt_VubVub(Q6_V_hi_W(vshuf), Q6_V_lo_W(
+                    vshuf)); //keep the indices of max between every two elems
+
+            // at this point, even b lanes belong to problem 0 and odd to problem 1.
+            // do it again, but with groups of 2
+            HVX_Vector vmax1 = Q6_Vh_vshuffo_VhVh(vmax, vmax);    //duplicate the odds
+            HVX_VectorPred odd2col = Q6_Q_vcmp_gt_VubVub(vmax1, vmax); //keep the indices of the groups of 2
+            vmax = Q6_Vub_vmax_VubVub(vmax, vmax1); //compare max of 0,1 and max of 2,3 to reduce every 4 elements
+
+            // ok, now:
+            // vmax lanes 0,4, .. 124 are the best value in each group of 4 lanes for problem 0
+            //            1,5 ..  125 are for problem 1
+            // the 'odd2col' value in those lanes tells us whether the byte came from first or 2nd group of 2.
+            //  but oddcol is trickier; it has bit 0 of the lane index, but we need to select odd or even
+            // lanes based on odd2col.
+            HVX_Vector lane_ind = Q6_V_vand_QR(oddcol, 0x01010101);  // get odd/even lane select
+            HVX_Vector lane_ind2 = Q6_V_vand_QR(odd2col, 0x0202); // bit 1 of lane select
+            lane_ind = Q6_V_vdelta_VV(lane_ind, lane_ind2);        // select odd/even from lane+0 or +2
+            lane_ind = Q6_V_vor_VV(lane_ind, lane_ind2);            // combine-indices within the 4 elememts group
+
+            // now each 'w' lane contains bytes { ind0, ind1, X,X } where 'ind0' is 0..3 for job0
+            // and ind1 is 0..3 for job1 .
+            // we need to extract these into two 'w' words (and add the 'curr_index' in the process)
+            HVX_Vector indices_0 = Q6_Vuw_vrmpyacc_VuwVubRub(curr_index, lane_ind, 0x000000001);
+            HVX_Vector indices_1 = Q6_Vuw_vrmpyacc_VuwVubRub(curr_index, lane_ind, 0x000000100);
+
+            // now we have, in each job, 32 'best indices' each describing a group of 4 lanes.
+            // need to combine these with the 'x' values now (xor them with 0x7f first)
+            // each w lane of vmax contains { max_0, max_1, xx, xx } - xx is garbage data
+            vmax = Q6_V_vxor_VV(vmax, q6op_Vb_vsplat_R(0x7F));
+
+            // insert those bytes in bits 31..24 of each index word.
+            // apply the even slots to indices_0 (shifting out 24 bits of garbage in the process)
+            indices_0 = Q6_Vw_vaslacc_VwVwR(indices_0, vmax, 24);
+            indices_1 = Q6_Vw_vaslacc_VwVwR(indices_1, Q6_Vb_vshuffo_VbVb(vmax, vmax), 24);
+
+            // now we have two groups of 32 which need min-reducing. transpose them together and reduce across.
+            // Then, even w lanes contain the results for problem 0, odd lanes for problem 1.
+            HVX_VectorPair sh = Q6_W_vshuff_VVR(indices_1, indices_0, 4);
+            allmin = Q6_Vw_vmin_VwVw(allmin, Q6_Vw_vmin_VwVw(Q6_V_lo_W(sh), Q6_V_hi_W(sh)));//get the minimum index if the values are the same
+            curr_index = Q6_Vw_vadd_VwVw(curr_index, Q6_V_vsplat_R(32));    // move to next d32 block
+        }
+        //allmin contains 2 x 4w x 4(each width) x i32(each value)
+        //horizontally reduce every 4
+        //get 2 x 4w x 1(each width) x i32(each value) -> 8 x 4Bytes results
+        HVX_Vector allmin1 = Q6_V_vror_VR(allmin, 16);//16
+        allmin = Q6_Vw_vmin_VwVw(allmin, allmin1);
+
+        allmin1 = Q6_V_vror_VR(allmin, 8);
+        allmin = Q6_Vw_vmin_VwVw(allmin, allmin1);
+
+        //mask out value. Keep indices only
+        allmin = Q6_V_vand_VV( allmin, Q6_V_vsplat_R(0xFFFFFF));
+
+        HVX_Vector tmp = Q6_V_lo_W( Q6_W_vdeal_VVR( allmin,allmin, 0x48));
+        // now in w lanes { 0,1, 8, 9, 2,3, 10, 11 }
+        HVX_VectorPair result  = Q6_W_vdeal_VVR( tmp,tmp, 0x24);
+        // now even values in lanes 0,1,2,3 of result.lo, odd in lanes 0,1,2,3 of result.hi
+
+        //outp + rows
+        q6op_vstu_variable_ARV((HVX_Vector *) ((uint8_t*)outp+output_offset), output_increment0, Q6_V_lo_W(result));
+        output_offset+= output_increment0;
+
+        if(!only_one) {
+            q6op_vstu_variable_ARV((HVX_Vector *) ((uint8_t*)outp+output_offset), output_increment1, Q6_V_hi_W(result));
+            output_offset+= output_increment1;
+        }
+    }
+}
+
 //
 // this is called with a dest pointer, two vectors, and 'bytes' in range 1..256.
 // The first 'bytes' bytes from the vectors (v0 followed by v1) will be stored at the address, using
@@ -301,3 +509,81 @@ hvx_argmin_or_max_in_cols( uint8_t const * data, int rows, int cols, int row_str
 	} // for islc
 }
 
+//argmin/max along batch, height or width for D32 format
+void
+hvx_argmin_or_max_whb_8_d32( struct tensor const * data_tensor, int32_t * outp, int32_t  axis, int find_argmax) {
+
+    int dim_b = data_tensor->shape.batches;
+    int dim_w = data_tensor->shape.width;
+    int dim_h = data_tensor->shape.height;
+    int dim_d = data_tensor->shape.depth;
+
+    int outer_dim = 0;
+    int inner_dim = 0;
+    int outer = 0;
+    int inner = 0;
+
+    int dim_axis = 0;
+
+    int32_t data_stride = 0;
+    int32_t inner_stride = 0;
+    int32_t outer_stride = 0;
+    switch(axis) {
+        case 0: //batch
+            data_stride = tensor_batch_stride_d32(data_tensor);    //to the next batch
+            outer_dim = dim_h;  //h
+            inner_dim = dim_w;  //w
+            dim_axis = dim_b;
+            outer_stride = tensor_row_stride_d32(data_tensor);
+            inner_stride = 32;
+            break;
+        case 1: //height
+            data_stride = tensor_row_stride_d32(data_tensor);   //to the next height
+            outer_dim = dim_b;  //b
+            inner_dim = dim_w;  //w
+            dim_axis = dim_h;
+            outer_stride = tensor_batch_stride_d32(data_tensor);
+            inner_stride = 32;
+            break;
+        case 2: //width
+            data_stride = 32;                                   //to the next width
+            outer_dim = dim_b;  //b
+            inner_dim = dim_h;  //h
+            dim_axis = dim_w;
+            outer_stride = tensor_batch_stride_d32(data_tensor);
+            inner_stride = tensor_row_stride_d32(data_tensor);
+            break;
+        default:
+            break;
+    }
+
+    int32_t out_offset = 0;
+    int32_t output_increment = 0;
+    int num_d32blocks = (dim_d + 31) / 32;
+    int d32_block_stride = tensor_d32_stride_d32(data_tensor);  //to the next d32 block
+    uint8_t* real_data_h = tensor_location_bhw_d32(data_tensor,0,0,0);
+    uint8_t* real_data_p = real_data_h;
+    int num_cols = 32;  //process a d32 slice per loop
+
+    for(outer = 0; outer < outer_dim; ++outer) {
+        real_data_p = real_data_h + outer_stride * outer;
+        for(inner = 0; inner < inner_dim; ++inner){
+
+            //process a d32 slice per loop
+            for(int32_t d = 0; d < num_d32blocks; ++d) {
+
+                hvx_argmin_or_max_in_cols(real_data_p+d*d32_block_stride, dim_axis, num_cols, data_stride, outp+out_offset, find_argmax);
+
+                if(d == (num_d32blocks -1)) {
+                    output_increment = dim_d - (num_d32blocks - 1) * 32;
+                }
+                else {
+                    output_increment = 32;
+                }
+                out_offset += output_increment ;       //get rid of garbage by not outputing it
+            }
+
+            real_data_p += inner_stride;
+        }
+    }
+}

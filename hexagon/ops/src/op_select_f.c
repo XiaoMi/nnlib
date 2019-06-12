@@ -65,17 +65,12 @@ static int select_execute(struct nn_node *self, struct nn_graph *nn)
     return 0;
 }
 
-// .check functions validate the number of inputs and outputs for the op-type.
-static int select_check(struct nn_node *self, struct nn_graph *nn)
-{
-    if (self->n_inputs != 3) return errlog(nn,"Wrong # inputs");
-    if (self->n_outputs != 1) return errlog(nn,"Wrong # outputs");
-    return 0;
-}
 
 struct nn_node_ops nn_ops_for_Select_f = {
         .execute = select_execute,
-        .check = select_check,
+        .check = NULL,
         .ctor = node_alloc_common,
         .dtor = node_free_common,
+        .n_inputs = NN_IOCOUNT(3),
+        .n_outputs = NN_IOCOUNT(1),
 };

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (mulject to the limitations in the
@@ -39,7 +39,7 @@
 #include <quantize.h>
 #include <stdio.h>
 #include <math.h>
-#include <nn_broadcast.h>
+#include "nn_broadcast.h"
 #if defined(__hexagon__)
 #include "hexagon_types.h"
 #endif
@@ -61,9 +61,9 @@ struct tdata {
 };
 // mul vector to vector
 #define OPERATOR_MUL(X,Y) ((X)*(Y))
-BROADCAST_STRIDE_11_FUNC( mul_int32_stride_11, int32_t, OPERATOR_MUL)
+BROADCAST_STRIDE_11_FUNC( mul_int32_stride_11, int32_t, int32_t, OPERATOR_MUL)
 // mul vector by scalar
-BROADCAST_STRIDE_10_FUNC( mul_int32_stride_10, int32_t, OPERATOR_MUL)
+BROADCAST_STRIDE_10_FUNC( mul_int32_stride_10, int32_t, int32_t, OPERATOR_MUL)
 
 
 static const struct elementwise_funcs Mul_int32_funcs = {
@@ -77,111 +77,11 @@ static const struct elementwise_funcs Mul_int32_funcs = {
 
 static int mul_int32_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return nn_elementwise_with_broadcast( self, nn, &Mul_int32_funcs, NULL );
-}
-
-static int mul_int32_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"mul node %p",self);
-	if (self->n_inputs != 2) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"mul %p check OK",self);
-	return 0;
+	return nn_elementwise_with_broadcast( self, nn, &Mul_int32_funcs,NULL, NULL, NULL );
 }
 
 
-// For these functions the 'opaque' points to 3 ints: [ a_offset, b_offset, a_offset]
-// mul vector to vector
-static void  qmul_stride_11( void *out, void const *in1, void const *in2, int n, void *opaque)
-{
-	int32_t * op = (int32_t*)out;
-	int32_t const * offs = (int32_t const*)opaque;
-	uint8_t const * inp1 = (uint8_t const *)in1;
-	uint8_t const * inp2 = (uint8_t const *)in2;
-	int a_offs = offs[0];
-	int b_offs = offs[1];
-
-	if( n > 0){
-		int32_t s = (*inp1++ - a_offs) * (*inp2++ - b_offs);
-		for(int i = 0; i < n-1; i++){
-			*op++ = s;
-			s = (*inp1++ - a_offs) * (*inp2++ - b_offs);
-		}
-		*op = s;
-	}
-}
-// mul vector by scalar
-static void  qmul_stride_10( void *out, void const *in1, void const *in2, int n, void *opaque)
-{
-	int32_t * op = (int32_t*)out;
-	int32_t const * offs = (int32_t const*)opaque;
-	uint8_t const * inp1 = (uint8_t const *)in1;
-	int bval = *(uint8_t const *)in2 - offs[1];		// bin-b_offs
-	int delt = offs[0]*bval;
-
-	// (ain - a_offs) * ( bin-b_offs) =  ain*(bin-b_offs) - a_off*(bin-boffs)
-	for( int i =0; i < n; i++) op[i] = inp1[i] * bval - delt;
-}
-// this doesn't commute since the a,b have different offsets.
-// But since the 'opaque' points to a_offs,b_offs,a_offs, we can just advance it by one int and call
-// qmul_stride_10
-static void  qmul_rev_stride_01( void *out, void const *in1, void const *in2, int n, void *opaque)
-{
-	int32_t const * offs = (int32_t const*)opaque;
-	qmul_stride_10( out, in1, in2, n, (void *)(offs + 1));
-}
-
-static const struct elementwise_funcs QuantizedMul_funcs = {
-	.op_stride_11 = qmul_stride_11,
-	.op_stride_10 = qmul_stride_10,
-	.op_rev_stride_01 = qmul_rev_stride_01,
-	.in_elbytes = 1,
-	.out_elbytes = 4,
-	.out_typecode =  NN_TYPE_INT32
-};
-
-static int mul_q8_execute(struct nn_node *self, struct nn_graph *nn)
-{
-	struct mul_info info;
-	const struct tensor *a_min_tensor = self->inputs[2];
-	const struct tensor *a_max_tensor = self->inputs[3];
-	const struct tensor *b_min_tensor = self->inputs[4];
-	const struct tensor *b_max_tensor = self->inputs[5];
-	struct tensor *out_min_tensor = self->outputs[1];
-	struct tensor *out_max_tensor = self->outputs[2];
-	float a_min_float = tensor_get_float(a_min_tensor,0);
-	float a_max_float = tensor_get_float(a_max_tensor,0);
-	float b_min_float = tensor_get_float(b_min_tensor,0);
-	float b_max_float = tensor_get_float(b_max_tensor,0);
-	float a_level_size = (a_max_float - a_min_float)/255;
-	float b_level_size = (b_max_float - b_min_float)/255;
-	float out_level_size = a_level_size * b_level_size;
-	float out_max = 2147483648.0f/*0x1.0p31f*/ * out_level_size;
-	float out_min = -out_max;
-	int retval;
-#ifdef DEBUG_PRINT_PERFORMANCE
-	int start_time, end_time;
-	start_time =  nn_os_get_cycles(nn);
-#endif
-
-
-	tensor_set_single_float( out_min_tensor,out_min);
-	tensor_set_single_float( out_max_tensor,out_max);
-
-	info.a_offset = quantize_uint8(0.0f,a_min_float,a_max_float);
-	info.b_offset = quantize_uint8(0.0f,b_min_float,b_max_float);
-
-	int32_t offsets[3] = { info.a_offset, info.b_offset, info.a_offset };
-	retval = nn_elementwise_with_broadcast( self, nn, &QuantizedMul_funcs, offsets );
-
-#ifdef DEBUG_PRINT_PERFORMANCE
-	end_time =  nn_os_get_cycles(nn);
-	printf("qmul ref cycles = %d\n",end_time-start_time);
-#endif
-	return retval;
-}
-
-
+#if 0
 static void qmul_thread_process(struct nn_graph *nn, void *vtdata) {
 
 	struct tdata *td = vtdata;
@@ -286,7 +186,7 @@ static int mul_q8_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 #endif
 	return retval;
 }
-
+#endif
 
 
 ////////////// 8x8->8 Quantized Mul ///////////////////////////////////////////////////
@@ -492,7 +392,7 @@ static int mul_8x8to8_execute(struct nn_node *self, struct nn_graph *nn)
 				(int)b_tensor->shape.width,
 				(int)b_tensor->shape.depth,  info.b_offset );*/
 
-		int res = nn_elementwise_with_broadcast( self, nn, &QuantizedMul_8x8to8_funcs, &info );
+		int res = nn_elementwise_with_broadcast( self, nn, &QuantizedMul_8x8to8_funcs,NULL, NULL, &info );
 		if( res != 0) return res;
 		// nn_elementwise_with_broadcast has prepared the output tensor, but has formed
 		// the result as a 16-bit intermediate in the scratch area now pointed to by info.tmp_buf.
@@ -573,12 +473,11 @@ static int mul_8x8to8_execute(struct nn_node *self, struct nn_graph *nn)
 
 static int mul_q8_check(struct nn_node *self, struct nn_graph *nn)
 {
-	int k;
 	logmsg(nn,2,"mul node %p",self);
-	k = node_check_inputs_outputs_n( self,nn, "mul", 6, 3);
-	if( k !=0) return k;
+
 	// if 8x8to8 mul, we need scratch for 2x the max output
-	if( self->node_type == OP_QuantizedMul_8x8to8 || self->node_type == OP_QuantizedMul_8x8to8_ref){
+    ///if( self->node_type == OP_QuantizedMul_8x8to8 || self->node_type == OP_QuantizedMul_8x8to8_ref){
+	if(1){
 		// find max output size.
 		struct output const *od0 = &self->output_defs[0];
 		unsigned nmax = mulu32_x4_sat( od0->max_sizes[0], od0->max_sizes[1], od0->max_sizes[2], od0->max_sizes[3]);
@@ -595,16 +494,21 @@ static int mul_q8_check(struct nn_node *self, struct nn_graph *nn)
 
 struct nn_node_ops nn_ops_for_Mul_int32 = {
 	.execute = mul_int32_execute,
-	.check = mul_int32_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(2),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
+#if 0
 struct nn_node_ops nn_ops_for_QuantizedMul_8x8to32 = {
 	.execute = mul_q8_execute_hvx,
 	.check = mul_q8_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(6),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_CLS_QUANTMUL8TO32,
 };
 
@@ -613,18 +517,24 @@ struct nn_node_ops nn_ops_for_QuantizedMul_8x8to32_ref = {
 	.check = mul_q8_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(6),
+	.n_outputs = NN_IOCOUNT(3),
 };
-
+#endif
 
 struct nn_node_ops nn_ops_for_QuantizedMul_8x8to8 = {
 	.execute = mul_8x8to8_execute,
 	.check = mul_q8_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(6),
+	.n_outputs = NN_IOCOUNT(3),
 };
 struct nn_node_ops nn_ops_for_QuantizedMul_8x8to8_ref = {
 	.execute = mul_8x8to8_execute,
 	.check = mul_q8_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(6),
+	.n_outputs = NN_IOCOUNT(3),
 };

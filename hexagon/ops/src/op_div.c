@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -280,6 +280,8 @@ static int div_execute(struct nn_node *self, struct nn_graph *nn){
 }
 
 static int div_check(struct nn_node *self, struct nn_graph *nn){
+	if(self->n_inputs != 6 && self->n_inputs != 8)
+		return errlog(nn,"must have 6 or 8 inputs");
 	if(self->inputs[1]->shape.batches != 1 
 		|| self->inputs[1]->shape.height != 1 
 		|| self->inputs[1]->shape.width != 1){
@@ -294,5 +296,7 @@ struct nn_node_ops nn_ops_for_QuantizedDiv_8 = {
 	.check = div_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(6,8),
+	.n_outputs = NN_IOCOUNT(3),
 };
 

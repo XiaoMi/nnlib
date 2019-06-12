@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -97,6 +97,7 @@ gvconv2dbbb_circ_d64_v65_asm:
 #define ptr_cbufi              r16    //40 read buffer pointer
 #define zshift                 r6     //41 extra shift on output before quantization
 #define in_zero                r25    //42
+//#define ptr_equalize           r17    //43
 #define cbuf_eob               r27    //18 end of cuirc buffer
 #define cbuf_size              r28    //19 size in bytes of circ buf -1
 #define weight_stride          r15    //22 distance to next set of weights
@@ -125,7 +126,6 @@ gvconv2dbbb_circ_d64_v65_asm:
 #define ptr_z1                 r25    //21 write buffer sp position and odd output depth 32 outputs
 #define adjust                 r10    //
 #define delta                  r7     //difference between filt height and stride height
-#define buf_fill               r17    //22 number of total lines in circ buffer to write
 #define out_width_64           r22    //actual out_width in depth32 *2
 /* ---------------------------------- VEC REGS -------------------------------- */
 #define x3x2x1x0               v10    //input data
@@ -138,6 +138,9 @@ gvconv2dbbb_circ_d64_v65_asm:
 #define z51z40                 v12    //shuffled delayed input
 #define z73z62_z51z40          v13:12 //shuffled output data 
 /* ---------------------------------------------------------------------------- */
+#define tmax                   v18    //
+#define tmin                   v19    //
+#define wscale                 v11
 #define s17_s13                v25:24 //odd  output accs 3,7
 #define s16_s12                v23:22 //odd  output accs 2,6
 #define s15_s11                v21:20 //odd  output accs 1,5
@@ -162,11 +165,13 @@ gvconv2dbbb_circ_d64_v65_asm:
 #define s02                    v14    //even acc 2
 #define s01                    v12    //even acc 1
 #define s00                    v10    //even acc 0
+// note w00,w01,w10,w11 are only used as .tmp destinations.
 #define w00                    v0     //weights even 0-31
 #define w01                    v0     //weights even 32-63
 #define w10                    v0     //weights odd 0-31
 #define w11                    v0     //weights odd 32-63
-#define vrecip                 v1     //reciprocal 255/MAx replicated
+#define vrecip0                v1     //reciprocal 255/MAx replicated
+#define vrecip1                v30    //reciprocal 255/MAx replicated
 #define s0_sh                  v8     //shifted value
 #define s1_sh                  v26    //shifted value
 #define wsum0                  v2     //sum of weights column + bias add 0-31
@@ -189,8 +194,10 @@ gvconv2dbbb_circ_d64_v65_asm:
 #define mino_mine              v7:6   //packed mins 
 #define mino                   v7     //odd mins
 #define mine                   v6     //even mins
-#define stmp0                  v5     // temp for min/max
-#define stmp1                  v7     // temp for min/max
+#define stmp0                  v2 //0     // temp for min/max
+#define stmp1                  v3 //9     // temp for min/max
+#define gmax                   v0     //
+#define gmin                   v9     //
 #define SSR        <<1:rnd:sat:shift  //simplfy mpy instruction
 /* --------------------------------------------------------------------------- */
    {   allocframe(#112)                                  //0th entry on stack is 112+8)/4=30 ints
@@ -198,12 +205,15 @@ gvconv2dbbb_circ_d64_v65_asm:
    } {
        memd(sp+#4<<2) = r21:20                           //save 20,21
        memd(sp+#6<<2) = r23:22                           //save 22,23
+       r23 = #0x80000001
    } {
        memd(sp+#0<<2)  = r17:16                          //save 16,17
        memd(sp+#2<<2)  = r19:18                          //save 18,19
+       maxe = vsplat(r23)                                // maxe <- -0x7fffffff
    } {
        memd(sp+#8<<2) = r25:24                           //save 24,25
        memd(sp+#10<<2) = r27:26                          //save 26,27
+       mine.w = vabs(maxe.w)                             // mine <- +0x7fffffff
    } {
        filt_height = memw(sp+#33<<2)                     //filter height
        memw(sp+#15<<2) = out_width                       //save output width
@@ -225,11 +235,11 @@ gvconv2dbbb_circ_d64_v65_asm:
        cbuf_size = add(cbuf_size, cbuf_size)             //x2
        in_zero = vsplatb(in_zero)                        //
        memd(sp+#12<<2) = ptr_wi_ptr_xi                   //save weights:activation
-       maxe = vmem(ptr_max+#0)                           //
+       gmax = vmem(ptr_max+#0)                           //
    } {
        weight_stride=mpy(filt_width.L,filt_height.L)     //offset between filter rows
        filt_width = asl(filt_width, #2)                  //*32/8
-       mine = vmem(ptr_max+#1)                           //
+       gmin = vmem(ptr_max+#1)                           //
        memw(sp+#14<<2) = ptr_zi                          //save output ptr
    } {
        weight_stride=mpy(weight_stride.L,in_depth.L)     //distance between weight rows
@@ -237,7 +247,6 @@ gvconv2dbbb_circ_d64_v65_asm:
        ptr_cbufi = memw(sp+#39<<2)                       //circular buffer
    } {
        out_width_32 = memw(sp+#38<<2)                    //total width of output
-       vrecip = vsplat(recip_level)                      //used to compress to 8bits 255/max
        cbuf_eob = add(ptr_cbufi, cbuf_size)              //end of circ buffer marker
        dcfetch(ptr_xi+#1<<6)                             //
    } {
@@ -259,19 +268,26 @@ gvconv2dbbb_circ_d64_v65_asm:
        memw(sp+#20<<2) = ptr_wi                          //spill weight stride for later
        memw(sp+#24<<2) = weight_stride                   //
        in_width_32 = asl(next_inbuf_width, #6)           //next d32 line x 2
+       mino = mine                                       //
+   } {
+       vrecip0 = vmem(recip_level++#2)                   //used to compress to 8bits 255/max
+   } {
        filt_height = add(filt_height, #-1)               //
+       vrecip1 = vmem(recip_level+#-1)                   //used to compress to 8bits 255/max
+       memw(sp+#37<<2) = recip_level                     //255/max
    }
 /* -------------------------------------------------------------------------- */
    .balign 32
 .L_height:
-   {   
+   {
        ptr_x0 = memw(sp+#12<<2)                          //ptr_x0=ptr_cbufi read circ buffer
-       wsum0 = vmem(ptr_filtsum++#1)                     //set 1st weight offset
-       nop; nop
+       out_height = add(out_height, #-1)                 //decrement height count
+       wsum0 = vmem(ptr_filtsum+#0)                     //set 1st weight offset
+       maxo = maxe
    } {
        ptr_z0 = memw(sp+#14<<2)                          //output ptr for even lines
-       wsum1 = vmem(ptr_filtsum++#1)                     //set 2nd weight offset
        fetch_ptr_base = add(ptr_x0, in_width_32)         //fetch is next row ahead
+       wsum1 = vmem(ptr_filtsum+#1)                     //set 2nd weight offset
        nop
    } { 
        p1 = cmp.gt(fetch_ptr_base, cbuf_eob)             //if prefetch >= circ buffer wrap around
@@ -513,8 +529,8 @@ gvconv2dbbb_circ_d64_v65_asm:
        col_count = add(col_count, #-8)                   //decrement width count by 8
    } {
        s1_sh.w = vasl(s01.w, zshift)                     //
-       maxe.w = vmax(maxe.w, stmp1.w)                    //max accumulation 1.1
-       mine.w = vmin(mine.w, stmp1.w)                    //min accumulation 1.1
+       maxo.w = vmax(maxo.w, stmp1.w)                    //max accumulation 1.1
+       mino.w = vmin(mino.w, stmp1.w)                    //min accumulation 1.1
 //     adjust = memw(sp+#23<<2)                          //
    } {
        if( p3 ) stmp0 = s02;                             // col 2 if needed
@@ -522,16 +538,16 @@ gvconv2dbbb_circ_d64_v65_asm:
        p2 = cmp.gt(col_count, #-5)                       // do we need column 3?
        p0 = cmp.gt(col_count, #-4)                       // cols 4..7 needed (also for store)
    } {
-       s00.w = vmpye(s0_sh.w, vrecip.uh)
+       s00.w = vmpye(s0_sh.w, vrecip0.uh)
        maxe.w = vmax(maxe.w, stmp0.w)                    //max accumulation 0.2
        mine.w = vmin(mine.w, stmp0.w)                    //min accumulation 0.2
    } {
-       s00.w += vmpyo(s0_sh.w, vrecip.h):SSR
-       mine.w = vmin(mine.w, stmp1.w)                    //min accumulation col 1.2
-       maxe.w = vmax(maxe.w, stmp1.w)                    //max accumulation col 1.2
+       s00.w += vmpyo(s0_sh.w, vrecip0.h):SSR
+       mino.w = vmin(mino.w, stmp1.w)                    //min accumulation col 1.2
+       maxo.w = vmax(maxo.w, stmp1.w)                    //max accumulation col 1.2
 //     ptr_x0 = sub(ptr_x0, adjust)                      //-=filt_height if stride_height > filt_height
    } {
-       s01.w = vmpye(s1_sh.w, vrecip.uh)
+       s01.w = vmpye(s1_sh.w, vrecip0.uh)
        s0_sh.w = vasl(s02.w, zshift)                     //
        if( p2 ) stmp0 = s03;                             // col 3 if needed
        p3 = cmp.gt(col_count, #-3)                       // do we need column 5?
@@ -540,52 +556,52 @@ gvconv2dbbb_circ_d64_v65_asm:
        mine.w = vmin(mine.w, stmp0.w)                    //min accumulation col 0.3
        maxe.w = vmax(maxe.w, stmp0.w)                    //max accumulation col 0.3
    } {
-       s01.w += vmpyo(s1_sh.w, vrecip.h):SSR
-       mine.w = vmin(mine.w, stmp1.w)                    //min accumulation col 1.3
-       maxe.w = vmax(maxe.w, stmp1.w)                    //max accumulation col 1.3
+       s01.w += vmpyo(s1_sh.w, vrecip0.h):SSR
+       mino.w = vmin(mino.w, stmp1.w)                    //min accumulation col 1.3
+       maxo.w = vmax(maxo.w, stmp1.w)                    //max accumulation col 1.3
    } {
-       s02.w = vmpye(s0_sh.w, vrecip.uh)
+       s02.w = vmpye(s0_sh.w, vrecip0.uh)
        s1_sh.w = vasl(s03.w, zshift)                     //
        if( p0 ) stmp0 = s04;                             // col 4 if needed
    } {
-       s02.w += vmpyo(s0_sh.w, vrecip.h):SSR
+       s02.w += vmpyo(s0_sh.w, vrecip0.h):SSR
        mine.w = vmin(mine.w, stmp0.w)                    //min accumulation col 0.4
        maxe.w = vmax(maxe.w, stmp0.w)                    //max accumulation col 0.4
    } {
        if( p0 ) stmp1 = s14;                             // col 4 if needed
        if( p3 ) stmp0 = s05;                             // col 5 if needed
-       maxe.w = vmax(maxe.w, s10.w)                      //max accumulation 1.0
-       mine.w = vmin(mine.w, s10.w)                      //min accumulation 1.0
+       maxo.w = vmax(maxo.w, s10.w)                      //max accumulation 1.0
+       mino.w = vmin(mino.w, s10.w)                      //min accumulation 1.0
    } {
-       d010.h = vpacke(s01.w, s00.w)                     //pack high 16bits of accs 
-       s03.w = vmpye(s1_sh.w, vrecip.uh)
+       d010.h = vpack(s01.w, s00.w):sat                  //pack high 16bits of accs
+       s03.w = vmpye(s1_sh.w, vrecip0.uh)
        s0_sh.w = vasl(s04.w, zshift)                     //
    } {
-       s03.w += vmpyo(s1_sh.w, vrecip.h):SSR
-       maxe.w = vmax(maxe.w, stmp1.w)                    //max accumulation 1.4
-       mine.w = vmin(mine.w, stmp1.w)                    //min accumulation 1.4
+       s03.w += vmpyo(s1_sh.w, vrecip0.h):SSR
+       maxo.w = vmax(maxo.w, stmp1.w)                    //max accumulation 1.4
+       mino.w = vmin(mino.w, stmp1.w)                    //min accumulation 1.4
        ptr_x0 += mpyi(stride, #16)                       //stride*2*4 advance buffer by 8 outputs
    } {
-       s04.w = vmpye(s0_sh.w, vrecip.uh)
+       s04.w = vmpye(s0_sh.w, vrecip0.uh)
        s1_sh.w = vasl(s05.w, zshift)                     //
        maxe.w = vmax(maxe.w, stmp0.w)                    //max accumulation 0.5
        p2 = cmp.gt(col_count, #-2)                       // do we need column 6?
    } {
-       d032.h = vpacke(s03.w, s02.w)                     //pack high 16bits of accs 
-       s04.w += vmpyo(s0_sh.w, vrecip.h):SSR
+       d032.h = vpack(s03.w, s02.w):sat                  //pack high 16bits of accs
+       s04.w += vmpyo(s0_sh.w, vrecip0.h):SSR
        if( p3 ) stmp1 = s15;                             // col 5 if needed
        p3 = cmp.gt(col_count, #-1)                       // do we need column 7?
    } {
        mine.w = vmin(mine.w, stmp0.w)                    //min accumulation 0.5
-       maxe.w = vmax(maxe.w, stmp1.w)                    //max accumulation 1.5
+       maxo.w = vmax(maxo.w, stmp1.w)                    //max accumulation 1.5
        if( p2 ) stmp0 = s06;                             // col 6 if needed
    } {
-       s05.w = vmpye(s1_sh.w, vrecip.uh)
+       s05.w = vmpye(s1_sh.w, vrecip0.uh)
        s0_sh.w = vasl(s06.w, zshift)                     //
-       mine.w = vmin(mine.w, stmp1.w)                    //min accumulation 1.5
+       mino.w = vmin(mino.w, stmp1.w)                    //min accumulation 1.5
    } {
        maxe.w = vmax(maxe.w, stmp0.w)                    //max accumulation 0.6
-       s05.w += vmpyo(s1_sh.w, vrecip.h):SSR
+       s05.w += vmpyo(s1_sh.w, vrecip0.h):SSR
        d03210.ub = vpack(d032.h, d010.h):sat             //shift 16bits by zshift
        vmem(ptr_z0++#1) = d03210.new                     //store 0-3 even row
    } {
@@ -593,84 +609,89 @@ gvconv2dbbb_circ_d64_v65_asm:
        if( p2 ) stmp1 = s16;                             // col 6 if needed
    } {
        if( p3 ) stmp0 = s07;                             // col 7 if needed
-       s06.w = vmpye(s0_sh.w, vrecip.uh)
+       s06.w = vmpye(s0_sh.w, vrecip0.uh)
        s1_sh.w = vasl(s07.w, zshift)                     //
    } {
-       s06.w += vmpyo(s0_sh.w, vrecip.h):SSR
-       d054.h = vpacke(s05.w, s04.w)                     //pack high 16bits of accs 
-       maxe.w = vmax(maxe.w, stmp1.w)                    //max accumulation 1.6
+       s06.w += vmpyo(s0_sh.w, vrecip0.h):SSR
+       d054.h = vpack(s05.w, s04.w):sat                  //pack high 16bits of accs
+       maxo.w = vmax(maxo.w, stmp1.w)                    //max accumulation 1.6
    } {
-       s07.w = vmpye(s1_sh.w, vrecip.uh)
-       mine.w = vmin(mine.w, stmp1.w)                    //min accumulation 1.6
+       s07.w = vmpye(s1_sh.w, vrecip0.uh)
+       mino.w = vmin(mino.w, stmp1.w)                    //min accumulation 1.6
        s0_sh.w = vasl(s10.w, zshift)                     //
    } {
-       s07.w += vmpyo(s1_sh.w, vrecip.h):SSR
+       s07.w += vmpyo(s1_sh.w, vrecip0.h):SSR
        maxe.w = vmax(maxe.w, stmp0.w)                    //max accumulation 0.7
        mine.w = vmin(mine.w, stmp0.w)                    //min accumulation 0.7
    } {
-       s10.w = vmpye(s0_sh.w, vrecip.uh)
+       s10.w = vmpye(s0_sh.w, vrecip1.uh)
        s1_sh.w = vasl(s11.w, zshift)                     //
        if( p3 ) stmp1 = s17;                             // col 7 if needed
    } {
-       d076.h = vpacke(s07.w, s06.w)                     //pack high 16bits of accs 
-       s10.w += vmpyo(s0_sh.w, vrecip.h):SSR
-       maxe.w = vmax(maxe.w, stmp1.w)                    //min accumulation 1.7
+       d076.h = vpack(s07.w, s06.w):sat                  //pack high 16bits of accs
+       s10.w += vmpyo(s0_sh.w, vrecip1.h):SSR
+       maxo.w = vmax(maxo.w, stmp1.w)                    //min accumulation 1.7
    } {
-       s11.w = vmpye(s1_sh.w, vrecip.uh)
+       s11.w = vmpye(s1_sh.w, vrecip1.uh)
        s0_sh.w = vasl(s12.w, zshift)                     //
-       mine.w = vmin(mine.w, stmp1.w)                    //min accumulation 1.7
+       mino.w = vmin(mino.w, stmp1.w)                    //min accumulation 1.7
    } {
-       s11.w += vmpyo(s1_sh.w, vrecip.h):SSR
+       s11.w += vmpyo(s1_sh.w, vrecip1.h):SSR
        d07654.ub = vpack(d076.h, d054.h):sat             //shift 16bits by zshift
        if(p0) vmem(ptr_z0++#1):nt = d07654.new           //store 4-7 even row
    } {
-       s12.w = vmpye(s0_sh.w, vrecip.uh)
+       s12.w = vmpye(s0_sh.w, vrecip1.uh)
        s1_sh.w = vasl(s13.w, zshift)                     //
    } {
-       d110.h = vpacke(s11.w, s10.w)                     //pack high 16bits of accs 
-       s12.w += vmpyo(s0_sh.w, vrecip.h):SSR
+       d110.h = vpack(s11.w, s10.w):sat                  //pack high 16bits of accs
+       s12.w += vmpyo(s0_sh.w, vrecip1.h):SSR
    } {
-       s13.w = vmpye(s1_sh.w, vrecip.uh)
+       s13.w = vmpye(s1_sh.w, vrecip1.uh)
        s0_sh.w = vasl(s14.w, zshift)                     //
    } {
        loop1(.L_filt_height, filt_height)                //setup vertical filte rloop
-       s13.w += vmpyo(s1_sh.w, vrecip.h):SSR
+       s13.w += vmpyo(s1_sh.w, vrecip1.h):SSR
        p1 = cmp.gt(col_count, #0)
    } {
-       s14.w = vmpye(s0_sh.w, vrecip.uh)
+       s14.w = vmpye(s0_sh.w, vrecip1.uh)
        s1_sh.w = vasl(s15.w, zshift)                     //
        p3 = sp1loop0(.L_filt_width, filt_width)          //setup inner filter loop
    } {
-       d132.h = vpacke(s13.w, s12.w)                     //pack high 16bits of accs 
-       s14.w += vmpyo(s0_sh.w, vrecip.h):SSR
+       d132.h = vpack(s13.w, s12.w):sat                  //pack high 16bits of accs
+       s14.w += vmpyo(s0_sh.w, vrecip1.h):SSR
    } {
-       s15.w = vmpye(s1_sh.w, vrecip.uh)
+       s15.w = vmpye(s1_sh.w, vrecip1.uh)
        s0_sh.w = vasl(s16.w, zshift)                     //
+       wsum0 = vmem(ptr_filtsum+#0)                     //set 1st weight offset
    } {
-       s15.w += vmpyo(s1_sh.w, vrecip.h):SSR
+       s15.w += vmpyo(s1_sh.w, vrecip1.h):SSR
        d13210.ub = vpack(d132.h, d110.h):sat             //shift 16bits by zshift
        vmem(ptr_z1++#1):nt = d13210.new                  //store 0-3 odd row
    } {
-       s16.w = vmpye(s0_sh.w, vrecip.uh)
+       s16.w = vmpye(s0_sh.w, vrecip1.uh)
        s1_sh.w = vasl(s17.w, zshift)                     //
+       wsum1 = vmem(ptr_filtsum+#1)                     //set 2nd weight offset
+	   if(p1)zshift = #0                       // force zshift <-0 (except last loop)
+	   //zshift = mux(p1,#0,zshift)                       // force zshift <-0 (except last loop)
    } {
-       s16.w += vmpyo(s0_sh.w, vrecip.h):SSR
-       d154.h = vpacke(s15.w, s14.w)                     //pack high 16bits of accs 
+       s16.w += vmpyo(s0_sh.w, vrecip1.h):SSR
+       d154.h = vpack(s15.w, s14.w):sat                  //pack high 16bits of accs
        fetch_ptr_base = add(ptr_x0, in_width_32)         //fetch is next row ahead
+       maxe.w =vasl(maxe.w,zshift)                        // find maxe <<= zshift (on last)
    } {
-       s17.w = vmpye(s1_sh.w, vrecip.uh)
+       s17.w = vmpye(s1_sh.w, vrecip1.uh)
        s04_s00 = vcombine(wsum0,wsum0)                   //init sum0 and 4
        p2 = cmp.gt(fetch_ptr_base, cbuf_eob)             //[E,10]
        if(p2.new)fetch_ptr_base=sub(fetch_ptr_base,cbuf_size)//[E,10]wrap around end fetch ptr
    } {
-       s17.w += vmpyo(s1_sh.w, vrecip.h):SSR
+       s17.w += vmpyo(s1_sh.w, vrecip1.h):SSR
        s05_s01 = vcombine(wsum0,wsum0)                   //init sum1 and 5
    } {
        s06_s02 = vcombine(wsum0,wsum0)                   //init sum2 and 6
        s07_s03 = vcombine(wsum0,wsum0)                   //init sum3 and 7
        ptr_w0 = memw(sp+#13<<2)                          //access ptr weight
    } {
-       d176.h = vpacke(s17.w, s16.w)                     //pack high 16bits of accs 
+       d176.h = vpack(s17.w, s16.w):sat                  //pack high 16bits of accs
        s14_s10 = vcombine(wsum1,wsum1)                   //init sum 0 and 4
        ptr_w1 = memw(sp+#20<<2)                          //access weights stride
    } {
@@ -684,13 +705,52 @@ gvconv2dbbb_circ_d64_v65_asm:
        if( p1) jump   .L_width                           //next 2 rows 8 points per row
    }//endloop width
 /* --------------------------------------------------------------------------- */
-   {   out_height = add(out_height, #-1)                 //decrement height count
-       col_count = memw(sp+#15<<2)                       //initialize width count
+ // need to apply << zshift  to mine, maxo, mino;
+ // maxe has been done already
+ // // The below then scales these by the per-depth gains, applies to gmin/gmax,
+ // and resets mine:maxe and mino:maxo  to +7fffffff : -7fffffff
+ // (maxo is copied from maxe at the top of the loop, so we don't need that here)
+ //
+   {   tmax.w = vmpye(maxe.w, vrecip0.uh)
+       recip_level = memw(sp+#37<<2)                     //255/max
+       p0 = cmp.eq(out_height, #0)                       //are vertical lines done?
+	   mine.w = vasl(mine.w,zshift)
+   } {
+       tmax.w+= vmpyo(maxe.w, vrecip0.h):SSR              //
+       maxe = #0                                         //
        memw(sp+#13<<2) += weight_stride                  //access ptr weight
    } {
+	   maxo.w = vasl(maxo.w,zshift)
+       gmax.w = vmax(gmax.w, tmax.w)
+       tmin.w = vmpye(mine.w, vrecip0.uh)
+   } {
+       tmin.w+= vmpyo(mine.w, vrecip0.h):SSR              //
+       wscale = vrecip1
        memw(sp+#20<<2) += weight_stride                  //access weights stride
-       p0 = cmp.eq(out_height, #0)                       //are vertical lines done?
-       if(!p0.new) jump:t .L_height                            //then go again
+       mine = vnot(maxe)                                 // 0xFFFFFFFF
+   } {
+       gmin.w = vmin(gmin.w, tmin.w)
+       tmax.w = vmpye(maxo.w, wscale.uh)
+	   mino.w = vasl(mino.w,zshift)
+   } {
+       mine.uw = vavg(mine.uw,maxe.uw)                   // mine = 0x7FFFFFFF
+       tmax.w+= vmpyo(maxo.w, wscale.h):SSR              //
+       if(!p0)vrecip0 = vmem(recip_level++#2)            //used to compress to 8bits 255/max
+       col_count = memw(sp+#15<<2)                       //initialize width count
+   } {
+       gmax.w = vmax(gmax.w, tmax.w)
+       tmin.w = vmpye(mino.w, wscale.uh)
+       if(!p0)vrecip1 = vmem(recip_level+#-1)            //used to compress to 8bits 255/max
+   } {
+       //memw(sp+#43<<2) = ptr_equalize                    //
+       tmin.w+= vmpyo(mino.w, wscale.h):SSR              //
+       maxe.w = vsub(maxe.w,mine.w)                      // maxe = -0x7fffffff
+       mino = mine                                       //
+   } {
+       gmin.w = vmin(gmin.w, tmin.w)
+       ptr_filtsum = add(ptr_filtsum, #256)
+       memw(sp+#37<<2) = recip_level                     //255/max
+       if(!p0) jump:t .L_height                          //then go again
    }
 /* ------------------------------------------------------------------------ */
 #if 0
@@ -720,11 +780,11 @@ gvconv2dbbb_circ_d64_v65_asm:
    {   r17:16 = memd(sp+#0)                              //restore stack
        r19:18 = memd(sp+#2<<2)                           //18,19
 #else
-   {   vmem(ptr_max+#0) = maxe                           //store max
+   {   vmem(ptr_max+#0) = gmax                           //store max
        r17:16 = memd(sp+#0)                              //restore stack
    } {
        r19:18 = memd(sp+#2<<2)                           //18,19
-       vmem(ptr_max+#1) = mine                           //store min
+       vmem(ptr_max+#1) = gmin                           //store min
 #endif
    } {
        r21:20 = memd(sp+#4<<2)                           //20,21

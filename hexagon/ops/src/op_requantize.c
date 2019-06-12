@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -53,7 +53,7 @@
 //   minmaxp[0] = minval
 //   minmaxp[1[ = ~maxval
 
-static void
+void
 find_min_max_int32( int32_t const *arr, int n, int32_t * minmaxp )
 {
 	int nvec = n/ (unsigned)VELEM(sizeof(int32_t));
@@ -184,7 +184,7 @@ static int do_requantize_execute(struct nn_node *self, struct nn_graph *nn)
 	float in_max = tensor_get_float(in_max_tensor,0);
 	float out_min = tensor_get_float(min_val_tensor,0);
 	float out_max = tensor_get_float(max_val_tensor,0);
-	float in_level_size = (in_max - in_min) * (1.0f/ 4294967296.0f)/*0x1.0p-32f*/;
+	float in_level_size = (in_max - in_min) * (0x1.0p-32f);
 
 	float recip_stepsize;
 	float stepsize;
@@ -204,23 +204,8 @@ static int do_requantize_execute(struct nn_node *self, struct nn_graph *nn)
 		out_min,out_max);
 
 	/* Requantize with new range */
-	/* For elements < 128, HVX code seem to have issue, for now fall back to reference C code */
-	if(elements < 128)
-	{
-		uint32_t i;
-		for (i = 0; i < elements; i++) {
-			/* FIXME: in HVX we will need to do this in fixed point... */
-			out_data[i] = quantize_uint8(
-				in_level_size* (float)in_data[i],out_min,out_max);
-		}
-	}
-	else
-	{
-		float gain = (255.f *in_level_size)/(out_max-out_min);
-		int gaini = (int) (gain*2147483648.0f/*0x1.0p31f*/+0.5f);
-		int offseti = out_min / in_level_size;
-		quantize_asm(in_data, offseti, gaini, out_data, elements);
-	}
+
+	nn_requantize_i32_to_qu8_hvx( out_data, in_data, elements, in_level_size,  out_min,  out_max);
 
 	tensor_set_single_float(out_min_tensor,out_min);
 	tensor_set_single_float(out_max_tensor,out_max);
@@ -560,37 +545,56 @@ static int requantize_16_execute(struct nn_node *self, struct nn_graph *nn)
 	return launcher(self,nn,do_requantize_16_execute);
 }
 
-
-static int autorequantize_check(struct nn_node *self, struct nn_graph *nn)
+static int do_requantize_u16_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	int i;
-	logmsg(nn,2,"Checking autorequantize node %p",self);
-	if (self->n_inputs != 3) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
-	for (i = 0; i < 3; i++) {
-		if (self->inputs[i] == NULL) return errlog(nn,"NULL input");
-		if (self->outputs[i] == NULL) return errlog(nn,"NULL output");
+	const struct tensor *in_tensor = self->inputs[0];
+	const struct tensor *in_min_tensor = self->inputs[1];
+	const struct tensor *in_max_tensor = self->inputs[2];
+	const struct tensor *min_val_tensor = self->inputs[3];
+	const struct tensor *max_val_tensor = self->inputs[4];
+	struct tensor *out_tensor = self->outputs[0];
+	struct tensor *out_min_tensor = self->outputs[1];
+	struct tensor *out_max_tensor = self->outputs[2];
+	size_t elements = tensor_element_count(in_tensor);
+	const int32_t *in_data = in_tensor->data;
+	uint16_t *out_data = out_tensor->data;
+	float in_min = tensor_get_float(in_min_tensor, 0);
+	float in_max = tensor_get_float(in_max_tensor, 0);
+	float out_min = tensor_get_float(min_val_tensor, 0);
+	float out_max = tensor_get_float(max_val_tensor, 0);
+	float in_level_size = (in_max - in_min) * 0x1.0p-32f;
+
+	/* Assert min and max are size 1,1,1,1 ? */
+
+	logmsg(nn, 2, "autorequantize execute. self=%p ", self);
+	logmsg(nn, 2, "autorequantize in min/max=%f/%f ", in_min, in_max);
+
+	if (tensor_out_prepare_normal_fromshape(out_tensor, &in_tensor->shape, NN_TYPE_QUINT8) != 0) {
+		return errlog(nn, "out too small");
 	}
-	logmsg(nn,2,"autorequantize node %p check OK",self);
+
+	adjust_minmax_for_zero_16b(&out_min, &out_max);
+
+	/* Requantize with new range */
+	uint32_t i;
+	for (i = 0; i < elements; i++) {
+		out_data[i] = quantize_uint16(
+			in_level_size* (float)in_data[i], out_min, out_max);
+	}
+
+	tensor_set_single_float(out_min_tensor, out_min);
+	tensor_set_single_float(out_max_tensor, out_max);
+
+	logmsg(nn, 2, "requantize out min/max=%f/%f ",
+		tensor_get_float(out_min_tensor, 0),
+		tensor_get_float(out_max_tensor, 0));
+	logmsg(nn, 2, "requantize %p done", self);
 	return 0;
 }
 
-static int requantize_check(struct nn_node *self, struct nn_graph *nn)
+static int requantize_u16_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	logmsg(nn,2,"Checking requantize node %p",self);
-	if (self->n_inputs != 5) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"requantize node %p check OK",self);
-	return 0;
-}
-
-static int requantrange_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking requantrange node %p",self);
-	if (self->n_inputs != 3) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 2) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"requantrange node %p check OK",self);
-	return 0;
+	return launcher(self, nn, do_requantize_u16_execute);
 }
 
 //
@@ -606,16 +610,20 @@ static int requantrange_check(struct nn_node *self, struct nn_graph *nn)
 //
 struct nn_node_ops nn_ops_for_QuantizeDownAndShrinkRange_32to8 = {
 	.execute = autorequantize_execute,
-	.check = autorequantize_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizeDownAndShrinkRange_32to8_ref = {
 	.execute = autorequantize_execute,
-	.check = autorequantize_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 
@@ -632,16 +640,20 @@ struct nn_node_ops nn_ops_for_QuantizeDownAndShrinkRange_32to8_ref = {
 //
 struct nn_node_ops nn_ops_for_QuantizeDownAndShrinkRange_32to16 = {
 	.execute = autorequantize_16_execute,
-	.check = autorequantize_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizeDownAndShrinkRange_32to16_ref = {
 	.execute = autorequantize_16_execute,
-	.check = autorequantize_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 };
 //
 // Requantize_32to8:
@@ -659,16 +671,20 @@ struct nn_node_ops nn_ops_for_QuantizeDownAndShrinkRange_32to16_ref = {
 //
 struct nn_node_ops nn_ops_for_Requantize_32to8 = {
 	.execute = requantize_execute,
-	.check = requantize_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_Requantize_32to8_ref = {
 	.execute = requantize_execute,
-	.check = requantize_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 // Requantize_32to16:
@@ -681,21 +697,35 @@ struct nn_node_ops nn_ops_for_Requantize_32to8_ref = {
 //  input 1,2:  scalar float, input min & max
 //  input 3,4:  scalar float, output min & max
 //
-//  output 0:   qu8 tensor
+//  output 0:   qi16 tensor
 //  output 1,2:  scalar float, output min & max
 struct nn_node_ops nn_ops_for_Requantize_32to16 = {
 	.execute = requantize_16_execute,
-	.check = requantize_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_Requantize_32to16_ref = {
 	.execute = requantize_16_execute,
-	.check = requantize_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
 };
+
+struct nn_node_ops nn_ops_for_Requantize_32tou16 = {
+	.execute = requantize_u16_execute,
+	.check = NULL,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
+};
+
 //
 // RequantizationRange_32
 // find the range of values in qi32 data, and produce this
@@ -711,17 +741,21 @@ struct nn_node_ops nn_ops_for_Requantize_32to16_ref = {
 
 struct nn_node_ops nn_ops_for_RequantizationRange_32 = {
 	.execute = requantrange_execute,
-	.check = requantrange_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(2),
 	.flags = NN_NODE_FLAG_CLS_REQUANTRANGE,
 };
 
 struct nn_node_ops nn_ops_for_RequantizationRange_32_ref = {
 	.execute = requantrange_execute,
-	.check = requantrange_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(2)
 };
 
 

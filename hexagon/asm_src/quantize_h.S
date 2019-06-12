@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -114,7 +114,7 @@ quantize_asm:
          lsb7 = #127                                 //
        } {
          u0.tmp = vmem(ptr_x++#1)                    //[0, 0]
-         u0.w = vsub(u0.w, voffset.w)                //[0, 0]
+         u0.w = vsub(u0.w, voffset.w):sat            //[0, 0]
          p0 = bitsclr(n, lsb7)                       //
        } {
          vgain = vsplat(gain)                        //[P, ]
@@ -122,7 +122,7 @@ quantize_asm:
        } {
          w0.w =vmpye(u0.w,vgain.uh)                  //[0, 2]
          u1.tmp = vmem(ptr_x++#1)                    //[0, 2]
-         u1.w = vsub(u1.w, voffset.w)                //[0, 2]
+         u1.w = vsub(u1.w, voffset.w):sat            //[0, 2]
          n = lsr(n, #7)                              //[P, 7]
        } {
          w0.w+=vmpyo(u0.w,vgain.h):<<1:rnd:sat:shift //[0, 3]
@@ -130,7 +130,7 @@ quantize_asm:
        } {
          w1.w =vmpye(u1.w,vgain.uh)                  //[0, 4]
          u2.tmp = vmem(ptr_x++#1)                    //[0, 4]
-         u2.w = vsub(u2.w, voffset.w)                //[0, 4]
+         u2.w = vsub(u2.w, voffset.w):sat            //[0, 4]
        } {
          w1.w+=vmpyo(u1.w,vgain.h):<<1:rnd:sat:shift //[0, 5]
          loop0(.L_loopN, n)                          //[P,10]
@@ -141,27 +141,27 @@ quantize_asm:
        {
          w2.w =vmpye(u2.w,vgain.uh)                  //[0, 6]
          u3.tmp = vmem(ptr_x++#1)                    //[0, 6]
-         u3.w = vsub(u3.w, voffset.w)                //[0, 6]
+         u3.w = vsub(u3.w, voffset.w):sat            //[0, 6]
        } {
          h2h0.h = vpack(w1.w, w0.w):sat              //[0, 7]
          w2.w+=vmpyo(u2.w,vgain.h):<<1:rnd:sat:shift //[0, 7]
        } {
          w3.w =vmpye(u3.w,vgain.uh)                  //[0, 8]
          u0.tmp = vmem(ptr_x++#1)                    //[1, 0]
-         u0.w = vsub(u0.w, voffset.w)                //[1, 0]
+         u0.w = vsub(u0.w, voffset.w):sat            //[1, 0]
        } {
          w3.w+=vmpyo(u3.w,vgain.h):<<1:rnd:sat:shift //[0, 9]
        } {
          w0.w =vmpye(u0.w,vgain.uh)                  //[1, 2]
          u1.tmp = vmem(ptr_x++#1)                    //[1, 2]
-         u1.w = vsub(u1.w, voffset.w)                //[1, 2]
+         u1.w = vsub(u1.w, voffset.w):sat            //[1, 2]
        } {
          w0.w+=vmpyo(u0.w,vgain.h):<<1:rnd:sat:shift //[1, 3]
          h3h1.h = vpack(w3.w, w2.w):sat              //[0,11] 
        } {
          w1.w =vmpye(u1.w,vgain.uh)                  //[1, 4]
          u2.tmp = vmem(ptr_x++#1)                    //[1, 4]
-         u2.w = vsub(u2.w, voffset.w)                //[1, 4]
+         u2.w = vsub(u2.w, voffset.w):sat            //[1, 4]
        } {
          b3b2b1b0.ub = vpack(h3h1.h, h2h0.h):sat     //[0,13]
          vmem(ptr_y++#1) = b3b2b1b0.new              //[0,13]
@@ -171,7 +171,7 @@ quantize_asm:
        {
          w2.w =vmpye(u2.w,vgain.uh)                  //[1, 6]
          u3.tmp = vmem(ptr_x++#1)                    //[1, 6]
-         u3.w = vsub(u3.w, voffset.w)                //[1, 6]
+         u3.w = vsub(u3.w, voffset.w):sat            //[1, 6]
 	}{
 	 if(p0) jumpr  r31                           //[E, 6]
 	}{

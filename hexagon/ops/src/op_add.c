@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -41,7 +41,7 @@
 #include <quantize.h>
 #include <math.h>
 #include <nn_broadcast.h>
-#include <op_add_sub.h>
+//#include <op_add_sub.h>
 #if defined(__hexagon__)
 #include "hexagon_types.h"
 #endif
@@ -52,7 +52,7 @@
 //  nn_ops_for_QuantizedAdd_8p8to32
 //  nn_ops_for_QuantizedAdd_8p8to32_ref
 
-CREATE_OP_ADD_SUB(add, Add, +)
+//CREATE_OP_ADD_SUB(add, Add, +)
 
 struct qadd_888_info {
 	float out_min;
@@ -125,13 +125,10 @@ static inline uint8_t *expand(
 	const struct shape dstshape)
 {
 	uint8_t *ret;
-	uint32_t bytes = dstshape.batches * dstshape.height * dstshape.width * dstshape.depth;
-	if (likely((srcshape.batches == dstshape.batches)
-		&& (srcshape.height == dstshape.height)
-		&& (srcshape.width == dstshape.width)
-		&& (srcshape.depth == dstshape.depth))) {
+	if (likely( shape_matches( &srcshape, & dstshape))){
 		return data;
 	}
+	uint32_t bytes = dstshape.batches * dstshape.height * dstshape.width * dstshape.depth;
 	if ((ret = nn_scratch_alloc(nn,bytes)) == NULL) {
 		logmsg(nn,0,"scratch fail");
 		return NULL;
@@ -199,6 +196,9 @@ static int qadd_888_hvx(struct nn_graph *nn, void *vself)
 	struct shape total_shape;
 	uint8_t *big_data;
 	uint8_t *small_data;
+
+	nn_scratch_reset(nn);
+
 	/* Handle broadcasting */
 	if (!are_dims_compatible(a_tensor->shape,b_tensor->shape)) return errlog(nn,"incompatible shapes");
 	total_shape.batches = output_dim(a_tensor->shape.batches,b_tensor->shape.batches);
@@ -286,9 +286,7 @@ static int qadd_888_execute(struct nn_node *self, struct nn_graph *nn)
 	if (sizeof(float) > out_max_tensor->max_size) return errlog(nn,"max too small");
 	out_min_tensor->data_size = sizeof(float);
 	out_max_tensor->data_size = sizeof(float);
-	if(nn_scratch_grow(nn,(sizeof(int16_t))*65)) { //see index 0 and 64 for the min and max settings inside do_quantized_add_888
-		return errlog(nn,"failed to get scratch");
-	}
+
 	logmsg(nn,2,"qadd %dx%dx%dx%d %dx%dx%dx%d",
 		a_tensor->shape.batches,
 		a_tensor->shape.height,
@@ -832,8 +830,7 @@ static int qadd_888_check(struct nn_node *self, struct nn_graph *nn)
 {
 	struct qadd_888_info *info;
 	int n_in = self->n_inputs;
-	if (n_in < 6 || n_in > 8) return errlog(nn,"Wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"Wrong # outputs");
+
 	if ((info = nn_calloc(1,sizeof(struct qadd_888_info))) == NULL) {
 		return errlog(nn,"calloc");
 	}
@@ -859,6 +856,8 @@ static int qadd_888_check(struct nn_node *self, struct nn_graph *nn)
 	out_size = (out_size+127) & (~127);
 
 	// ensure enough scratch
+	// (the worst case is 256 for min/max, plus room for broadcast-expanded
+	// 'A' and broadcast-expanded 'B').
 	nn_scratch_grow(nn,out_size*2+256);
 
 	if (out_min_float == -INFINITY) {
@@ -888,6 +887,8 @@ struct nn_node_ops nn_ops_for_QuantizedAdd_8p8to8 = {
 	.check = qadd_888_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common_release_opaque,
+	.n_inputs = NN_IOCOUNT_RANGE(6,8),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 static int qsub_reject(struct nn_node *self, struct nn_graph *nn){
@@ -898,6 +899,8 @@ struct nn_node_ops nn_ops_for_QuantizedSub_8p8to8 = {
 	.check = qsub_reject,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(6,8),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 

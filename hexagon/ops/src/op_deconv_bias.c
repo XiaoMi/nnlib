@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -1610,26 +1610,7 @@ static int deconv_bias_execute_hvx(struct nn_node *self, struct nn_graph *nn) {
     return 0;
 }
 
-static int deconv_bias_check(struct nn_node *self, struct nn_graph *nn) {
-    if (self->n_inputs != OP_DECONVBIAS_NUM_OPS)
-        return errlog(nn, "OP_DeconvBias_8 takes exactly %d inputs, %d provided", OP_DECONVBIAS_NUM_OPS,
-                      self->n_inputs);
-    if (self->n_outputs != 3)
-        return errlog(nn, "OP_DeconvBias_8 takes exactly 3 outputs (buffer), %d provided",
-                      self->n_outputs);
-    int i;
-    for (i = 0; i < self->n_inputs; i++) {
-        if (self->inputs[i] == NULL) {
-            return errlog(nn, "OP_DeconvBias_8 NULL input %d", i);
-        }
-    }
-    for (i = 0; i < self->n_outputs; i++) {
-        if (self->outputs[i] == NULL) {
-            return errlog(nn, "OP_DeconvBias_8 NULL output %d", i);
-        }
-    }
-    return 0;
-}
+
 
 static int deconv_bias_execute_ref(struct nn_node *self, struct nn_graph *nn) {
 
@@ -1948,16 +1929,18 @@ static int deconv_bias_execute_ref(struct nn_node *self, struct nn_graph *nn) {
 
 struct nn_node_ops nn_ops_for_DeconvBias_8x8to32 = {
         .execute = deconv_bias_execute_hvx,
-        .check = deconv_bias_check,
+        .check = NULL,
         .ctor = node_alloc_common,
         .dtor = node_free_common,
+        .n_inputs = NN_IOCOUNT(OP_DECONVBIAS_NUM_OPS),
+        .n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_DeconvBias_8x8to32_ref = {
         .execute = deconv_bias_execute_ref,
-        .check = deconv_bias_check,
+        .check = NULL,
         .ctor = node_alloc_common,
         .dtor = node_free_common,
+        .n_inputs = NN_IOCOUNT(OP_DECONVBIAS_NUM_OPS),
+        .n_outputs = NN_IOCOUNT(3),
 };
-
-

@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -721,8 +721,8 @@ l2pool_process_slice_hvx(struct l2pool_runstate const *rstp,  void * integ_buf, 
 
 static int l2pool_check(struct nn_node *self, struct nn_graph *nn)
 {
-	if (self->n_inputs != 5) return errlog(nn,"l2pool wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"l2pool wrong # outs");
+	//if (self->n_inputs != 5) return errlog(nn,"l2pool wrong # inputs");
+	//if (self->n_outputs != 3) return errlog(nn,"l2pool wrong # outs");
 
 	const struct tensor *window_tensor = self->inputs[3];
 	const struct tensor *stride_tensor = self->inputs[4];
@@ -760,6 +760,8 @@ struct nn_node_ops nn_ops_for_QuantizedL2Pool_8_d32 = {
 	.check = l2pool_check,
 	.ctor = node_alloc_common,
 	.dtor = l2pool_dtor,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };
 
@@ -768,6 +770,8 @@ struct nn_node_ops nn_ops_for_QuantizedL2Pool_8_d32_ref = {
 	.check = l2pool_check,
 	.ctor = node_alloc_common,
 	.dtor = l2pool_dtor,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };
 

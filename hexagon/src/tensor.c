@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -103,9 +103,14 @@ void print_tensor_to_file(struct nn_graph *nn, uint32_t id, uint32_t index, cons
 		errlog(nn,"Ooops... Couldn't open file '%s'", filename);
 		return;
 	} else {
-		logmsg(nn,1,"INFO: Writing '%s'", filename);
+		logmsg(nn,1,"INFO: Writing '%s' size=%d elements from %p (starting at %p) %dx%dx%dx%d", filename, elementsize, t->data, tensor_location(t,0,0,0,0), t->shape.batches, t->shape.height, t->shape.width, t->shape.depth);
 	}
 
+	uint8_t *start = 0;
+	uint8_t *next = 0;
+	uint8_t *last = 0;
+	int len = 0;
+	int total_len = 0;
 	for (int b=0; b < t->shape.batches; b++) {
 		for (int h=0; h < t->shape.height; h++) {
 			for (int w=0; w < t->shape.width; w++) {
@@ -113,11 +118,28 @@ void print_tensor_to_file(struct nn_graph *nn, uint32_t id, uint32_t index, cons
 					// TODO - There's a faster way to do this... At least for plain tensors;
 					//    fwrite(t,1,(b*h*w*d),outfile);
 					for (int e=0; e<elementsize; e++) {
-						putc(*(uint8_t*)tensor_location(t,b,h,w,d)+e, outfile);
+						if ((t->max_size > total_len) && (t->data_size > total_len)) {
+							next = (uint8_t*)tensor_location(t,b,h,w,d)+e;
+							if (next == last+1) {
+								last = next;
+								len++;
+							} else {
+								if (len) {
+									fwrite(start, 1, len, outfile);
+									total_len+=len;
+								}
+								len = 1;
+								start = last = next;
+							}
+						}
 					}
 				}
 			}
 		}
+	}
+	if (len) {
+		fwrite(start, 1, len, outfile);
+		total_len+=len;
 	}
 	fclose(outfile);
 #endif

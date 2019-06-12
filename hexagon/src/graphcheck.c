@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -78,7 +78,7 @@ int
 check_graph( struct nn_graph *nn, int options)
 {
 	struct gchk_context  ctx;
-	if(nn->debug_level == 0) return 0;
+	if(nn->debug_level == 0 && !nn_option_get(nn,test_force_graph_check)) return 0;
 
 	int c = build_index( nn, &ctx);
 	if( c != 0) return c;
@@ -197,6 +197,7 @@ check_graph( struct nn_graph *nn, int options)
 			if( idxp->refcount == 0 && (np->flags&NN_NODE_FLAG_RETAIN)==0){
 				logmsg(nn,0,"node %X (%s) with %d outputs has no references",
 					(unsigned)np->node_id, op_type_to_string(np->node_type), (int)np->n_outputs );
+				numerr++;
 			}
 		}
 	}

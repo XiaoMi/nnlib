@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -364,46 +364,39 @@ static int execute_finstancenorm(struct nn_node *self, struct nn_graph *nn)
 }
 
 
-static int check_qinstancenorm(struct nn_node *self, struct nn_graph *nn)
-{
-	if (self->n_inputs != 3) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
-	return 0;
-}
-
-static int check_finstancenorm(struct nn_node *self, struct nn_graph *nn)
-{
-	if (self->n_inputs != 1) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
-	return 0;
-}
-
-
 
 struct nn_node_ops nn_ops_for_QuantizedInstanceNorm_8_ref = {
 	.execute = execute_qinstancenorm_ref,
-	.check = check_qinstancenorm,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedInstanceNorm_8 = {
 	.execute = execute_qinstancenorm_ref,
-	.check = check_qinstancenorm,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedInstanceNorm_8_d32_ref = {
 	.execute = execute_qinstancenorm_d32_ref,
-	.check = check_qinstancenorm,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_InstanceNorm_f = {
 	.execute = execute_finstancenorm,
-	.check = check_finstancenorm,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(1),
+	.n_outputs = NN_IOCOUNT(1),
 };

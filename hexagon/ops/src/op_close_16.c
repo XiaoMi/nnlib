@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -63,6 +63,8 @@ static int close_16tof_execute(struct nn_node *self, struct nn_graph *nn)
 #ifdef TIMING_MODE
 	return 0;
 #endif
+	if( nn_option_get(nn,debug_skip_check))  return 0;
+
 	int i;
 	const struct tensor *tensor_in = self->inputs[0];
 	const struct tensor *tensor_in_min = self->inputs[1];
@@ -102,7 +104,6 @@ static int close_16tof_execute(struct nn_node *self, struct nn_graph *nn)
 	// check range is sane...
 
 	float qscale = 65536.0f/(dut_max_float-dut_min_float);
-	if (is_u16) qscale = 65535.0f / (dut_max_float - dut_min_float);
 
 	// check constraints (also catch NaN and inf)
 	if ( !( (dut_max_float >= 0.0f)		 // catches max <0  and NaN
@@ -115,10 +116,16 @@ static int close_16tof_execute(struct nn_node *self, struct nn_graph *nn)
 	// check if 'zero' value is clean. We've already established it's in range -32678..32768 by the
 	// above constraints.
 	//
-	float inzero = -qscale * dut_min_float-32768.0f;
+	float inzero = -qscale * dut_min_float - (is_u16? 0.0f: 32768.0f);
 	float inzero_round = roundf(inzero);
 	if( fabsf(inzero-inzero_round)>5e-3f ){
 		logmsg(nn,0,"**** close_16f: input range %f .. %f  has zero at %.8f ****", dut_min_float, dut_max_float, inzero);
+	}
+	if( !is_u16){
+		if(inzero_round != 0.0f ){
+			logmsg(nn,0,"**** close_16f: input range %f .. %f  is not symmetric ****", dut_min_float, dut_max_float);
+		}
+		inzero_round = 0.0f;
 	}
 	/// ---------------------
 	/// measure the stats
@@ -138,13 +145,7 @@ static int close_16tof_execute(struct nn_node *self, struct nn_graph *nn)
 		int tdata = inp[idx];
 		if (is_u16) tdata = (uint16_t)tdata;
 		float refx = refp[idx];
-		float refdata;
-		if (is_u16) {
-			refdata = (refx - dut_min_float)* qscale;
-		}
-		else {
-			refdata = refx * qscale + inzero;
-		}
+		float refdata = refx * qscale + inzero_round;
 		actual_min = fminf( actual_min, refx);
 		actual_max = fmaxf( actual_max, refx);
 		int is_clip = tdata <= -32767 || tdata >= 32767;
@@ -212,8 +213,9 @@ static int close_16tof_execute(struct nn_node *self, struct nn_graph *nn)
 			b = k2/height;		h = k2-height*b;
 			// find excess error
 			int tdata = inp[ipos];
+			if (is_u16) tdata = (uint16_t)tdata;
 			float refdat = refp[ipos];
-			float refdatq = refdat*qscale + inzero;
+			float refdatq = refdat*qscale + inzero_round;
 			float excerr = fabsf( tdata-refdatq) - fabsf( roundf(refdatq)-refdatq);
 			if( excerr > error_disp_lev){
 				char const * flag = ( ipos == errstatC.pos_largerr)? " <====": "";
@@ -249,27 +251,20 @@ static int close_16tof_execute(struct nn_node *self, struct nn_graph *nn)
 //
 //  No outputs
 
-static int close_16tof_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking close_16tof node %p",self);
-	int k = node_check_inputs_range( self, nn, "close_16tof", 4, 5);
-	if( k == 0 )k = node_check_outputs_n( self, nn, "close_16tof", 0);
-	if( k!=0)
-		return k;
-	logmsg(nn,2,"close_16tof node %p check OK",self);
-	return 0;
-}
-
 struct nn_node_ops nn_ops_for_Close_16tof = {
 	.execute = close_16tof_execute,
-	.check = close_16tof_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(4,5),
+	.n_outputs = NN_IOCOUNT(0),
 };
 
 struct nn_node_ops nn_ops_for_Close_u16tof = {
 	.execute = close_16tof_execute,
-	.check = close_16tof_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(4,5),
+	.n_outputs = NN_IOCOUNT(0),
 };

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -144,15 +144,13 @@ struct nn_cpshare_typedesc {
 // (functions which are commented out, are inlined below)
 struct nn_node* nn_cpshare_get_const_node( struct nn_graph *nn, struct nn_node* self, int input_no );
 //struct nn_cpshare_base *nn_cpshare_new( struct nn_graph * nn, struct nn_cpshare_typedesc const* );
-//void nn_cpshare_decref( struct nn_graph *nn, void * cpshare );
+void nn_cpshare_decref( struct nn_graph *nn, void * cpshare );
 struct nn_cpshare_base *nn_cpshare_get_existing( struct nn_graph * nn,
 	struct nn_cpshare_typedesc const*, struct nn_node const * );
 //struct nn_cpshare_base *nn_cpshare_get_another_existing( struct nn_graph * nn,
 //	struct nn_cpshare_typedesc const*, void * cpshare );
-//void nn_cpshare_attach( struct nn_graph *nn, struct nn_node* const_node, void * cpshare );
+void nn_cpshare_attach( struct nn_graph *nn, struct nn_node* const_node, void * cpshare );
 
-// this is internal : use nn_cpshare_decref.
-void nn_cpshare_call_dtor( struct nn_graph *nn, struct nn_cpshare_base * cpshare );
 
 static inline struct nn_cpshare_base *
 nn_cpshare_new( struct nn_graph * nn, struct nn_cpshare_typedesc const* td)
@@ -164,23 +162,7 @@ nn_cpshare_new( struct nn_graph * nn, struct nn_cpshare_typedesc const* td)
 	}
 	return p;
 }
-static inline void
-nn_cpshare_attach( struct nn_graph *nn, struct nn_node* const_node, void * cpsharev )
-{
-	struct nn_cpshare_base * cpshare = (struct nn_cpshare_base *)cpsharev;
-	if( const_node->opaque == NULL ){
-		const_node->opaque = cpshare;
-		cpshare->ref_count++;
-	}
-}
-static inline void
-nn_cpshare_decref( struct nn_graph *nn, void * cpsharev )
-{
-	struct nn_cpshare_base * cpshare = (struct nn_cpshare_base *)cpsharev;
-	if( cpshare->ref_count-- <= 0){
-		nn_cpshare_call_dtor( nn, cpshare);
-	}
-}
+
 static inline struct nn_cpshare_base *
 nn_cpshare_get_another_existing( struct nn_graph * nn,
 	struct nn_cpshare_typedesc const* tdp, void * cpsharev )

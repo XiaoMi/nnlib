@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -199,34 +199,33 @@ static int convert_from_tile_execute(struct nn_node *self, struct nn_graph *nn)
 }
 
 
-static int convert_tile_check(struct nn_node *self, struct nn_graph *nn)
-{
-	int k = node_check_inputs_range( self, nn, "convert_tile", 1, -5 );
-	if(k==0) k = node_check_outputs_n( self, nn, "convert_tile", 1);
-	return k;
-}
-
 struct nn_node_ops nn_ops_for_Convert_d32toTile = {
 	.execute = convert_d32toTile_execute,
-	.check = convert_tile_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(1,5),
+	.n_outputs = NN_IOCOUNT(1),
 	.flags = NN_NODE_FLAG_D32_INPUT,
 };
 
 struct nn_node_ops nn_ops_for_Convert_Tiletod32 = {
 	.execute = convert_Tiletod32_execute,
-	.check = convert_tile_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(1,5),
+	.n_outputs = NN_IOCOUNT(1),
 	.flags = NN_NODE_FLAG_D32_OUTPUT,
 };
 
 struct nn_node_ops nn_ops_for_Convert_from_tile = {
 	.execute = convert_from_tile_execute,
-	.check = convert_tile_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(1,5),
+	.n_outputs = NN_IOCOUNT(1),
 	.flags = NN_NODE_FLAG_D32_INPUT,
 };
 

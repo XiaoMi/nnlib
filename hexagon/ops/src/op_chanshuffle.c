@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -53,7 +53,7 @@
 // 		'n_in' input tensors of shape [b,h,w,d_in]
 //  	'n_out' output tensors (all will be [b,h,w,d_in*n_in/n_out] )
 
-// we detemermine the following (all of the divisions must be exact)
+// we determine the following (all of the divisions must be exact)
 //    d1 = k/n_in
 //    dq = d_in/d1
 //    d0 = dq/n_out
@@ -77,7 +77,7 @@
 //     0..n_out-1		  flat tensors of shape [b,h,w,d_in*n_in/n_out]
 //
 //
-// 'qu8' version QuanttizedChannelShuffle_8
+// 'qu8' version QuantizedChannelShuffle_8
 //
 //   3*n_in+1 inputs:
 //     0 - scalar int - 'k' parameter
@@ -419,21 +419,13 @@ static void copy_slice_qu8(
 	}
 }
 
-static int channelshuffle_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking channelshuffle node %p",self);
-	if( self->n_inputs  < 2) return errlog(nn, "channelshuffle: needs >= 2 inputs");
-	if( self->n_outputs  < 1) return errlog(nn, "channelshuffle: needs >= 1 output");
-	logmsg(nn,2,"channelshuffle node %p check OK",self);
-	return 0;
-}
+
 static int channelshuffle_check_qu8(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking channelshuffle node %p",self);
 	int n_in = self->n_inputs;
 	if( n_in < 4 ||  (n_in-1)%3u != 0 )
 		return errlog(nn, "channelshuffle: needs 3*n+1 inputs, with n >= 1");
-	if( self->n_outputs  < 3) return errlog(nn, "channelshuffle: needs >= 3 outputs");
 	logmsg(nn,2,"channelshuffle node %p check OK",self);
 	return 0;
 }
@@ -441,16 +433,20 @@ static int channelshuffle_check_qu8(struct nn_node *self, struct nn_graph *nn)
 
 struct nn_node_ops nn_ops_for_ChannelShuffle_f = {
 	.execute = channelshuffle_execute,
-	.check = channelshuffle_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_GE(2),
+	.n_outputs = NN_IOCOUNT_GE(1),
 };
 
 struct nn_node_ops nn_ops_for_ChannelShuffle_int32 = {
 	.execute = channelshuffle_execute,
-	.check = channelshuffle_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_GE(2),
+	.n_outputs = NN_IOCOUNT_GE(1),
 };
 struct nn_node_ops nn_ops_for_QuantizedChannelShuffle_8 = {
 	.execute = channelshuffle_execute,
@@ -458,6 +454,8 @@ struct nn_node_ops nn_ops_for_QuantizedChannelShuffle_8 = {
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
 	.flags = NN_NODE_FLAG_CLS_CHANSHUFFLE,
+	.n_inputs = NN_IOCOUNT_GE(4),	// must be 3k+1
+	.n_outputs = NN_IOCOUNT_GE(3),
 };
 // the 'ref' version is identical, but will not be transformed in the graph.
 struct nn_node_ops nn_ops_for_QuantizedChannelShuffle_8_ref = {
@@ -465,5 +463,7 @@ struct nn_node_ops nn_ops_for_QuantizedChannelShuffle_8_ref = {
 	.check = channelshuffle_check_qu8,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_GE(4),		// must be 3k+1
+	.n_outputs = NN_IOCOUNT_GE(3),
 };
 

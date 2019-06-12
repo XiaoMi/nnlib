@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -344,46 +344,10 @@ static int matmul_execute_asm(struct nn_node *self, struct nn_graph *nn)
 	return matmul_launch(self,nn,matmul_asm);
 }
 
-static inline void logmsg_input(
-	struct nn_graph *nn,
-	int logval,
-	int index,
-	const struct tensor *tens)
-{
-	logmsg(nn,logval,"input %d: BHWD=%d,%d,%d,%d data %d bytes @ %p",
-		index,
-		tens->shape.batches,
-		tens->shape.height,
-		tens->shape.width,
-		tens->shape.depth,
-		tens->data_size,
-		tens->data);
-}
 
 static int matmul_check_ref(struct nn_node *self, struct nn_graph *nn)
 {
-	int i;
 	logmsg(nn,2,"Checking matmul node %p",self);
-	if (self->n_inputs != 6) return errlog(nn,"matmul wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"matmul wrong # outputs");
-	if (self->inputs == NULL) return errlog(nn,"NULL inputs");
-	if (self->outputs == NULL) return errlog(nn,"NULL outputs");
-	for (i = 0; i < self->n_inputs; i++) {
-		if (self->inputs[i] == NULL) {
-			return errlog(nn,"input %d NULL",i);
-		}
-	}
-	for (i = 0; i < self->n_outputs; i++) {
-		if (self->outputs[i] == NULL) {
-			return errlog(nn,"output %d NULL",i);
-		}
-	}
-	logmsg(nn,3,"matmul node %p inputs: "
-		"[a, b, min_a, max_a, min_b, max_b]:",
-		self);
-	for (i = 0; i < self->n_inputs; i++) {
-		logmsg_input(nn,3,i,self->inputs[i]);
-	}
 
 
 #define BPAD 32
@@ -402,7 +366,6 @@ static int matmul_check_ref(struct nn_node *self, struct nn_graph *nn)
 	uint32_t filt_elements_pad = (filt_elements + APAD - 1) & (~(APAD - 1));
 	int out_depth_pad = (out_depth + BPAD - 1) & ~(BPAD-1);
 	uint32_t consts_size;
-	uint32_t vecinfo;
 	filt_elements_pad = (filt_elements_pad < 32)?32:filt_elements_pad;
 	consts_size = filt_elements_pad * out_depth_pad;
 	if (nn_scratch_grow(nn,consts_size)){
@@ -413,14 +376,13 @@ static int matmul_check_ref(struct nn_node *self, struct nn_graph *nn)
 			return errlog(nn,"couldn't allocate buffer for const rearrangement");
 		}
 	}
-	nn_os_hvx_power_on(nn);
-	vecinfo = nn_os_vector_acquire();
 	nn_scratch_grow(nn,filt_elements_pad*out_depth_pad+256);
 	logmsg(nn,2,"Pad B: filt_elements=%lu %lu,out_depth=%lu %d, filt_offset=%ld", filt_elements, out_depth, filt_elements_pad,out_depth_pad, filt_offset);
+
+	nn_mutex_lock(&nn->scratch_mutex);
 	pad2d(filt,filt_elements,out_depth,nn->scratch,filt_elements_pad,out_depth_pad,filt_offset);
 	transpack(nn->scratch,filt_elements_pad,out_depth_pad,self->opaque);
-	nn_os_vector_release(vecinfo);
-	nn_os_hvx_power_off(nn);
+	nn_mutex_unlock(&nn->scratch_mutex);
 	logmsg(nn,2,"matmul node %p check OK",self);
 	return 0;
 }
@@ -463,6 +425,8 @@ struct nn_node_ops nn_ops_for_QuantizedMatMul_8x8to32 = {
 	.check = matmul_check_ref,
 	.ctor = matmul_ctor,
 	.dtor = matmul_dtor,
+	.n_inputs = NN_IOCOUNT(6),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedMatMul_8x8to32_ref = {
@@ -470,4 +434,6 @@ struct nn_node_ops nn_ops_for_QuantizedMatMul_8x8to32_ref = {
 	.check = matmul_check_ref,
 	.ctor = matmul_ctor,
 	.dtor = matmul_dtor,
+	.n_inputs = NN_IOCOUNT(6),
+	.n_outputs = NN_IOCOUNT(3),
 };

@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -57,6 +57,9 @@ static int fake_concat_check(struct nn_node *self, struct nn_graph *nn)
 	}
 	/* Probably should check some other stuff here */
 	int n_inputs = (self->n_inputs - 1) / 3;
+	if( self->n_inputs != 3*n_inputs+1){
+		return errlog(nn,"bad input count");
+	}
 	int i;
 	struct nn_node *first = self->outputs[0]->data;
 	int found = 0;
@@ -151,6 +154,8 @@ struct nn_node_ops nn_ops_for_QuantizedFakeConcat_8_d32 = {
 	.check = fake_concat_check,
 	.ctor = node_alloc_common,
 	.dtor = fake_concat_dtor,
+	.n_inputs = NN_IOCOUNT_GE(4),	// 1+ 3*n with n >= 1
+	.n_outputs = NN_IOCOUNT(3),
 	.earlywork_note_pred = fake_concat_earlywork_note_pred,
 	.earlywork_register = fake_concat_earlywork_register,
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT | NN_NODE_FLAG_OUTPUT_USES_INPUT_RANGE,

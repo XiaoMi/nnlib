@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -301,7 +301,7 @@ int nn_os_workers_spawn(struct nn_graph *nn)
 	}
 	nn->os_opaque = worker_info;
 
-	if ((nn->vec_work = nn_pipe_alloc(nn, 1024)) == NULL) {
+	if ((nn->vec_work = nn_pipe_alloc(nn, 2048)) == NULL) {
 		return nn_os_careful_free(nn,errlog(nn,"os pipe alloc fail"));
 	}
 	if ((nn->nonvec_work = nn_pipe_alloc(nn, 128)) == NULL) {

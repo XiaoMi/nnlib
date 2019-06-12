@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -254,10 +254,12 @@ static int lrn_8_execute_ref(struct nn_node *self, struct nn_graph *nn)
 static int lrn_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking q lrn node %p",self);
-	if (self->n_inputs != 7) return errlog(nn,"LRN wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"LRN wrong # outs");
-	if (self->inputs == NULL) return errlog(nn,"NULL inputs");
-	if (self->outputs == NULL) return errlog(nn,"NULL outputs");
+	for (uint32_t i = 3; i < 7; i++) {
+		if (self->inputs[i]->data == NULL) {
+			return errlog(nn,"input %d not const",i);
+		}
+	}
+
 	const int32_t window_size = (int32_t) tensor_get_float(self->inputs[3], 0);
 	if (window_size < 1) {
 		return errlog(nn, "LRN invalid window size (< 1)"); // int(window_size)>=1 check
@@ -274,16 +276,6 @@ static int lrn_check(struct nn_node *self, struct nn_graph *nn)
 	if (beta < 0.0) {
 		return errlog(nn, "LRN unsupported beta-value (< 0.0)"); // beta>0 check
 	}
-	for (uint32_t i = 0; i < self->n_inputs; i++) {
-		if (self->inputs[i] == NULL) {
-			return errlog(nn,"input %d NULL",i);
-		}
-	}
-	for (uint32_t i = 0; i < self->n_outputs; i++) {
-		if (self->outputs[i] == NULL) {
-			return errlog(nn,"output %d NULL",i);
-		}
-	}
 	logmsg(nn,2,"q lrn %p check OK",self);
 	return 0;
 }
@@ -293,6 +285,8 @@ struct nn_node_ops nn_ops_for_QuantizedLRN_8_ref = {
 	.check = lrn_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(7),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedLRN_8 = {
@@ -300,6 +294,8 @@ struct nn_node_ops nn_ops_for_QuantizedLRN_8 = {
 	.check = lrn_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(7),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 

@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -39,9 +39,9 @@
 // to enable run-time checking of dims in tensor_prepare_xx
 //#define NN_CHECK_TENSOR_DIMS 1
 /*
- * 
+ *
  * Now that that's out of the way, let's get to the good stuff.
- * 
+ *
  * This defines common types used.
  */
 
@@ -98,6 +98,7 @@ enum {
 	NN_TYPE_INT32,
 	NN_TYPE_FLOAT,
 };
+extern const char *TypeStrings[];
 
 
 // Enum and Structs used for passing options into hexagon_nn_config()
@@ -115,7 +116,9 @@ enum {
 	NN_OPTION_ENABLE_GRAPH_PRINT,
 	NN_OPTION_ENABLE_TENSOR_PRINT,
 	NN_OPTION_TENSOR_PRINT_FILTER,
-	//  /\
+	NN_OPTION_HAP_MEM_GROW_SIZE,
+	NN_OPTION_ENABLE_CONST_PRINT,
+	//  /\.
 	//   \___ Add NEW entries HERE, at BOTTOM
 	NN_OPTION_LASTPLUSONE,
 };
@@ -205,7 +208,7 @@ static inline int format_matches( struct tensor_format const * a, struct tensor_
 struct nn_node;
 
 struct tensor {
-	struct shape shape;		// 16 
+	struct shape shape;		// 16
 	void *data;
 	uint32_t max_size;
 	uint32_t data_size;
@@ -229,14 +232,20 @@ static inline int tensor_is_d32( struct tensor const *t)
 // This struct contains 'addressing' info
 // for locating elements in a d32 tensor. It is generated
 // by tensor_addressing_d32  (or tensor_addressing_d32_func).
+// Note that d0 = 0 in all cases.
 //
-// For a d32 tensor:
+// For a d32 tensor of qu8:
 // The 'data' pointer is a multiple of 32 (it includes ht& width padding, but not depth padding)
-// The 'stride' are all multiple of 32.
+// The 'stride' are all multiple of 128
 //  An element [b,h,w,d] is located at data + b*batch_stride + h*height_stride + w*32 + d_offset
 // where d_offset is obtained as:
 //       dx = d + d0
 //       d_offset = dx %32   + (dx/32) * d32_stride
+//
+// When used for a d32 tensor of qu16:
+//    - the pointer is still a uint8_t pointer; it will be a multiple of 64.
+//    - the strides are in *bytes*
+//      An element [b,h,w,d] is located at data + b*batch_stride + h*height_stride + w*64 + d_offset
 //
 struct tensor_addressing {
 	uint8_t * data;
@@ -312,7 +321,7 @@ static inline void tensor_set_int32(struct tensor *dst, int index, int32_t val)
 	data[index] = val;
 }
 
-static inline void tensor_set_shape(struct tensor *dst, 
+static inline void tensor_set_shape(struct tensor *dst,
 	uint32_t b, uint32_t h, uint32_t w, uint32_t d)
 {
 	dst->shape.depth = d;
@@ -447,21 +456,22 @@ static inline int tensor_out_prepare_padded_d32(
 	int32_t w_total = w+w_before+w_after;
 	int32_t d_total = d+d_before+d_after;
 #ifdef NN_CHECK_TENSOR_DIMS
+	int elsize = tensor_type_size(type);
 	// sanity check the dimensions and padding
 	// - actual dims all >= 1
 	// - product of padded dim fits in u32 and is not absurd
 	// - padding amounts need to fit in bytes
 	// - depth padding is at most 31;
-	// - w_total must be multiple of 4
-	// - h_total must be multiple of 32.
+	// - w_total must be multiple of 4 (or 2, when elsize =2)
+	// - d_total must be multiple of 32.
 	uint32_t allsize = mulu32_x4_sat(b,h_total,w_total,d_total);
 	if( allsize ==0  || allsize >= (1u<<28)){ // allsize is enormous or 0
 		return -4;
 	}
 	if( h < 1 || (unsigned)(h_before|h_after) >255u ) return -5;
-	if( w < 1 || (unsigned)(w_before|w_after) >255u || (w_total&3)!= 0) return -6;
+	if( w < 1 || (unsigned)(w_before|w_after) >255u || ((w_total*elsize)&3)!= 0) return -6;
 	if( d < 1 || (unsigned)(d_before|d_after) >31u  || (d_total&31)!= 0) return -7;
-	int32_t size = allsize * tensor_type_size(type);
+	int32_t size = allsize * elsize;
 #else
 	int32_t size = b*h_total*w_total*d_total*tensor_type_size(type);
 #endif
@@ -505,8 +515,10 @@ static inline int tensor_out_prepare_d32_sameas(
 	return 0;
 }
 
+// find the offset into a d32 tensor, in elements, accounting
+// for all of the padding.
 
-static inline uint8_t *tensor_location_d32(
+static inline size_t tensor_offset_for_d32(
 	const struct tensor *src,
 	int32_t b,
 	int32_t h,
@@ -519,16 +531,35 @@ static inline uint8_t *tensor_location_d32(
 	int32_t h_total = h_before + src->shape.height + src->format.height_pad[1];
 	int32_t w_total = w_before + src->shape.width + src->format.width_pad[1];
 	int32_t d_total = d_before + src->shape.depth + src->format.depth_pad[1];
-	uint8_t *base = (uint8_t*)src->data;
 	uint32_t d_pos = d + d_before;
 
-	return base
-		+ b*h_total*w_total*d_total
+	return b*h_total*w_total*d_total
 		+ (h+h_before)*w_total*d_total
 		+ (w+w_before)*32
 		+ (d_pos/32)*(w_total*32)
 		+ d_pos%32;
 }
+
+static inline uint8_t *tensor_location_d32(
+	const struct tensor *src,
+	int32_t b,
+	int32_t h,
+	int32_t w,
+	int32_t d)
+{
+	return  (uint8_t*)src->data + tensor_offset_for_d32(src, b,h,w,d);
+}
+// 16bit version
+static inline int16_t *tensor_location_16b_d32(
+	const struct tensor *src,
+	int32_t b,
+	int32_t h,
+	int32_t w,
+	int32_t d)
+{
+	return  (int16_t*)src->data + tensor_offset_for_d32(src, b,h,w,d);
+}
+
 
 static inline uint8_t *tensor_location_d32_aix(
 	const struct tensor *src,
@@ -558,11 +589,30 @@ static inline uint8_t *tensor_location_d32_aix(
 	return base + b * h_total * w_total * d_total + (h + h_before) * w_total * d_total + (w + w_before) * 32 + (d_pos / 32) * (w_total * 32) + d_pos % 32;
 }
 
+static inline size_t tensor_offset_bhw_for_d32(
+	const struct tensor *src,
+	int32_t b,
+	int32_t h,
+	int32_t w)
+{
+	int32_t h_before = src->format.height_pad[0];
+	int32_t w_before = src->format.width_pad[0];
+	int32_t d_before = src->format.depth_pad[0];
+	int32_t h_total = h_before + src->shape.height + src->format.height_pad[1];
+	int32_t w_total = w_before + src->shape.width + src->format.width_pad[1];
+	int32_t d_total = d_before + src->shape.depth + src->format.depth_pad[1];
+
+	return b*h_total*w_total*d_total
+		+ (h+h_before)*w_total*d_total
+		+ (w+w_before)*32;
+}
+
 //
 // this is like tensor_location_d32 except
 // - there is no 'd' (assumed 0)
 // - the address is not compensated for d_before padding.
 //  So it's always 32 aligned.
+// (64 aligned, in the 16b case).
 //
 static inline uint8_t *tensor_location_bhw_d32(
 	const struct tensor *src,
@@ -570,68 +620,16 @@ static inline uint8_t *tensor_location_bhw_d32(
 	int32_t h,
 	int32_t w)
 {
-	int32_t h_before = src->format.height_pad[0];
-	int32_t w_before = src->format.width_pad[0];
-	int32_t d_before = src->format.depth_pad[0];
-	int32_t h_total = h_before + src->shape.height + src->format.height_pad[1];
-	int32_t w_total = w_before + src->shape.width + src->format.width_pad[1];
-	int32_t d_total = d_before + src->shape.depth + src->format.depth_pad[1];
-	uint8_t *base = (uint8_t*)src->data;
-
-	return base
-		+ b*h_total*w_total*d_total
-		+ (h+h_before)*w_total*d_total
-		+ (w+w_before)*32;
+	return (uint8_t*)src->data + tensor_offset_bhw_for_d32(src,b,h,w);
 }
 
-// 16bit version
-static inline int16_t *tensor_location_16b_d32(
-	const struct tensor *src,
-	int32_t b,
-	int32_t h,
-	int32_t w,
-	int32_t d)
-{
-	int32_t h_before = src->format.height_pad[0];
-	int32_t w_before = src->format.width_pad[0];
-	int32_t d_before = src->format.depth_pad[0];
-	int32_t h_total = h_before + src->shape.height + src->format.height_pad[1];
-	int32_t w_total = w_before + src->shape.width + src->format.width_pad[1];
-	int32_t d_total = d_before + src->shape.depth + src->format.depth_pad[1];
-	int16_t *base = (int16_t*)src->data;
-	uint32_t d_pos = d + d_before;
-
-	return base
-		+ b * h_total*w_total*d_total
-		+ (h + h_before)*w_total*d_total
-		+ (w + w_before) * 32
-		+ (d_pos / 32)*(w_total * 32)
-		+ d_pos % 32;
-}
-//
-// this is like tensor_location_d32 except
-// - there is no 'd' (assumed 0)
-// - the address is not compensated for d_before padding.
-//  So it's always 32 aligned.
-//
 static inline int16_t *tensor_location_bhw_16b_d32(
 	const struct tensor *src,
 	int32_t b,
 	int32_t h,
 	int32_t w)
 {
-	int32_t h_before = src->format.height_pad[0];
-	int32_t w_before = src->format.width_pad[0];
-	int32_t d_before = src->format.depth_pad[0];
-	int32_t h_total = h_before + src->shape.height + src->format.height_pad[1];
-	int32_t w_total = w_before + src->shape.width + src->format.width_pad[1];
-	int32_t d_total = d_before + src->shape.depth + src->format.depth_pad[1];
-	int16_t *base = (int16_t*)src->data;
-
-	return base
-		+ b * h_total*w_total*d_total
-		+ (h + h_before)*w_total*d_total
-		+ (w + w_before) * 32;
+	return (int16_t*)src->data + tensor_offset_bhw_for_d32(src,b,h,w);
 }
 
 //
@@ -647,7 +645,7 @@ static inline int16_t *tensor_location_bhw_16b_d32(
 //   where nd32_total > nd32.
 //
 static inline struct tensor_addressing
-tensor_addressing_d32_inline( struct tensor const * src)
+tensor_addressing_d32__for_elsize( struct tensor const * src, unsigned elsize)
 {
 	int32_t h_before = src->format.height_pad[0];
 	int32_t w_before = src->format.width_pad[0];
@@ -656,12 +654,13 @@ tensor_addressing_d32_inline( struct tensor const * src)
 	int32_t w_total = w_before + src->shape.width + src->format.width_pad[1];
 	unsigned d0_d = d_before + src->shape.depth;
 	int32_t nd32_total = (unsigned)(d0_d + src->format.depth_pad[1])/32u;
-	int32_t d32_stride = w_total * 32;
+	int w_stride = 32*elsize;
+	int32_t d32_stride = w_total * w_stride;
 	int32_t height_stride = d32_stride*nd32_total;
 
 	struct tensor_addressing result;
 
-	result.data = (uint8_t *)src->data + h_before * height_stride + w_before *32;
+	result.data = (uint8_t *)src->data + h_before * height_stride + w_before * w_stride;
 	result.batch_stride = h_total * height_stride;
 	result.height_stride = height_stride;
 	result.d32_stride = d32_stride;
@@ -670,14 +669,31 @@ tensor_addressing_d32_inline( struct tensor const * src)
 	result.nd32_total = nd32_total;
 	return result;
 }
+static inline struct tensor_addressing
+tensor_addressing_d32_inline( struct tensor const * src)
+{
+	return tensor_addressing_d32__for_elsize(src, 1);
+}
+static inline struct tensor_addressing
+tensor_addressing_d32_16b_inline( struct tensor const * src)
+{
+	return tensor_addressing_d32__for_elsize(src, 2);
+}
 // same thing but in a function
 struct tensor_addressing nn_tensor_addressing_d32(struct tensor const * src) __attribute__((pure));
+struct tensor_addressing nn_tensor_addressing_d32_16b(struct tensor const * src) __attribute__((pure));
+
 static inline struct tensor_addressing
 tensor_addressing_d32_func( struct tensor const * src){	return nn_tensor_addressing_d32(src); }
+static inline struct tensor_addressing
+tensor_addressing_d32_16b_func( struct tensor const * src){	return nn_tensor_addressing_d32_16b(src); }
+
 
 // default is function
 static inline struct tensor_addressing
 tensor_addressing_d32( struct tensor const * src){	return nn_tensor_addressing_d32(src); }
+static inline struct tensor_addressing
+tensor_addressing_d32_16b( struct tensor const * src){	return nn_tensor_addressing_d32_16b(src); }
 
 
 
@@ -700,7 +716,9 @@ static inline void *tensor_location(
                               (src->shape.height *
                                (b)))))))));
         } else if ( tensor_is_d32(src)) {
-                return tensor_location_d32(src, b,h,w,d);
+		return ((uint8_t *) src->data) +
+			( tensor_type_size(src->format.type) *
+			  tensor_offset_for_d32(src, b,h,w,d));
         }
         return NULL;
 }
@@ -1058,6 +1076,7 @@ void nn_report_node_outputs( struct nn_graph * nn, int level, struct nn_node con
 //
 void hvx_argmin_or_max_in_rows( uint8_t const * data, int rows, int cols, int row_stride, int32_t * outp, int find_argmax );
 void hvx_argmin_or_max_in_cols( uint8_t const * data, int rows, int cols, int row_stride, int32_t * outp, int find_argmax );
-
+void hvx_argmin_or_max_d_8_d32( struct tensor const * data_tensor, int32_t * outp, int find_argmax );
+void hvx_argmin_or_max_whb_8_d32( struct tensor const * data_tensor, int32_t * outp, int32_t  axis, int find_argmax);
 
 #endif

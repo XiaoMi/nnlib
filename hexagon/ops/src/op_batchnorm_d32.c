@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -995,11 +995,8 @@ batchnorm_run_single_plane(
 static int
 batchnorm_d32_check(struct nn_node *self, struct nn_graph *nn)
 {
-	int k;
 	logmsg(nn,2,"Checking batchnorm_d32 node %p",self);
 
-	k = node_check_inputs_outputs_n( self,nn, "batchnorm_d32", 11, 3);
-	if( k!= 0) return k;
 	////////////////
 	struct batchnorm_d32_info *info;
 
@@ -1060,6 +1057,8 @@ struct nn_node_ops nn_ops_for_QuantizedBatchNorm_8x8p8to8_d32 = {
 	.check = batchnorm_d32_check,
 	.ctor = node_alloc_common,
 	.dtor = batchnorm_d32_dtor,
+	.n_inputs = NN_IOCOUNT(11),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
 };
 
@@ -1071,6 +1070,8 @@ struct nn_node_ops nn_ops_for_QuantizedBatchNorm_8x8p32to8_d32 = {
 	.check = batchnorm_d32_check,
 	.ctor = node_alloc_common,
 	.dtor = batchnorm_d32_dtor,
+	.n_inputs = NN_IOCOUNT(11),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
 };
 
@@ -1081,19 +1082,14 @@ static int batchnorm_8_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	return errlog(nn,"batchnorm_8 not implemented");
 }
-static int
-batchnorm_8_check(struct nn_node *self, struct nn_graph *nn)
-{
-	int k;
-	k = node_check_inputs_outputs_n( self,nn, "batchnorm", 11, 3);
-	return k;
-}
 
 struct nn_node_ops nn_ops_for_QuantizedBatchNorm_8x8p8to8 = {
 	.execute = batchnorm_8_execute,
-	.check = batchnorm_8_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(11),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 //
@@ -1101,8 +1097,10 @@ struct nn_node_ops nn_ops_for_QuantizedBatchNorm_8x8p8to8 = {
 //
 struct nn_node_ops nn_ops_for_QuantizedBatchNorm_8x8p32to8 = {
 	.execute = batchnorm_8_execute,
-	.check = batchnorm_8_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(11),
+	.n_outputs = NN_IOCOUNT(3),
 };
 

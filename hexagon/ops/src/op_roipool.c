@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -75,21 +75,6 @@ static int32_t max(int a, int32_t b) { return((a>b) ? a : b); }
 static int32_t min(int32_t a, int32_t b) {return((a<b)?a:b);}
 #endif
 
-static inline void logmsg_input(
-    struct nn_graph *nn,
-    int logval,
-    int index,
-    const struct tensor *tens)
-{
-    logmsg(nn,logval,"input %d: BHWD=%d,%d,%d,%d data %d bytes @ %p",
-           index,
-           tens->shape.batches,
-           tens->shape.height,
-           tens->shape.width,
-           tens->shape.depth,
-           tens->data_size,
-           tens->data);
-}
 
 static int check_roishape(struct nn_graph *nn, const struct tensor* tens, int logval) {
    int res = 0;
@@ -310,40 +295,23 @@ static int roipool_execute_asm(struct nn_node *self, struct nn_graph *nn)
     return td.res;
 }
 
-static int roipool_check(struct nn_node *self, struct nn_graph *nn)
-{
-    int i;
-    logmsg(nn,2,"Checking roipool node %p",self);
-    if (self->n_inputs != OP_ROIPOOL_NUM_OPS) return errlog(nn,"roipool wrong # inputs");
-    if (self->n_outputs != 3) return errlog(nn,"roipool wrong # outs");
-
-    for (i = 0; i < self->n_inputs; i++) {
-        if (self->inputs[i] == NULL) {
-            return errlog(nn,"roipool NULL input %d",i);
-        }
-        logmsg_input(nn,2,i,self->inputs[i]);
-    }
-    for (i = 0; i < self->n_outputs; i++) {
-        if (self->outputs[i] == NULL) {
-            return errlog(nn,"roipool NULL output %d",i);
-        }
-    }
-    logmsg(nn,2,"roipool node %p check OK",self);
-    return 0;
-}
 
 struct nn_node_ops nn_ops_for_QuantizedRoiPool_8 = {
     .execute = roipool_execute_asm,
-    .check = roipool_check,
+    .check = NULL,
     .ctor = node_alloc_common,
     .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT(OP_ROIPOOL_NUM_OPS),
+    .n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedRoiPool_8_ref = {
     .execute = roipool_execute_ref,
-    .check = roipool_check,
+    .check = NULL,
     .ctor = node_alloc_common,
     .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT(OP_ROIPOOL_NUM_OPS),
+    .n_outputs = NN_IOCOUNT(3),
 };
 
 

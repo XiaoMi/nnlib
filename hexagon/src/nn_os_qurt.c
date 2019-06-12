@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -55,7 +55,9 @@ static const unsigned short DEFAULT_WORKER_PRIORITY = 0xD0;
 #include <HAP_vtcm_mgr.h>
 #endif
 
-
+#if !defined(V65) && !defined(V66)
+static int hvxpowercontext = 0xFeedF00d;
+#endif
 
 #if defined(HEXAGON_V66)
 
@@ -91,14 +93,14 @@ int nn_os_vtcm_choose_size(struct nn_graph *nn)
 #if defined(HEXAGON_V66) || defined(HEXAGON_V65)
 	if (nn->vtcm_size==-1) {
 		// Query available VTCM, and warn if we're getting less than expected.
-		unsigned int avail_block_size, max_page_size, num_pages, arch_page_size, arch_page_count;
+		unsigned int avail_block_size = 0, max_page_size = 0, num_pages = 0, arch_page_size = 0, arch_page_count = 0;
 		if (HAP_query_avail_VTCM(&avail_block_size, &max_page_size, &num_pages)) {
 			// Should this be fatal?
-			logmsg(nn,1,"ERROR: Could not query available VTCM from Qurt");
+			errlog(nn,"ERROR: Could not query available VTCM from Qurt");
 		}
 		if (HAP_query_total_VTCM(&arch_page_size, &arch_page_count)) {
 			// Should this be fatal?
-			logmsg(nn,1,"ERROR: Could not query VTCM architecture from Qurt");
+			errlog(nn,"ERROR: Could not query VTCM architecture from Qurt");
 		}
 		if (arch_page_count != 1) {
 			logmsg(nn,1,"WARN: Architectural VTCM page-count %u!=1 (%u,%u,%u,%u)", arch_page_count, avail_block_size, max_page_size, num_pages, arch_page_size);
@@ -117,6 +119,22 @@ int nn_os_vtcm_choose_size(struct nn_graph *nn)
 	return 0;
 }
 
+int nn_os_vtcm_query_page_count(struct nn_graph *nn)
+{
+	unsigned int arch_page_size, arch_page_count;
+	arch_page_size = 0;
+	arch_page_count = 0;
+
+#if defined(HEXAGON_V66) || defined(HEXAGON_V65)
+	// Query current VTCM.
+	if (HAP_query_total_VTCM(&arch_page_size, &arch_page_count)) {
+		// Should this be fatal?
+		logmsg(nn,1,"ERROR: Could not query VTCM architecture from Qurt");
+	}
+#endif
+	return arch_page_count;
+}
+
 int nn_os_vtcm_acquire(struct nn_graph *nn)
 {
 	int use_single_page = 1;
@@ -124,7 +142,11 @@ int nn_os_vtcm_acquire(struct nn_graph *nn)
 	nn_os_vtcm_choose_size(nn);
 
 	if (nn->vtcm_size == 0) {
+#if defined(HEXAGON_V66)
+		return errlog(nn, "ERROR: NO VTCM. Required for V66");
+#else
 		return nn_os_vtcm_fake_acquire(nn);
+#endif
 	}
 
 #if defined(HEXAGON_V66)
@@ -134,7 +156,7 @@ int nn_os_vtcm_acquire(struct nn_graph *nn)
     if(av.arch_version == 0x00002866) { //check if running on ViperTooth
         logmsg(nn, 2, "Runing on QCS405, will not use asynchronous VTCM request");
         ptr = HAP_request_VTCM(nn->vtcm_size, 0);
-    } 
+    }
     else {
 	    unsigned int timeout_us = 500*1000;
 	    ptr = HAP_request_async_VTCM(nn->vtcm_size, use_single_page, timeout_us);
@@ -148,7 +170,12 @@ int nn_os_vtcm_acquire(struct nn_graph *nn)
 	if (ptr != NULL) {
 		nn->vtcm_ptr = ptr;
 	} else {
+ #if defined(HEXAGON_V66)
+ 		// fake vtcm is not allowed on V66
+ 		return errlog(nn, "Could not acquire VTCM. Required for V66");
+ #else
 		return nn_os_vtcm_fake_acquire(nn);
+#endif
 	}
 
 	return 0;
@@ -185,26 +212,51 @@ void nn_os_vector_release(int idx)
     }
 }
 
+/*
+ * This, and the power off counterpart, MUST be called while the
+ * graph mutex is locked.
+ *
+ * Both execute() and prepare() lock the mutex before doing work.
+ *
+ * This code will do NOTHING on V65 and V66 for now.  The assumption
+ * is that on CDSPs, HVX is powered on for us by the RPC system.
+ * V65 and V66 deployment is only on CDSPs right now.
+ *
+ * The assumption is also that V60 is MAINLY ADSP.  This is true except
+ * for SDM660. SDM660 is a CDSP so the infrastructure will power on HVX for us,
+ * and this *should* have no effect if we vote it on/off anyway.
+ *
+ * If V65 or V66 end up with us running on HVX on an ADSP, we may
+ * need to do this differently if the infrastructure won't power it on by
+ * default for power reasons (ADSPs are often in low power islands
+ * and we shouldn't leave a potentially unused hw block turned on
+ * in a low power island)
+ *
+ */
 void nn_os_hvx_power_on(struct nn_graph *nn)
 {
+#if !defined(V65) && !defined(V66)
     HAP_power_request_t request;
     request.type = HAP_power_set_HVX;
     request.hvx.power_up = TRUE;
-    int ret = HAP_power_set((void*)nn, &request);
+    int ret = HAP_power_set((void*)&hvxpowercontext, &request);
 	if (ret != 0) {
 		errlog(nn,"couldn't power on hvx ret=%x\n",ret);
 	}
+#endif
 }
 
 void nn_os_hvx_power_off(struct nn_graph *nn)
 {
+#if !defined(V65) && !defined(V66)
     HAP_power_request_t request;
     request.type = HAP_power_set_HVX;
     request.hvx.power_up = FALSE;
-    int ret = HAP_power_set((void*)nn, &request);
+    int ret = HAP_power_set((void*)&hvxpowercontext, &request);
     if (ret != 0) {
-        errlog(nn,"couldn't power off hvx ret=%x\n",ret);
+        errlog(nn,"Graph %d couldn't power off hvx ret=%x\n",nn->id, ret);
     }
+#endif
 }
 
 #if 0

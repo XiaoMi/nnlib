@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -287,7 +287,6 @@ static int concat_execute_asm(struct nn_node *self, struct nn_graph *nn)
 
 static int concat_check(struct nn_node *self, struct nn_graph *nn)
 {
-	int k;
 	logmsg(nn,2,"Checking concat node %p",self);
 
 	// must be 3*n+1 inputs, where n >= 1
@@ -296,10 +295,6 @@ static int concat_check(struct nn_node *self, struct nn_graph *nn)
 	if (n_in < 1 || (self->n_inputs - 1) % 3 !=0 )
 		return errlog(nn,"concat: inputs must be 3*n+1, n>=1");
 
-	// must be 3 outputs.
-	k = node_check_inputs_outputs_n( self,nn, "concat", self->n_inputs, 3);
-
-	if( k!=0) return k;
 
 	logmsg(nn,2,"concat node %p check OK",self);
 	return 0;
@@ -311,6 +306,8 @@ struct nn_node_ops nn_ops_for_QuantizedConcat_8_nond32 = {
 	.check = concat_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_GE(4),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedConcat_8 = {
@@ -318,6 +315,8 @@ struct nn_node_ops nn_ops_for_QuantizedConcat_8 = {
 	.check = concat_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_GE(4),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 
@@ -326,5 +325,7 @@ struct nn_node_ops nn_ops_for_QuantizedConcat_8_ref = {
 	.check = concat_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_GE(4),
+	.n_outputs = NN_IOCOUNT(3),
 };
 

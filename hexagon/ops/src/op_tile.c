@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -37,9 +37,9 @@
 #include <string.h>
 
 /*
- * 
+ *
  * Now that that's out of the way, let's get to the good stuff.
- * 
+ *
  * This contains a tile node
  */
 
@@ -91,10 +91,10 @@ static int tile_execute(struct nn_node *self, struct nn_graph *nn)
 	int chunk_size_b = chunk_size_h * h_multiple*batches;
 
 	int counter = 0;
-	
+
 	struct nn_memcpy_manager  mcman;
 	nn_mcmanager_init(nn, &mcman );
-	
+
 	for(int b = 0; b < batches; b++){
 		int c1 = b*dwh;
 		uint8_t *copy_start_w = out_data+counter;
@@ -131,21 +131,13 @@ static int tile_execute(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-static int tile_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking tile node %p",self);
-	if (self->n_inputs != 4) return errlog(nn,"tile wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"tile wrong # outputs");
-	if (self->inputs == NULL) return errlog(nn,"NULL inputs");
-	if (self->outputs == NULL) return errlog(nn,"NULL outputs");
-	logmsg(nn,2,"tile node %p check OK",self);
-	return 0;
-}
 
 struct nn_node_ops nn_ops_for_QuantizedTile_8 = {
 	.execute = tile_execute,
-	.check = tile_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(4),
+	.n_outputs = NN_IOCOUNT(3),
 };
 

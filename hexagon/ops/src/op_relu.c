@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -224,84 +224,59 @@ static int reluX_execute(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-static int relu_check(struct nn_node *self, struct nn_graph *nn)
-{
-	int i;
-	logmsg(nn,2,"Checking relu node %p",self);
-	if (self->n_inputs != 3) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
-	for (i = 0; i < 3; i++) {
-		if (self->inputs[i] == NULL) return errlog(nn,"NULL input");
-		if (self->outputs[i] == NULL) return errlog(nn,"NULL output");
-	}
-	logmsg(nn,2,"relu node %p check OK",self);
-	return 0;
-}
-
-static int clamp_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking clamp node %p",self);
-	if (self->n_inputs != 5) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"clamp node %p check OK",self);
-	return 0;
-}
-
-static int reluX_check(struct nn_node *self, struct nn_graph *nn)
-{
-	int i;
-	logmsg(nn,2,"Checking reluX node %p",self);
-	if (self->n_inputs != 4) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
-	for (i = 0; i < 3; i++) {
-		if (self->inputs[i] == NULL) return errlog(nn,"NULL input");
-		if (self->outputs[i] == NULL) return errlog(nn,"NULL output");
-	}
-	if (self->inputs[3] == NULL) return errlog(nn,"NULL input");
-	logmsg(nn,2,"reluX node %p check OK",self);
-	return 0;
-}
 
 struct nn_node_ops nn_ops_for_QuantizedRelu_8 = {
 	.execute = relu_execute,
-	.check = relu_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedReluX_8 = {
 	.execute = reluX_execute,
-	.check = reluX_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(4),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 
 struct nn_node_ops nn_ops_for_QuantizedRelu_8_ref = {
 	.execute = relu_execute,
-	.check = relu_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedReluX_8_ref = {
 	.execute = reluX_execute,
-	.check = reluX_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(4),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedClamp_8 = {
 	.execute = clamp_execute, 
-	.check = clamp_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedClamp_8_ref = {
 	.execute = clamp_execute, 
-	.check = clamp_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
 };
 

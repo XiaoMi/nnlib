@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -57,6 +57,8 @@ struct nn_node_ops nn_ops_for_OemNode = {
 	.check = oem_dummy,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_GE(1),
+	.n_outputs = NN_IOCOUNT_GE(0),
 	.flags = NN_NODE_FLAG_CLS_OEMNODE
 };
 

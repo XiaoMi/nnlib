@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -84,6 +84,87 @@
  v
  */
 
+void transpack_16(
+  const uint16_t* in_data, int K, int M, uint16_t* out_data)
+{
+    int x,y,z;
+
+    //out_width = 32*K;
+    //out_height = M/32;
+
+    for (x = 0; x < M; x+=32)
+    {
+      for (y = 0; y < K; y+=4)
+      for (z = 0; z < 32; z+=1)
+      {
+           out_data[32*y+K*x+4*z+0] = in_data[M*y+0*M+x+z];
+           out_data[32*y+K*x+4*z+1] = in_data[M*y+1*M+x+z];
+           out_data[32*y+K*x+4*z+2] = in_data[M*y+2*M+x+z];
+           out_data[32*y+K*x+4*z+3] = in_data[M*y+3*M+x+z];
+      }
+    }
+    return;
+}
+
+static void pad2d_generic(
+	void const * input_data,	//  { inh,  inw ,  (elbytes)}
+	int input_height,
+	int input_width,
+	void * output_data,	//  { outh,  outw ,  (elbytes)}
+	int output_height,
+	int output_width,
+	int pad_value,
+	int elbytes ) // may be 1,2 or 4 (or any, if pad_value=0)
+{
+	if( elbytes == 1) pad_value = Q6_R_vsplatb_R(pad_value);
+	else if ( elbytes == 2)pad_value = Q6_R_combine_RlRl(pad_value,pad_value);
+
+    const uint8_t* ptr_in = input_data;
+    uint8_t* ptr_out = output_data;
+    int pad_x = output_width - input_width;
+    int pad_y = output_height - input_height;
+    if( pad_x > 0){
+		vmemcpy_2d_general_asm(
+				input_width * elbytes,  input_height,	// rect width, height
+				ptr_out, output_width * elbytes, 	// dst address, stride
+				ptr_in, input_width * elbytes );
+		vmemset_32_2d_general_asm(
+				ptr_out + input_width*elbytes,			// location
+				pad_value,						// pad value (32 bits)
+				pad_x * elbytes, input_height,	// w,h of region
+				output_width * elbytes			// stride
+			);
+    }else{
+		vmemcpy_asm( ptr_out, ptr_in, input_height * output_width*elbytes);
+    }
+    if( pad_y > 0){
+		ptr_out += input_height * output_width*elbytes;
+		// fill as 'single row'
+		vmemset_32_2d_general_asm(
+				ptr_out,
+				pad_value,
+				pad_y*output_width*elbytes, 1,		// width, height
+				0);
+    }
+}
+
+void pad2d(
+  const uint8_t* input_data, int input_height, int input_width,
+  uint8_t* output_data, int output_height, int output_width, int pad_value)
+{
+	pad2d_generic( input_data, input_height, input_width,
+			output_data, output_height, output_width, pad_value, sizeof(uint8_t));
+}
+
+
+void pad2d_16(
+  const uint16_t* input_data, int input_height, int input_width,
+  uint16_t* output_data, int output_height, int output_width, int pad_value)
+{
+	pad2d_generic( input_data, input_height, input_width,
+			output_data, output_height, output_width, pad_value, sizeof(uint16_t));
+}
+
 void transpack(
   const uint8_t* in_data, int K, int M, uint8_t* out_data)
 {
@@ -105,63 +186,25 @@ void transpack(
     }
     return;
 }
-
-void pad2d(
-  const uint8_t* input_data, int input_height, int input_width,  
-  uint8_t* output_data, int output_height, int output_width, int pad_value)
-{
-    int out_y, pad_x, pad_y ;
-
-    const uint8_t* ptr_in = input_data;
-    uint8_t* ptr_out = output_data;
-    pad_x = output_width - input_width;
-    pad_y = output_height - input_height;
-    for (out_y = 0; out_y < input_height; out_y++)
-    {
-        vmemcpy_asm(ptr_out, ptr_in, input_width);
-        ptr_out += input_width;
-        ptr_in += input_width;
-        vmemset_asm(ptr_out, pad_value, pad_x);
-        ptr_out += pad_x;
-    }
-    for (out_y = 0; out_y < pad_y; out_y++)
-    {
-       vmemset_asm(ptr_out, pad_value, output_width);
-       ptr_out += output_width;
-    }
-    return;
-}
-
+// unpad: output shape h x w must be <= input shape; right/bottom removed.
+//
 void unpad2d(
     const int* input_data, int input_height, int input_width,  
     int* output_data, int output_height, int output_width)
 {
-    int out_y ;
-
-    const int* ptr_in = input_data;
-    int* ptr_out = output_data;
-    for (out_y = 0; out_y < output_height; out_y++)
-    {
-        vmemcpy_asm(ptr_out, ptr_in, sizeof(int)*output_width);
-        ptr_out += output_width;
-        ptr_in += input_width;
-    }
-    return;
+	int elbytes = sizeof(int);
+	vmemcpy_2d_general_asm(
+			output_width * elbytes,  output_height,	// rect width, height
+			output_data, output_width * elbytes, 	// dst address, stride
+			input_data, input_width * elbytes );	// src address, stride
 }
-
 void unpad2d_bytes(
-    const uint8_t* input_data, int input_height, int input_width,  
-    uint8_t* output_data, int output_height, int output_width)
+	const uint8_t* input_data, int input_height, int input_width,
+	uint8_t* output_data, int output_height, int output_width)
 {
-    int out_y ;
-
-    const uint8_t* ptr_in = input_data;
-    uint8_t* ptr_out = output_data;
-    for (out_y = 0; out_y < output_height; out_y++)
-    {
-        vmemcpy_asm(ptr_out, ptr_in, sizeof(uint8_t)*output_width);
-        ptr_out += output_width;
-        ptr_in += input_width;
-    }
-    return;
+	int elbytes = sizeof(uint8_t);
+	vmemcpy_2d_general_asm(
+			output_width * elbytes,  output_height,	// rect width, height
+			output_data, output_width * elbytes, 	// dst address, stride
+			input_data, input_width * elbytes );	// src address, stride
 }

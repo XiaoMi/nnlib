@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -62,9 +62,11 @@ static int argmax_execute_ref(struct nn_node *self, struct nn_graph *nn)
     const struct tensor *axis_tensor = self->inputs[1];
     struct tensor *out_tensor = self->outputs[0];
 
-    int axis_idx = tensor_get_int32(axis_tensor,0);
-    axis_idx = handle_negative_axis(axis_idx);
-    if (-1 == axis_idx) return errlog(nn, "ArgMax_ftoInt32: axis is out of range \n");
+    int32_t axis_idx0 = tensor_get_int32(axis_tensor,0);
+    int res = handle_negative_axes(nn, &axis_idx0, 1);
+    if (res)
+        return errlog(nn, "ArgMax_ftoInt32: axis is out of range \n");
+    int axis_idx = axis_idx0;
 
     const struct shape inshape = in_tensor->shape;
     struct shape outshape = in_tensor->shape;
@@ -101,18 +103,12 @@ static int argmax_execute_ref(struct nn_node *self, struct nn_graph *nn)
     return 0;
 }
 
-static int argmax_check_ftoInt32(struct nn_node *self, struct nn_graph *nn)
-{
-    logmsg(nn,2,"Checking argmax node %p",self);
-    if (self->n_inputs != 2) return errlog(nn,"wrong # inputs");
-    if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
-    logmsg(nn,2,"argmax %p check OK",self);
-    return 0;
-}
 
 struct nn_node_ops nn_ops_for_ArgMax_ftoInt32 = {
     .execute = argmax_execute_ref,
-    .check = argmax_check_ftoInt32,
+    .check = NULL,
     .ctor = node_alloc_common,
     .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT(2),
+    .n_outputs = NN_IOCOUNT(1),
 };

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -80,7 +80,7 @@
 // CONSTRAINTS:
 //   The d32 version of depth2space has the following constraints:
 //      (1) 'blocksize' input ( and 'crop' input, if present) must be constant.
-//      (2) blocksize_w must be one of : 1,2,3,4
+//      (2) blocksize_w must be one of : 1,2,3,4,8
 //      (3) the calculated output depth  in_depth/(blocksize_w * blocksize_h) must be a multiple of 32.
 //          OR it may be 16 if the blocksize_w = 2.
 //
@@ -165,6 +165,12 @@ struct h_extent_desc {		// describes a height extent
 };
 
 struct x2s_d32_info {
+	// these fields are set up in 'check' method
+	uint8_t elbytes;						// size of element, 1 or 2
+	uint8_t is_b2s;							// is b2s, not d2s
+	uint8_t dtype;							// NN_TYPE_QUINT8 etc
+	uint8_t depth32_chunk;					// = 32 for 8-bit processing, = 64 for 16-bit processing.
+
 	struct shape input_shape;				// copy, for validating plan
 	struct tensor_format input_format;
 	void * input_data;
@@ -189,7 +195,7 @@ struct x2s_d32_info {
 											// (no extra read is needed). only occurs when wunit_vecalign is != 0.
 	uint16_t wunit_prefrow;					// # of bytes to prefetch in input row
 	uint16_t wunit_prefht;					// # of d32 units in the input to a wunit
-	uint16_t is_b2s;						// is b2s, not d2s
+	int32_t discard_w;
 
 	int32_t input_wunit_span;				// this is in_d32_stride * nd32_out: 'span' of inputs to wunit
 	int32_t input_wunit_stride;				// in_d32_stride * nd32_out * bsW : total size of a wunit in input
@@ -203,6 +209,8 @@ struct x2s_d32_info {
 	struct h_extent_desc hextents[MAX_HEIGHT_EXTENTS];
 	int n_extents;						// # of extents actually used (a power of 2:  1,2, .. MAX_HEIGHT_EXTENTS)
 	int n_workunits;					// # of workunits (out_batches * n_extents)
+	uint32_t intermed_bufrows_per_thread;
+	uint32_t intermed_buffer_stride; //How to move from one width to the next in the intermediate buffer
 
 };
 
@@ -210,6 +218,9 @@ struct x2s_d32_runstate {
 	struct x2s_d32_info const * info;
 	// this is the current work unit
 	volatile int cur_work_unit;
+	volatile int thrdindex;
+	uint8_t * intermed_buffer;			//For stride > 4, interleave in smaller groups
+	uint32_t intermed_buffer_size_per_thread; //How much scratch space to we need for each thread
 	nn_sem_t done_sem;					// for signalling hvx threads are done.
 };
 static int get_b2s_dims( struct nn_node *self, struct nn_graph * nn , struct bsz_crop * dst);
@@ -227,6 +238,8 @@ static inline void width_interleave_4_loop( struct x2s_d32_info const * info,
 		uint8_t * out, uint8_t const * inptr, int height_count );
 static inline void width_interleave_2_to16_loop( struct x2s_d32_info const * info,
 		uint8_t * out, uint8_t const * inptr, int height_count );
+static inline void width_interleave_8_loop( struct x2s_d32_info const * info,
+		uint8_t * out, uint8_t * intermed_buffer, uint8_t const * inptr, int height_count );
 
 static const width_interleave_loop_funcp loop_funcp_table[4] = {
 		width_interleave_1_loop,
@@ -322,12 +335,21 @@ static void x2s_d32_workfunc( struct nn_graph * nn, void * rstpv);
 // end of the world (precalculated input_end_addr) we subtract the length of the world and then advance one row.
 //
 //
+// For 16-bit data:
+//  The process is almost the same. The inner loops each read bsW vectors from different locations
+//  in the input; then interleave the contents, and write to one output row (with various edge adjustments).
+//  The only difference is in how the interleaving is done (which is mostly just a question of giving
+//  different values to the vshuff instructions.
+// In order to do the strategy calculations for 16-bit, we double the 'w' dimensions and w padding,
+// going into those calculations,and mostly everything else is the same
+//
 //
 // setup plan for d2s (or b2s)
 static int
-setup_x2s_plan( struct nn_node *self, struct nn_graph * nn, int is_b2s )
+setup_x2s_plan( struct nn_node *self, struct nn_graph * nn )
 {
 	struct x2s_d32_info * info = (struct x2s_d32_info *)self->opaque;
+	//int elbytes = 1;
 
 	struct tensor const *input_tensor = self->inputs[0];
 	if( shape_matches( &input_tensor->shape , &  info->input_shape)
@@ -339,8 +361,11 @@ setup_x2s_plan( struct nn_node *self, struct nn_graph * nn, int is_b2s )
 	info->input_shape = input_tensor->shape;
 	info->input_format = input_tensor->format;
 	info->input_data = input_tensor->data;
-	info->tin = tensor_addressing_d32( input_tensor );
-	info->is_b2s =  is_b2s;
+
+	int elbytes = info->elbytes;
+	info->tin = (elbytes==1 ?nn_tensor_addressing_d32:nn_tensor_addressing_d32_16b)( input_tensor );
+
+	int is_b2s = info->is_b2s;
 
 	int req_out_depth=0;
 	if( !is_b2s){
@@ -377,7 +402,7 @@ setup_x2s_plan( struct nn_node *self, struct nn_graph * nn, int is_b2s )
 			return errlog(nn, "block shape does not divide input batches");
 		}
 	}
-	if( bsW >4 ) return errlog(nn,"limitation: blocksize <= 4 in width direction");
+	if( bsW >4 && bsW != 8 ) return errlog(nn,"limitation: blocksize <= 4 or blocksize = 8 in width direction");
 	info->out_depth = out_depth;
 
 	// work out the output height/width ( subject to adjustment for cropping)
@@ -407,14 +432,14 @@ setup_x2s_plan( struct nn_node *self, struct nn_graph * nn, int is_b2s )
 
 	// now... plan the wunit processing.
 
-	info->wunit_vecout = (out_width+3)>>2;		// vectors we need to store.
+	info->wunit_vecout = (elbytes*out_width+3)>>2;		// vectors we need to store.
 	//
 	// how many values to discard at the front of each row?
 	// Deal with crop_left >= bsW by effectively trimming input pixels - add them
 	// to the left padding, and if the start point crosses to a new vector, we can end
 	// up doing less work on each row.
 	//
-	int wpad_mod4 = info->input_format.width_pad[0]&3;
+	int wpad_mod4 = (elbytes*info->input_format.width_pad[0])&3;
 	int input_width_needed = info->input_shape.width;		// subject to trimming...
 	int wunit_left_adjust = -32*wpad_mod4;		// initial offset to align input pointer.
 
@@ -423,7 +448,7 @@ setup_x2s_plan( struct nn_node *self, struct nn_graph * nn, int is_b2s )
 		// reduce this to crop_left/bsW input pixels trimmed, then output crop of crop_left%bsW
 		int n = crop_left_eff/(unsigned)bsW;		// skip this many w units of input
 		crop_left_eff -= n*bsW;						// now 0..bsW-1
-		wpad_mod4 += n;								// add to input padding - may be >= 4 now
+		wpad_mod4 += elbytes*n;								// add to input padding - may be >= 4 now
 		int left_trim_vectors = wpad_mod4/4u;		// remove any multiple of 4, account as vector trim
 		wpad_mod4 &= 3;
 		wunit_left_adjust += 128*left_trim_vectors;
@@ -437,10 +462,15 @@ setup_x2s_plan( struct nn_node *self, struct nn_graph * nn, int is_b2s )
 	if( info->bsz.crop_right >= bsW){
 		input_width_needed -= info->bsz.crop_right/(unsigned)bsW;
 	}
+	// note: wpad_mod4, wunit_left_adjust have been scaled by 'elbytes';
+	// crop_left_eff, input_width_needed have not been scaled.
+	//
+
 	// this is the # of initial outputs to discard, based on crop_left and the intra-vector input
 	// left padding, both of which may have been adjusted for crop_left >= bsW
 	// This must be < bsW*4
-	int discard_w = bsW * wpad_mod4 + crop_left_eff;		// 0 .. bsW*4-1
+	int discard_w = bsW * wpad_mod4 + elbytes*crop_left_eff;		// 0 .. bsW*4-1
+	info->discard_w = discard_w;
 
 	int w_read = 4-wpad_mod4;								// w units read in first iter
 
@@ -464,7 +494,7 @@ setup_x2s_plan( struct nn_node *self, struct nn_graph * nn, int is_b2s )
 
 	// is there any remainder? if only one output vector remains, it's possible
 	// we already have all the data in the 'overlap'.
-	if( vecs_remain == 1 && w_read >= input_width_needed ){
+	if( vecs_remain == 1 && w_read >= elbytes*input_width_needed ){
 		vecs_remain = -1;
 	}
 	info->wunit_vloops = vloops;
@@ -477,7 +507,6 @@ setup_x2s_plan( struct nn_node *self, struct nn_graph * nn, int is_b2s )
 	logmsg(nn,3, "wunit_vecout =%d vlalign =%d _vecdrop = %d _vloops = %d _v_at_end = %d _prefrow= %d _prefht = %d",
 			info->wunit_vecout, info->wunit_vlalign, info->wunit_vecdrop, info->wunit_vloops, info->wunit_v_at_end,
 			info->wunit_prefrow, info->wunit_prefht);
-
 	{
 		struct tensor * output_tensor = self->outputs[0];
 		int h_pad = 4;
@@ -485,13 +514,20 @@ setup_x2s_plan( struct nn_node *self, struct nn_graph * nn, int is_b2s )
 		if( info->output_shape.height==1) h_pad = 1;
 		int w_pad1 = (~info->output_shape.width+1)&3;
 		int d_pad1 = (~info->output_shape.depth+1)&31;
+
+		int dtype_out = info->dtype;
+		// for 16-bit op: if the input is QINT then so is the output.
+		if(dtype_out == NN_TYPE_QUINT8 && input_tensor->format.type == NN_TYPE_QINT8){
+			dtype_out = NN_TYPE_QINT8;
+		}
+
 		if( tensor_out_prepare_padded_d32( output_tensor, info->output_shape.batches,
 				info->output_shape.height, h_pad, h_pad,
 				info->output_shape.width, w_pad0, w_pad1,
-				info->output_shape.depth, 0, d_pad1 , NN_TYPE_QUINT8 )!= 0 ){
+				info->output_shape.depth, 0, d_pad1 ,dtype_out )!= 0 ){
 			return errlog(nn,"failed to prepare output");
 		}
-		info->tout = tensor_addressing_d32( output_tensor );
+		info->tout = (elbytes==1 ?nn_tensor_addressing_d32:nn_tensor_addressing_d32_16b) ( output_tensor );
 	}
 	// amount to prefetch on each row.
 	info->wunit_prefrow = (32*(wpad_mod4 + info->input_shape.width+ 3))& ~127;
@@ -517,9 +553,12 @@ setup_x2s_plan( struct nn_node *self, struct nn_graph * nn, int is_b2s )
 		// span is the same as stride since we are unpacking one d32 slice to one d32 slice here.
 		info->input_wunit_stride = info->input_wunit_span;
 	}else{
-		if( (!is_b2s && info->tout.nd32*32 != info->out_depth) || bsW < 1 || bsW > 4 )
+		if( (!is_b2s && info->tout.nd32*32 != info->out_depth) || bsW < 1 || (bsW > 4 && bsW != 8) )
 			return errlog(nn,"assumption failed!");
-		info->width_interleave_loop_fp = loop_funcp_table[bsW-1];
+		if (bsW <= 4)
+		{
+			info->width_interleave_loop_fp = loop_funcp_table[bsW-1];
+		}
 	}
 
 	{	// set some things up for overall addressing...
@@ -563,6 +602,7 @@ setup_x2s_plan( struct nn_node *self, struct nn_graph * nn, int is_b2s )
 		}
 		// find the pointers in each range.
 		// These are the input and output pointers, without adjustment for 'batch' offset.
+		unsigned max_height_per = 0;
 		{
 			int hpos_out = 0;
 			int hpos_in = info->bsz.crop_top;	// current 'input' pos
@@ -579,6 +619,7 @@ setup_x2s_plan( struct nn_node *self, struct nn_graph * nn, int is_b2s )
 				info->hextents[i].out_ptr = info->tout.data + hpos_out * info->tout.height_stride;
 				// move row indices to next segment.
 				int hc = info->hextents[i].hcount;
+				max_height_per = max_u32(max_height_per, hc);
 				hpos_in += hc;
 				hpos_out += hc;
 			}
@@ -594,7 +635,14 @@ setup_x2s_plan( struct nn_node *self, struct nn_graph * nn, int is_b2s )
 		if( is_b2s && bsW ==1 &&  info->tout.nd32*n_extent * bsH < out_height){
 			info->width_interleave_loop_fp  = width_interleave_1_loop_alt;
 		}
-
+		// intermediate buffer allocation?
+		if( bsW == 8 && !is_b2s){
+			//Buffer width stride is discard_w + output width rounded to the nearest multiple of 4 * blocksize_w all multiplied by 32
+			uint32_t total_width = info->discard_w + info->output_shape.width* elbytes;
+			// round it up to the next multiple of 4*bsW, then multiply by 32
+			info->intermed_buffer_stride = ((total_width + (4 * bsW) - 1) & (-(4*bsW))) * 32;
+			info->intermed_bufrows_per_thread = max_height_per * info->tout.nd32;
+		}
 		// the # of extents is recorded as 1,2, or 4; if 3, we use 4
 		// and the exec code will need to look at hextents[3].hcount==0 and skip those.
 		int n_extent_eff = (n_extent==3)?4: n_extent;
@@ -705,7 +753,7 @@ depthspace_d32_execute( struct nn_node *self, struct nn_graph * nn  )
 {
 	logmsg(nn,2,"depthspace_d32 execute. self=%p ",self);
 	// set up the plan, or just check that the existing plan is ok
-	int k = setup_x2s_plan( self, nn,0);
+	int k = setup_x2s_plan( self, nn);
 	if(k != 0) return k;
 
 	struct x2s_d32_info * info = (struct x2s_d32_info *)self->opaque;
@@ -720,6 +768,21 @@ depthspace_d32_execute( struct nn_node *self, struct nn_graph * nn  )
 	runstate.cur_work_unit = 0;
 
 	int n_threads = min_i32( n_work_units, DEPTHTOSPACE_MAX_THREADS);
+	int bsW = info->bsz.blocksize_w;
+	if ( bsW == 8 && !info->is_b2s)
+	{
+		uint32_t buf_per_thread  = info->intermed_bufrows_per_thread * info->intermed_buffer_stride;
+		runstate.intermed_buffer_size_per_thread = buf_per_thread;
+		uint32_t required_scratch = DEPTHTOSPACE_MAX_THREADS * buf_per_thread;
+		if (nn->scratch_size < required_scratch)
+		{
+			if (nn_scratch_grow(nn, required_scratch))
+				return errlog(nn, "need %d bytes scratch for requested depth to space operation", required_scratch);
+		}
+	logmsg(nn, 3, "allocated %d bytes of scratch", required_scratch);
+	}
+	runstate.intermed_buffer = nn->scratch;
+	runstate.thrdindex = 0;
 
 
 	logmsg(nn,3, "%d jobs in %d threads; %d per batch", n_work_units, n_threads, info->n_extents);
@@ -760,6 +823,8 @@ x2s_d32_workfunc( struct nn_graph * nn, void * rstpv)
 
 	width_interleave_loop_funcp  loop_funcp = info->width_interleave_loop_fp;
 
+	int thrid= __sync_fetch_and_add( &rstp->thrdindex, 1);
+	uint8_t * intermed_buffer = rstp->intermed_buffer + thrid * rstp->intermed_buffer_size_per_thread;
 	while( jobno = __sync_fetch_and_add( &rstp->cur_work_unit, 1),  jobno < njobs ){
 
 		int batchno = jobno >> rsh_segs;		// reduce to batch & seg
@@ -774,11 +839,15 @@ x2s_d32_workfunc( struct nn_graph * nn, void * rstpv)
 		l2pref( in_ptr, pref_height, pref_width, in_d32_stride);
 		uint8_t * out = info->hextents[hslc_no].out_ptr;
 
-		//printf("%d from %p to %p\n", h_len, in_ptr, out);
-
 		out +=  info->tout.batch_stride  *batchno;
-
-		(*loop_funcp)( info, out, in_ptr, h_len);
+		if (info->bsz.blocksize_w == 8)
+		{
+			width_interleave_8_loop( info, out, intermed_buffer, in_ptr, h_len);
+		}
+		else
+		{
+			(*loop_funcp)( info, out, in_ptr, h_len);
+		}
 		Q6_dcfetch_A( &info->hextents[0].hcount);
 	}
 	nn_sem_post( & rstp->done_sem);
@@ -790,7 +859,7 @@ batchspace_d32_execute( struct nn_node *self, struct nn_graph * nn  )
 {
 	logmsg(nn,2,"batchspace_d32 execute. self=%p ",self);
 	// set up the plan, or just check that the existing plan is ok
-	int k = setup_x2s_plan( self, nn,1);
+	int k = setup_x2s_plan( self, nn);
 	if(k != 0) return k;
 
 	struct x2s_d32_info * info = (struct x2s_d32_info *)self->opaque;
@@ -871,17 +940,18 @@ struct intlv3_invariants
 	HVX_Vector vdel0;   // { 32 of 0, 32 of 64, 32 of 0, 32 of 64}
 	HVX_Vector vdel1;	// { 128 of 32 }
 	HVX_Vector vdel2;	// { 32 of 64, 32 of 0, 32 of 64, 32 of 0}
-	HVX_VectorPred quad1;	// true in 32..63
-	HVX_VectorPred quad2;	// true in 64..95
-	HVX_VectorPred quad12;	// true in 32..95
+	HVX_VectorPred q_first;	// true in 64..95
+	HVX_VectorPred q_second;	// true in 32..95
+	HVX_VectorPred q_third;	// true in 32..63
 };
 // in: A0 A1 A2 A3  (each is 32 bytes)
 //     B0 B1 B2 B3
 // out:  A0 B0 A1 B1, A2 B2 A3 B3
 //
-static inline HVX_VectorPair width_interleave_2( HVX_Vector  v0, HVX_Vector v1 )
+// 'chunksize' is 32 for 8-bit ops, and 64 for 16-bit ops
+static inline HVX_VectorPair width_interleave_2( HVX_Vector  v0, HVX_Vector v1, int depth32_chunk )
 {
-	return Q6_W_vshuff_VVR( v1, v0, -32);
+	return Q6_W_vshuff_VVR( v1, v0, -depth32_chunk);
 }
 // in: A0 A1 A2 A3  (each is 32 bytes)
 //     B0 B1 B2 B3
@@ -893,29 +963,30 @@ static inline HVX_VectorPair width_interleave_2( HVX_Vector  v0, HVX_Vector v1 )
 //   B1 B0 B3 B2			using { 128 of 32 }
 //   C2 C1 C0 C3			using { 32 of 64, 32 of 0, 32 of 64, 32 of 0}
 //
-// Step 2: swap quadrant 2 in second 2 vecs
+// Step 2: swap quadrant 2 in second 2 vecs  (using q_first)
 //   A0 A3 A2 A1
 //   B1 B0 C0 B2
 //   C2 C1 B3 C3
-// Step 3: swap quadrant 1,2 in first 2 vecs
+// Step 3: swap quadrant 1,2 in first 2 vecs	(using q_second)
 //  A0 B0 C0 A1
 //  B1 A3 A2 B2
 //  C2 C1 B3 C3
-// Step 4: swap quadrant 1 in second 2 vecs
+// Step 4: swap quadrant 1 in second 2 vecs		(using q_third)
 //  A0 B0 C0 A1
 //  B1 C1 A2 B2
 //  C2 A3 B3 C3
 //
+
 
 static inline HVX_Vector_x3 width_interleave_3( HVX_Vector  v0, HVX_Vector v1, HVX_Vector v2, struct intlv3_invariants invar )
 {
 	v0 = Q6_V_vdelta_VV( v0, invar.vdel0);
 	v1 = Q6_V_vdelta_VV( v1, invar.vdel1);
 	v2 = Q6_V_vdelta_VV( v2, invar.vdel2);
-	HVX_VectorPair v12 = Q6_W_vswap_QVV( invar.quad2, v2, v1);	// step 2
-	HVX_Vector v0_out = Q6_V_vmux_QVV( invar.quad12,  Q6_V_lo_W(v12), v0  );	// step 3
-	HVX_Vector v1_tmp = Q6_V_vmux_QVV( invar.quad12,  v0, Q6_V_lo_W(v12)  );
-	v12 = Q6_W_vswap_QVV( invar.quad1, Q6_V_hi_W(v12), v1_tmp);				// step 4
+	HVX_VectorPair v12 = Q6_W_vswap_QVV( invar.q_first, v2, v1);	// step 2
+	HVX_Vector v0_out = Q6_V_vmux_QVV( invar.q_second,  Q6_V_lo_W(v12), v0  );	// step 3
+	HVX_Vector v1_tmp = Q6_V_vmux_QVV( invar.q_second,  v0, Q6_V_lo_W(v12)  );
+	v12 = Q6_W_vswap_QVV( invar.q_third, Q6_V_hi_W(v12), v1_tmp);				// step 4
 
 	HVX_Vector_x3 result = {{
 			v0_out, Q6_V_lo_W(v12), Q6_V_hi_W(v12)
@@ -924,24 +995,37 @@ static inline HVX_Vector_x3 width_interleave_3( HVX_Vector  v0, HVX_Vector v1, H
 }
 
 // construct the invariants needed for width_interleave_3
+//
+// For 16-bit data,  elbytes = 2, we want
+//  vdel0 = vdel2 = { all 0 }
+//  vdel1 = { all 64}
+//  q_first  = { { 1} *64 ,{0} * 64 }
+//  q_second  = { { 0} *64 ,{1} * 64 }
+//  q_third = { all 0 }
 
-static inline struct intlv3_invariants init_intlv3_invariants ()
+static inline struct intlv3_invariants init_intlv3_invariants (int elbytes)
 {
+	// elbytes = 1 or 2.
+	int is_u16 = (elbytes >1);
+	unsigned k20202020 = is_u16? 0 : 0x20202020;
+	unsigned k40404040 = k20202020 <<1;
+
 	HVX_Vector index = *(HVX_Vector const *)const_Count128;	// {0,1 ..127}
 	HVX_VectorPred q23 = Q6_Q_vand_VR( index, 0x40404040);	// true in quadrants 2,3
-	HVX_VectorPred q13 = Q6_Q_vand_VR( index, 0x20202020);	// true in quadrants 1,3
+	HVX_VectorPred q13 = Q6_Q_vand_VR( index, k20202020);	// true in quadrants 1,3 (all 0 for u16)
 
 	struct intlv3_invariants result;
-	result.vdel0 = Q6_V_vand_QR( q13, 0x40404040);		// 32 of 0, 32 of 64, 32 of 0 , 32 of 64
-	result.vdel1 = q6op_Vb_vsplat_R(32);		// 128 of 32
+	result.vdel0 = Q6_V_vand_QR( q13, k40404040);		// 32 of 0, 32 of 64, 32 of 0 , 32 of 64
+	result.vdel1 = q6op_Vb_vsplat_R(elbytes*32);		// 128 of 32   (or of 64, for u16)
 #if __HEXAGON_ARCH__ >= 62
-	result.vdel2 = Q6_V_vand_QnR( q13, 0x40404040);		// 32 of 64, 32 of 0, 32 of 64 , 32 of 0
+	result.vdel2 = Q6_V_vand_QnR( q13, k40404040);		// 32 of 64, 32 of 0, 32 of 64 , 32 of 0
 #else
-	result.vdel2 = Q6_V_vand_QR( Q6_Q_not_Q(q13), 0x40404040);		// 32 of 64, 32 of 0, 32 of 64 , 32 of 0
+	result.vdel2 = Q6_V_vand_QR( Q6_Q_not_Q(q13), k40404040);		// 32 of 64, 32 of 0, 32 of 64 , 32 of 0
 #endif
-	result.quad1 = Q6_Q_and_QQn( q13,q23);		// quadrant 1 only
-	result.quad2 = Q6_Q_and_QQn( q23,q13);		// quadrant 2 only
-	result.quad12 = Q6_Q_xor_QQ( q23,q13);		// quadrant 1 & 2
+	result.q_first = Q6_Q_xor_QQ ( Q6_Q_not_Q( q23),		// quadrant 2 only;  Q0,1 for u16
+					Q6_Q_vsetq_R(is_u16?0:96));
+	result.q_second = Q6_Q_xor_QQ( q23,q13);		// quadrant 1 & 2			// Q2,3 for u16
+	result.q_third = Q6_Q_and_QQn( q13,q23);		// quadrant 1 only		    // all 0 for u16
 	return result;
 }
 
@@ -952,7 +1036,7 @@ static inline struct intlv3_invariants init_intlv3_invariants ()
 //     D0 D1 D2 D3
 // out:  A0 B0 C0 D0, A1 B1 C1 D2, A2 B2 C2, D3, A3 B3 C3 D3
 //
-//  Step 1: tranpose units of 64
+//  Step 1: transpose units of 64
 //     A0 A1 C0 C1 <--
 //     B0 B1 D0 D1
 //     A2 A3 C2 C3 <--
@@ -963,13 +1047,18 @@ static inline struct intlv3_invariants init_intlv3_invariants ()
 //     A2 B2 C2 D2
 //     A3 B3 C3 D3
 //
-static inline HVX_Vector_x4 width_interleave_4( HVX_Vector  v0, HVX_Vector v1, HVX_Vector v2, HVX_Vector v3 )
+// depth32_chunk = 32 for 8-bit processing.
+// For depth_chunk = 64, this will do the equivalent op for 16-bit values
+// (8 width units in the four output vectors, instead of 16). It uses 4 vshuff where
+// 2 would suffice, but at least it allows sharing the same code.
+//
+static inline HVX_Vector_x4 width_interleave_4( HVX_Vector  v0, HVX_Vector v1, HVX_Vector v2, HVX_Vector v3, int depth32_chunk)
 {
 	HVX_VectorPair sh02 = Q6_W_vshuff_VVR( v2, v0, 64);
 	HVX_VectorPair sh13 = Q6_W_vshuff_VVR( v3, v1, 64);
 
-	HVX_VectorPair res01 = Q6_W_vshuff_VVR(  Q6_V_lo_W( sh13), Q6_V_lo_W(sh02),32);
-	HVX_VectorPair res23 = Q6_W_vshuff_VVR(  Q6_V_hi_W( sh13), Q6_V_hi_W(sh02),32);
+	HVX_VectorPair res01 = Q6_W_vshuff_VVR(  Q6_V_lo_W( sh13), Q6_V_lo_W(sh02),depth32_chunk);
+	HVX_VectorPair res23 = Q6_W_vshuff_VVR(  Q6_V_hi_W( sh13), Q6_V_hi_W(sh02),depth32_chunk);
 
 	HVX_Vector_x4 res = {{
 			Q6_V_lo_W(res01), Q6_V_hi_W(res01),  Q6_V_lo_W(res23), Q6_V_hi_W(res23)
@@ -988,7 +1077,7 @@ static inline HVX_Vector_x4 width_interleave_4( HVX_Vector  v0, HVX_Vector v1, H
 // This is a special case since we don't actually interleave anything in width;
 // instead we do a single 2d memcopy
 // The height of the copy is nd32_out * height_count
-// width is output_width* 32 bytes
+// width is output_width* depth32_chunk bytes
 // input address needs to be adjusted at the left edge:
 //   add 128* wunit_vecdrop, and subtract wunit_vlalign.
 //
@@ -1008,7 +1097,7 @@ width_interleave_1_loop( struct x2s_d32_info const * info,
 	in_ptr += ptr_adj;
 
 
-	int memcpy_width = 32* info->output_shape.width;
+	int memcpy_width = info->depth32_chunk* info->output_shape.width;
 	int memcpy_height = nd32_out;
 
 	int32_t input_wunit_stride = 0;
@@ -1063,7 +1152,7 @@ width_interleave_1_loop_alt( struct x2s_d32_info const * info,
 	in_ptr += ptr_adj;
 
 
-	int memcpy_width = 32* info->output_shape.width;
+	int memcpy_width = info->depth32_chunk* info->output_shape.width;
 
 	int32_t input_wunit_stride = info->input_wunit_stride;
 	int32_t wrap_offset = info->b2s_wrap_offset;
@@ -1114,6 +1203,7 @@ width_interleave_2_loop( struct x2s_d32_info const * info,
 	    int height_count )
 {
 	int32_t input_wunit_stride = info->input_wunit_stride;
+	int depth32_chunk = info->depth32_chunk;
 	int32_t input_wunit_span = info->input_wunit_span;
 	int32_t input_d32_stride = info->tin.d32_stride;
 	int32_t output_d32_stride = info->tout.d32_stride;
@@ -1155,14 +1245,14 @@ width_interleave_2_loop( struct x2s_d32_info const * info,
 			HVX_Vector * outv  = (HVX_Vector *)out;
 			// first iteration
 			unsigned iv = -vecdrop;
-			HVX_VectorPair result = width_interleave_2( *in0++, *in1++);
+			HVX_VectorPair result = width_interleave_2( *in0++, *in1++, depth32_chunk);
 			HVX_Vector o0 = Q6_V_vlalign_VVR( Q6_V_lo_W(result), Q6_V_lo_W(result), vlalign_amt);
 			HVX_Vector o1 = Q6_V_vlalign_VVR( Q6_V_hi_W(result), Q6_V_lo_W(result), vlalign_amt);
 			prevout = Q6_V_hi_W(result);
 			if( iv < vecout) outv[-2] = o0;
 			if( (iv+1) < vecout) outv[-1] = o1;
 			for( int j = 0; j < vloops; j++){
-				result = width_interleave_2( *in0++, *in1++);
+				result = width_interleave_2( *in0++, *in1++, depth32_chunk);
 				outv[0] = Q6_V_vlalign_VVR( Q6_V_lo_W(result), prevout, vlalign_amt);
 				outv[1] = Q6_V_vlalign_VVR( Q6_V_hi_W(result), Q6_V_lo_W(result), vlalign_amt);
 				prevout = Q6_V_hi_W(result);
@@ -1170,7 +1260,7 @@ width_interleave_2_loop( struct x2s_d32_info const * info,
 			}
 			if(v_at_end){
 				if( v_at_end> 0)
-					result = width_interleave_2( *in0, *in1);
+					result = width_interleave_2( *in0, *in1, depth32_chunk);
 				outv[0] = Q6_V_vlalign_VVR( Q6_V_lo_W(result), prevout, vlalign_amt);
 			}
 			in += input_d32_stride;
@@ -1196,6 +1286,7 @@ width_interleave_2_loop( struct x2s_d32_info const * info,
 //
 //  [ A0 B0 A1 B1 A2 B2 A3 B3 ] -> [A0 X B0 X A1 X B1 X ] [A2 X B2 X A3 X B3 X ]
 // This is done by just shuffling the vector with anything (i.e. itself) in 16-byte units.
+// (for 16-bit data, do it 32-byte units)
 
 // this is only used in D2S, not B2S.
 static inline void
@@ -1224,6 +1315,8 @@ width_interleave_2_to16_loop( struct x2s_d32_info const * info,
 	// modify output pointer to be correct for the start of the 'for j' loop
 	out += 128*(2-vecdrop);
 
+	int shufn = -(info->depth32_chunk/2u);	// -16 for 8-bit; -32 for 16 bit
+
 	HVX_Vector prevout = Q6_V_vzero();
 	for( int ih = 0; ih < height_count; ih++){
 
@@ -1241,7 +1334,7 @@ width_interleave_2_to16_loop( struct x2s_d32_info const * info,
 			// first iteration
 			unsigned iv = -vecdrop;
 			HVX_Vector vin = *in0++;
-			HVX_VectorPair result = Q6_W_vshuff_VVR(vin,vin,-16);
+			HVX_VectorPair result = Q6_W_vshuff_VVR(vin,vin,shufn);
 			HVX_Vector o0 = Q6_V_vlalign_VVR( Q6_V_lo_W(result), Q6_V_lo_W(result), vlalign_amt);
 			HVX_Vector o1 = Q6_V_vlalign_VVR( Q6_V_hi_W(result), Q6_V_lo_W(result), vlalign_amt);
 			prevout = Q6_V_hi_W(result);
@@ -1249,7 +1342,7 @@ width_interleave_2_to16_loop( struct x2s_d32_info const * info,
 			if( (iv+1) < vecout) outv[-1] = o1;
 			for( int j = 0; j < vloops; j++){
 				vin = *in0++;
-				result = Q6_W_vshuff_VVR(vin,vin,-16);
+				result = Q6_W_vshuff_VVR(vin,vin,shufn);
 				outv[0] = Q6_V_vlalign_VVR( Q6_V_lo_W(result), prevout, vlalign_amt);
 				outv[1] = Q6_V_vlalign_VVR( Q6_V_hi_W(result), Q6_V_lo_W(result), vlalign_amt);
 				prevout = Q6_V_hi_W(result);
@@ -1258,7 +1351,7 @@ width_interleave_2_to16_loop( struct x2s_d32_info const * info,
 			if(v_at_end){
 				if( v_at_end> 0){
 					vin = *in0;
-					result = Q6_W_vshuff_VVR(vin,vin,-16);
+					result = Q6_W_vshuff_VVR(vin,vin,shufn);
 				}
 				outv[0] = Q6_V_vlalign_VVR( Q6_V_lo_W(result), prevout, vlalign_amt);
 			}
@@ -1313,7 +1406,7 @@ width_interleave_3_loop( struct x2s_d32_info const * info,
 	out += 128*(3-vecdrop);
 
 	HVX_Vector prevout = Q6_V_vzero();
-	struct intlv3_invariants invar = init_intlv3_invariants();
+	struct intlv3_invariants invar = init_intlv3_invariants(info->elbytes);
 
 	for( int ih = 0; ih < height_count; ih++){
 
@@ -1388,6 +1481,7 @@ width_interleave_4_loop( struct x2s_d32_info const * info,
 	int32_t input_wunit_span = info->input_wunit_span;
 	int32_t input_d32_stride = info->tin.d32_stride;
 	int32_t output_d32_stride = info->tout.d32_stride;
+	int depth32_chunk = info->depth32_chunk;
 	int nd32_out = info->tout.nd32;
 	int32_t pref_height = info->wunit_prefht;
 	int32_t pref_width = info->wunit_prefrow;
@@ -1430,7 +1524,7 @@ width_interleave_4_loop( struct x2s_d32_info const * info,
 			HVX_Vector * outv  = (HVX_Vector *)out;
 			// first iteration
 			unsigned iv = -vecdrop;
-			HVX_Vector_x4 result = width_interleave_4( *in0++, *in1++, *in2++, *in3++);
+			HVX_Vector_x4 result = width_interleave_4( *in0++, *in1++, *in2++, *in3++,depth32_chunk);
 			HVX_Vector o0 = Q6_V_vlalign_VVR( result.val[0], result.val[0], vlalign_amt);
 			HVX_Vector o1 = Q6_V_vlalign_VVR( result.val[1], result.val[0], vlalign_amt);
 			HVX_Vector o2 = Q6_V_vlalign_VVR( result.val[2], result.val[1], vlalign_amt);
@@ -1441,7 +1535,7 @@ width_interleave_4_loop( struct x2s_d32_info const * info,
 			if( iv+2 < vecout) outv[-2] = o2;
 			if( iv+3 < vecout) outv[-1] = o3;
 			for( int j = 0; j < vloops; j++){
-				result = width_interleave_4( *in0++, *in1++, *in2++, *in3++);
+				result = width_interleave_4( *in0++, *in1++, *in2++, *in3++,depth32_chunk);
 				outv[0] = Q6_V_vlalign_VVR( result.val[0], prevout, vlalign_amt);
 				outv[1] = Q6_V_vlalign_VVR( result.val[1], result.val[0], vlalign_amt);
 				outv[2] = Q6_V_vlalign_VVR( result.val[2], result.val[1], vlalign_amt);
@@ -1451,7 +1545,7 @@ width_interleave_4_loop( struct x2s_d32_info const * info,
 			}
 			if(v_at_end){
 				if( v_at_end> 0)
-					result = width_interleave_4( *in0, *in1, *in2, *in3);
+					result = width_interleave_4( *in0, *in1, *in2, *in3,depth32_chunk);
 				outv[0] = Q6_V_vlalign_VVR( result.val[0], prevout, vlalign_amt);
 				if( v_at_end > 1){
 					outv[1]= Q6_V_vlalign_VVR( result.val[1], result.val[0], vlalign_amt);
@@ -1465,6 +1559,101 @@ width_interleave_4_loop( struct x2s_d32_info const * info,
 		in_wunit = in_wunit_next;
 	} // for ih
 }
+
+//Only used for depth to space when blocksize_w = 8 (although it can be modified to work with b2s as well)
+//Write interleaved chunks of blocksize_w = 4 into an intermidiate buffer, then write out the section we want (after cropping) to the final output
+static inline void
+width_interleave_8_loop( struct x2s_d32_info const * info,
+		uint8_t * out,              // output address
+		uint8_t * intermed_ptr,		// address within intermidiate buffer
+		uint8_t const * in_ptr,		// input address
+	    int height_count )
+{
+	int32_t input_wunit_stride = info->input_wunit_stride;
+	int32_t input_wunit_span = info->input_wunit_span;
+	int32_t input_d32_stride = info->tin.d32_stride;
+	int depth32_chunk = info->depth32_chunk;
+	int nd32_out = info->tout.nd32;
+	int32_t pref_height = info->wunit_prefht;
+	int32_t pref_width = info->wunit_prefrow;
+
+	uint8_t const * in_wunit = in_ptr;
+
+	int vloops = info->wunit_vloops;			// # of 'full loops' to do ( >= 0)
+	// how many here? always one at the start, plus 'vloops', plus one more if v_at_end > 0
+
+	vloops += (info->wunit_v_at_end>0)?2:1;		// number we need to do here
+
+	int32_t intermed_buffer_stride = info->intermed_buffer_stride;
+
+	uint8_t * intermed_copy_ptr = intermed_ptr;
+	for( int ih = 0; ih < height_count; ih++){
+
+		uint8_t const * in = in_wunit;
+		uint8_t const * in_wunit_next = in_wunit + input_wunit_stride;
+		// prefetch next wunit input, if there is a next.
+		if( likely(ih+1 < height_count)){
+			l2pref( in_wunit_next, pref_height, pref_width, input_d32_stride );
+		}
+
+		for(int r = 0; r < nd32_out; r++ ){
+			HVX_Vector const* in0 = (HVX_Vector const*)in;
+			HVX_Vector const* in1 = (HVX_Vector const*)(in+ input_wunit_span);
+			HVX_Vector const* in2 = (HVX_Vector const*)(in + 2*input_wunit_span);
+			HVX_Vector const* in3 = (HVX_Vector const*)(in + 3*input_wunit_span);
+			HVX_Vector const* in4 = (HVX_Vector const*)(in + 4*input_wunit_span);
+			HVX_Vector const* in5 = (HVX_Vector const*)(in+ 5*input_wunit_span);
+			HVX_Vector const* in6 = (HVX_Vector const*)(in + 6*input_wunit_span);
+			HVX_Vector const* in7 = (HVX_Vector const*)(in + 7*input_wunit_span);
+
+			HVX_Vector * outv  = (HVX_Vector *)intermed_ptr;
+			if( depth32_chunk == 32){			// 8 bit case
+				for( int j = 0; j < vloops ; j++){
+					HVX_Vector_x4 result = width_interleave_4( *in0++, *in1++, *in2++, *in3++,32);
+					HVX_Vector_x4 result2 = width_interleave_4( *in4++, *in5++, *in6++, *in7++,32);
+					outv[0] = result.val[0];
+					outv[1] = result2.val[0];
+					outv[2] = result.val[1];
+					outv[3] = result2.val[1];
+					outv[4] = result.val[2];
+					outv[5] = result2.val[2];
+					outv[6] = result.val[3];
+					outv[7] = result2.val[3];
+					outv += 8;
+				}
+			}else{								// 16-bit case
+				for( int j = 0; j < vloops ; j++){
+					HVX_VectorPair out04 = Q6_W_vshuff_VVR( *in1++, *in0++,64);
+					HVX_VectorPair out15 = Q6_W_vshuff_VVR( *in3++, *in2++,64);
+					HVX_VectorPair out26 = Q6_W_vshuff_VVR( *in5++, *in4++,64);
+					HVX_VectorPair out37 = Q6_W_vshuff_VVR( *in7++, *in6++,64);
+					outv[0] = Q6_V_lo_W(out04);
+					outv[4] = Q6_V_hi_W(out04);
+					outv[1] = Q6_V_lo_W(out15);
+					outv[5] = Q6_V_hi_W(out15);
+					outv[2] = Q6_V_lo_W(out26);
+					outv[6] = Q6_V_hi_W(out26);
+					outv[3] = Q6_V_lo_W(out37);
+					outv[7] = Q6_V_hi_W(out37);
+					outv += 8;
+				}
+			}
+
+			in += input_d32_stride;
+			intermed_ptr += intermed_buffer_stride;
+		}
+		in_wunit = in_wunit_next;
+	} // for ih
+//	for (int h = 0; h < height_count; h++)
+	{
+		vmemcpy_2d_asm(info->output_shape.width * depth32_chunk, nd32_out * height_count,	// width, height
+				out, info->tout.d32_stride,				// dst ptr, stride
+				intermed_copy_ptr + (32 * info->discard_w), intermed_buffer_stride);	// src ptr, stride
+//		out += info->tout.d32_stride * nd32_out;
+//		intermed_copy_ptr += intermed_buffer_stride * nd32_out;
+	}
+}
+
 /////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////// SpaceTo(Depth,Batch) //////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -1881,22 +2070,22 @@ space2x_d32_dtor(struct nn_node *self, struct nn_graph *nn )
 static int depthspace_d32_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking depth2space_d32 node %p",self);
-	int opt = self->node_type;
-	int is_b = opt != OP_DepthToSpace_8_d32;
-	int is_fromspace = opt == OP_SpaceToBatchND_8_d32;
+	int node_type = self->node_type;
+	int is_fromspace = (node_type == OP_SpaceToBatchND_8_d32);
 
-	// DepthToSpace can have 4 or 5 inputs
-	// BatchToSpace, SpaceToBatch must have 5.
-
-	int n_in = self->n_inputs;
-	if( !( (n_in == 4 && !is_b) || n_in ==5) )
-		return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
 	// allocate info struct, all 0
 	void * info = nn_calloc( 1,
 			is_fromspace? sizeof(struct s2x_d32_info): sizeof(struct x2s_d32_info));
 	if( info == NULL ){
 		return errlog(nn,"calloc failed");
+	}
+	if( !is_fromspace ){
+		int is_u16 = ( node_type == OP_DepthToSpace_16_d32 );
+		struct x2s_d32_info * inf = (struct x2s_d32_info*)info;
+		inf->is_b2s = ( node_type == OP_BatchToSpaceND_8_d32);
+		inf->elbytes = is_u16? 2:1;
+		inf->dtype = is_u16 ? NN_TYPE_QUINT16 :  NN_TYPE_QUINT8;
+		inf->depth32_chunk = is_u16? 64:32;
 	}
 	self->opaque = info;
 	logmsg(nn,2,"depthspace_d32 %p check OK",self);
@@ -1904,12 +2093,16 @@ static int depthspace_d32_check(struct nn_node *self, struct nn_graph *nn)
 }
 
 
+// DepthToSpace can have 4 or 5 inputs
+// BatchToSpace, SpaceToBatch must have 5.
 
 struct nn_node_ops nn_ops_for_DepthToSpace_8_d32 = {
 	.execute = depthspace_d32_execute,
 	.check = depthspace_d32_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common_release_opaque,
+	.n_inputs = NN_IOCOUNT_RANGE(4,5),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_CLS_CHANSHUFFLE | NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };
 struct nn_node_ops nn_ops_for_BatchToSpaceND_8_d32 = {
@@ -1917,6 +2110,8 @@ struct nn_node_ops nn_ops_for_BatchToSpaceND_8_d32 = {
 	.check = depthspace_d32_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common_release_opaque,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_CLS_CHANSHUFFLE | NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };
 struct nn_node_ops nn_ops_for_SpaceToBatchND_8_d32 = {
@@ -1924,6 +2119,20 @@ struct nn_node_ops nn_ops_for_SpaceToBatchND_8_d32 = {
 	.check = depthspace_d32_check,
 	.ctor = node_alloc_common,
 	.dtor = space2x_d32_dtor,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_CLS_CHANSHUFFLE | NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };
 
+
+// 16-bit
+//
+struct nn_node_ops nn_ops_for_DepthToSpace_16_d32 = {
+	.execute = depthspace_d32_execute,
+	.check = depthspace_d32_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common_release_opaque,
+	.n_inputs = NN_IOCOUNT_RANGE(4,5),
+	.n_outputs = NN_IOCOUNT(3),
+	.flags = NN_NODE_FLAG_CLS_CHANSHUFFLE | NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
+};

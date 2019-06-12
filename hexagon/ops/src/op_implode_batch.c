@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -283,24 +283,20 @@ static int implode_batch_hvx_execute(struct nn_node *self, struct nn_graph *nn){
 }
 
 
-static int implode_batch_check(struct nn_node *self, struct nn_graph *nn){
-    logmsg(nn,2,"Checking implode_batch node %p",self);
-    if (self->n_inputs != 5) return errlog(nn,"implode_batch check: wrong # inputs");
-    if (self->n_outputs !=4) return errlog(nn,"implode_batch check: wrong # outputs");
-    logmsg(nn,2,"implode_batch node %p check OK",self);
-    return 0;
-}
-
 
 struct nn_node_ops nn_ops_for_Implode_8_ref = {
     .execute = implode_batch_ref_execute,
-    .check = implode_batch_check,
+    .check = NULL,
     .ctor = node_alloc_common,
     .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT(5),
+    .n_outputs = NN_IOCOUNT(4),
 };
 struct nn_node_ops nn_ops_for_Implode_8 = {
     .execute = implode_batch_hvx_execute,
-    .check = implode_batch_check,
+    .check = NULL,
     .ctor = node_alloc_common,
     .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT(5),
+    .n_outputs = NN_IOCOUNT(4),
 };

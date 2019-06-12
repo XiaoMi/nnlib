@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -820,6 +820,7 @@ static int convert_from_d32_execute(struct nn_node *self, struct nn_graph *nn)
 	if( info->tbuf_rows){
 		int tbuf_size = info->tbuf_rows * info->tbuf_height_stride * nthreads;
 		nn_scratch_reset(nn);
+		nn_scratch_grow(nn, tbuf_size);
 		void * p = nn_scratch_alloc(nn, tbuf_size);
 		if( p == NULL)
 			return errlog(nn,"can't alloc %d scratch", tbuf_size);
@@ -1430,106 +1431,210 @@ packzilla_run_func(struct conv_from_d32_info const *info, uint8_t *outp, uint8_t
 //
 // output : d32 u8 tensor
 
-static int convert_d32_check(struct nn_node *self, struct nn_graph *nn)
+static int convert_from_d32_check(struct nn_node *self, struct nn_graph *nn)
 {
-	int maxin = -5;	// up to 5
-	if(self->node_type == OP_Convert_from_d32){
-		maxin = 1;			// there can can be only 1
-		if( self->opaque != NULL) nn_free( self->opaque);
-		void * info = nn_calloc(1, sizeof(struct conv_from_d32_info));
-		if ( info == NULL) return errlog(nn,"calloc");
-		self->opaque = info;
-	}
-	int k = node_check_inputs_range( self, nn, "convert_d32", 1, maxin );
-	if(k==0) k = node_check_outputs_n( self, nn, "convert_d32", 1);
-	return k;
+	if( self->opaque != NULL) nn_free( self->opaque);
+	void * info = nn_calloc(1, sizeof(struct conv_from_d32_info));
+	if ( info == NULL) return errlog(nn,"calloc");
+	self->opaque = info;
+	return 0;
 }
-
-
 
 
 struct nn_node_ops nn_ops_for_Convert_from_d32 = {
 	.execute = convert_from_d32_execute,
-	.check = convert_d32_check,
+	.check = convert_from_d32_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common_release_opaque,
 	.flags = NN_NODE_FLAG_D32_INPUT,
+	.n_inputs = NN_IOCOUNT(1),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 struct nn_node_ops nn_ops_for_Convert_to_d32 = {
 	.execute = convert_to_d32_execute,
-	.check = convert_d32_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
 	.flags = NN_NODE_FLAG_D32_OUTPUT,
+	.n_inputs = NN_IOCOUNT_RANGE(1,5),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
-static int convert_from_d32_b16(struct nn_graph *nn, void *arg)
-{	
-	struct nn_node *self = (struct nn_node *)arg;
+
+/////////////////////////////////////////////////////// To/From d32 16-bit ////////////////////
+// This is a placeholder; should eventually use the same strategies as 8-bit d32
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+static int convert_from_d32_16b(struct nn_node *self, struct nn_graph *nn)
+{
 	const struct tensor *in_tensor = self->inputs[0];
 	struct tensor *out_tensor = self->outputs[0];
-	int16_t *out = out_tensor->data;
 	int b_in = in_tensor->shape.batches;
 	int h_in = in_tensor->shape.height;
 	int w_in = in_tensor->shape.width;
 	int d_in = in_tensor->shape.depth;
-	int in_d32_stride = tensor_d32_stride_d32(in_tensor);
-	int b, h, w, d;
-	if (tensor_out_prepare_normal(out_tensor, b_in, h_in, w_in, d_in, NN_TYPE_QINT16)) {
+
+	// propagate the type; if it's not one of the two allowed, use NN_TYPE_QUINT16
+	int out_type = (in_tensor->format.type == NN_TYPE_QINT16)? NN_TYPE_QINT16 : NN_TYPE_QUINT16;
+
+	if (tensor_out_prepare_normal_fromshape(out_tensor, &in_tensor->shape, out_type)) {
 		return errlog(nn, "can't prepare output bhwd=%d,%d,%d,%d out_size=%d",
 			b_in, h_in, w_in, d_in, out_tensor->max_size);
 	}
 
-	int d_before = in_tensor->format.depth_pad[0];
-	//int d_after = in_tensor->format.depth_pad[1];
-	//int left_pad = in_tensor->format.width_pad[0];
-	//int right_pad = in_tensor->format.width_pad[1];
-	//int width_total = left_pad + right_pad + w_in;
+	struct tensor_addressing tin = nn_tensor_addressing_d32_16b(in_tensor);
 
-	for (b = 0; b < b_in; b++) {
-		for (h = 0; h < h_in; h++) {
-			for (w = 0; w < w_in; w++) {
-				int d_remain = d_in;
-				d = d_before;
-				// point to start of first depth slice
-				const int16_t *in = tensor_location_bhw_16b_d32(in_tensor, b, h, w);
-				do {
-					int dnow = 32 - d;
-					dnow = (dnow < d_remain) ? dnow : d_remain;	// copy this many
-					vmemcpy_asm(out, in + d, dnow*sizeof(in[0]));
-					out += dnow;
-					d_remain -= dnow;
-					d = 0;
-					in += in_d32_stride;
-				} while (d_remain > 0);
-			} //w
+	uint8_t *pout_row = (uint8_t*)out_tensor->data;
+	unsigned elbytes= sizeof(uint16_t);
+	unsigned bytes_per_row = w_in*d_in * elbytes;
+
+	struct nn_memcpy_manager  mcman;
+	nn_mcmanager_init(nn, &mcman );
+	for (int b = 0; b < b_in; b++) {
+		for (int h = 0; h < h_in; h++) {
+			uint8_t const * p_in = tin.data + b*tin.batch_stride + h*tin.height_stride;
+			for(int id32 = 0; id32 < tin.nd32; id32++){
+				int dn = min_i32( 32, d_in-32*id32);	// depths to copy (1..32)
+
+				nn_mcmanager_vmemcpy_2d( nn, &mcman,
+						dn*elbytes,	w_in,					// width, height to copy
+						pout_row+(32*elbytes)*id32, d_in*elbytes,		// dest, dest stride
+						p_in,  32*elbytes);						// src, src_stride
+				p_in += tin.d32_stride;
+			}
+			pout_row += bytes_per_row;
 		} //h
 	} //b
+	nn_mcmanager_wait( nn, &mcman );
 	return 0;
 }
 
-static int convert_from_d32_b16_spawn(struct nn_node *self, struct nn_graph *nn)
+
+static int convert_to_d32_16b( struct nn_node *self, struct nn_graph *nn )
 {
-        return nn_os_vector_call(nn,convert_from_d32_b16,self);
+	const struct tensor *in_tensor = self->inputs[0];
+	struct tensor *out_tensor = self->outputs[0];
+	int b_in = in_tensor->shape.batches;
+	int h_in = in_tensor->shape.height;
+	int w_in = in_tensor->shape.width;
+	int d_in = in_tensor->shape.depth;
+
+
+	// process optional padding
+	int d_pad_before = 0;		// defaults
+	int w_pad_left = 4;
+	int w_pad_right_min = 0;
+	int h_pad_top = 4;
+
+	// note, input #1 is legacy 'depth_pad_before, is ignored
+	if( self->n_inputs >=3){
+		w_pad_left = get_option( nn, self->inputs[2], w_pad_left, "width padding(left)", MAX_PADDING_WIDTH );
+		if( self->n_inputs >=4 )
+			w_pad_right_min = get_option( nn, self->inputs[3], w_pad_right_min, "width padding (min right)", MAX_PADDING_WIDTH );
+		if( self->n_inputs >=5 )
+			h_pad_top = get_option( nn, self->inputs[4], h_pad_top, "height padding", MAX_PADDING_HEIGHT );
+	}
+	// find wtotal, rounded up to even...
+	int wtotal = (w_pad_left + w_in + w_pad_right_min + 3)&~3;
+	// total padding must be >= 3
+	int k = w_in+4 - wtotal;
+	if( k >=2 ) wtotal += k&~1;	// add 2 or 4 as needed.
+
+	//if( wtotal < w_in+3) wtotal += 2;
+
+	int w_pad_right = wtotal - (w_pad_left + w_in);
+
+	if( w_pad_right > MAX_PADDING_WIDTH) w_pad_right -= 2;
+
+	int d_pad_after = (-(d_in+d_pad_before))&31;
+	int h_pad_bottom = h_pad_top;
+
+	// propagate the type; if it's not one of the two allowed, use NN_TYPE_QUINT16
+	int out_type = (in_tensor->format.type == NN_TYPE_QINT16)? NN_TYPE_QINT16 : NN_TYPE_QUINT16;
+
+	logmsg(nn,2,"h: %d|%d|%d w: %d|%d|%d d: %d|%d|%d avail=%d",
+			h_pad_top,h_in,h_pad_bottom,
+			w_pad_left,w_in,w_pad_right,
+			d_pad_before,d_in,d_pad_after,
+			out_tensor->max_size);
+	if (tensor_out_prepare_padded_d32(
+		out_tensor,
+		b_in,
+		h_in,h_pad_top,h_pad_bottom,
+		w_in,w_pad_left,w_pad_right,
+		d_in,d_pad_before,d_pad_after,
+		out_type) != 0) {
+		logmsg(nn,2,"h: %d|%d|%d w: %d|%d|%d d: %d|%d|%d avail=%d",
+			h_pad_top,h_in,h_pad_bottom,
+			w_pad_left,w_in,w_pad_right,
+			d_pad_before,d_in,d_pad_after,
+			out_tensor->max_size);
+		return errlog(nn,"out prepare fail (tensor %p)", out_tensor);
+	}
+
+	struct tensor_addressing tout = nn_tensor_addressing_d32_16b(out_tensor);
+
+	uint8_t const *pin_row = (uint8_t*)in_tensor->data;
+	unsigned elbytes= sizeof(uint16_t);
+	unsigned bytes_per_row = w_in*d_in * elbytes;
+
+
+	struct nn_memcpy_manager  mcman;
+	nn_mcmanager_init(nn, &mcman );
+	for (int b = 0; b < b_in; b++) {
+		for (int h = 0; h < h_in; h++) {
+			uint8_t  * p_out = tout.data + b*tout.batch_stride + h*tout.height_stride;
+			for(int id32 = 0; id32 < tout.nd32; id32++){
+				int dn = min_i32( 32, d_in-32*id32);	// depths to copy (1..32)
+
+				if (dn  < 32) {
+					// fill depth padding with actual 0
+					nn_mcmanager_vmemset32_2d(nn, &mcman, p_out + elbytes * dn, 0, (32-dn)*elbytes, w_in, 32 * elbytes);
+				}
+				nn_mcmanager_vmemcpy_2d( nn, &mcman,
+						dn*elbytes,	w_in,					// width, height to copy
+						p_out,  32*elbytes,						// dst, dst_stride
+						pin_row+(32*elbytes)*id32, d_in*elbytes);		// src, src stride
+				p_out += tout.d32_stride;
+			}
+			pin_row += bytes_per_row;
+		} //h
+	} //b
+	nn_mcmanager_wait( nn, &mcman );
+	return 0;
 }
-
-
-// input 0: 'flat 'i16' tensor
-//  input 1:  (optional) scalar int: depth padding start - default 0  (0..31)
-//  input 2:  (optional) scalar int: width padding start - default 4  (0..MAX_PADDING_WIDTH)
-//  input 3:  (optional) scalar int: width padding end (min) - default 0  (0..MAX_PADDING_WIDTH)
-//    The 'end' padding will be adjusted up so that the width total is a multiple of 4. If it exceeds
-//    MAX_PADDING_WIDTH as a result, it will then be adjusted down by 4.
-//  input 4:  (optional): scalar int: top/bottom padding for height  default 4 (0..MAX_PADDING_HEIGHT)
+// input 0: d32 'i16' tensor
 //
-// output : d32 i16 tensor
+// output : flat 'i16 tensor
 
-struct nn_node_ops nn_ops_for_Convert_from_d32_b16 = {
-	.execute = convert_from_d32_b16_spawn,
-	.check = convert_d32_check,
+struct nn_node_ops nn_ops_for_Convert_from_d32_16b = {
+	.execute = convert_from_d32_16b,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
 	.flags = NN_NODE_FLAG_D32_INPUT,
+	.n_inputs = NN_IOCOUNT(1),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
+
+// Convert_to_d32_16b
+// input 0: 'flat 'b16' tensor
+//  input 1:  (optional) scalar int: depth padding start -(ignored, always 0)
+//  input 2:  (optional) scalar int: width padding start - default 2  (0..MAX_PADDING_WIDTH)
+//  input 3:  (optional) scalar int: width padding end (min) - default 0  (0..MAX_PADDING_WIDTH)
+//    The 'end' padding will be adjusted up so that the width total is a multiple of 2 and L+R padding is at least 3
+//  input 4:  (optional): scalar int: top/bottom padding for height  default 4 (0..MAX_PADDING_HEIGHT)
+//
+// output : d32 16 tensor
+
+struct nn_node_ops nn_ops_for_Convert_to_d32_16b = {
+	.execute = convert_to_d32_16b,
+	.check = NULL,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+	.flags = NN_NODE_FLAG_D32_OUTPUT,
+	.n_inputs = NN_IOCOUNT_RANGE(1,5),
+	.n_outputs = NN_IOCOUNT(1),
+};

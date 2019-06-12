@@ -33,6 +33,7 @@ hexagon/asm_src/im2col33322_h.S
 hexagon/asm_src/im2col7732_h.S
 hexagon/asm_src/biasadd_relu_requant_nonalign_hvx.S
 hexagon/asm_src/vmemset_h.S
+hexagon/asm_src/vmemset_short_h.S
 hexagon/asm_src/vmemset_nt_h.S
 hexagon/asm_src/gvmacca_h.S
 hexagon/asm_src/gvmaccb_h.S
@@ -46,7 +47,6 @@ hexagon/asm_src/gvconv2dbbw_h.S
 hexagon/asm_src/gvconvsum2dbbb_h.S
 hexagon/asm_src/gvconv2dbbb_h.S
 hexagon/asm_src/qlrn_acc_h.S
-hexagon/asm_src/qelementwise_ops_h.S
 hexagon/asm_src/relu_kernel_h.S
 hexagon/asm_src/gsum_h.S
 hexagon/asm_src/dwconv2dbbb_d32_v60_h.S
@@ -70,5 +70,11 @@ hexagon/asm_src/renorm_h.S
 hexagon/asm_src/inconv2dbbb332_d32_v60_h.S
 hexagon/asm_src/fcsuma_h.S
 hexagon/asm_src/fullconnlayerbatch_h.S
+hexagon/asm_src/fullconnlayerbatch1_h.S
 hexagon/asm_src/gvconv2db2b2b2_d32_h_v60.S
 hexagon/asm_src/gvconv3322bbb_h.S
+hexagon/asm_src/dwconv2dhhh_MxN_h.S
+hexagon/asm_src/dwconv2dbbb_s1_5xN_h.S
+hexagon/asm_src/dwconv2dbbb_s2_5xN_h.S
+hexagon/asm_src/dwconv2dbbb_s1_3xN_h.S
+hexagon/asm_src/dwconv2dbbb_s2_3xN_h.S

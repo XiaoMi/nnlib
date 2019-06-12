@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -186,25 +186,14 @@ static int crop_execute(struct nn_node *self, struct nn_graph *nn) {
     return 0;
 }
 
-static int crop_check(struct nn_node *self, struct nn_graph *nn)
-{
-	if (self->n_inputs != NUM_CROP_OPS) return errlog(nn, "op_crop takes exactly %d inputs, %d provided", NUM_CROP_OPS, self->n_inputs);
-	if (self->n_outputs != 3) return errlog(nn, "op_crop takes exactly 3 outputs (buffer, min, max), %d provided", self->n_outputs);
-	int i;
-	for (i = 0; i < self->n_inputs; i++) {
-		if (self->inputs[i] == NULL) {
-			return errlog(nn,"op_crop NULL input %d",i);
-		}
-	}
-	if (self->outputs[0] == NULL) return errlog(nn, "NULL output");
-	return 0;
-}
 
 struct nn_node_ops nn_ops_for_QuantizedCrop_8 = {
 	.execute = crop_execute,
-	.check = crop_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(NUM_CROP_OPS),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 

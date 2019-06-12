@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2017,2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -118,8 +118,8 @@ quantize_with_dequant_16b(
 	float adjust = 0.0;
 	if (is_qu16asymm) {
 		range = out_max - out_min;
-		qscale = 65535.0f / range;
-		deqscale = range / 65535.0f;
+		qscale = 65536.0f / range;
+		deqscale = range / 65536.0f;
 		adjust = out_min;
 	}
 
@@ -274,8 +274,6 @@ static int quantfortest_execute(struct nn_node *self, struct nn_graph *nn)
 	quantize_with_dequant_16b(tensor_in, tensor_outq16, tensor_outf, out_minmax[0], out_minmax[1], is_u16);
 
 	if (is_u16) {
-		float outmin = -out_minmax[0] * 65535.0f / (out_minmax[1] - out_minmax[0]);
-		outmin = outmin * (out_minmax[1] - out_minmax[0]) / 65535.0f;
 		tensor_set_single_float(tensor_outmin, out_minmax[0]);
 		tensor_set_single_float(tensor_outmax, out_minmax[1]);
 	}
@@ -310,36 +308,12 @@ static int quantfortest_execute(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-
-static int quantfortest_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking quantfortest_16b_d32 node %p",self);
-	int k = node_check_inputs_range( self, nn, "quantfortest_16b_d32", 1, -5);
-	if( k == 0 ){
-		k = node_check_outputs_range( self, nn, "quantfortest_16b_d32", 3, -7);
-	}
-	logmsg(nn,2,"quantfortest_16b_d32 node %p OK",self);
-	return 0;
-}
-#if 0
-static int autoquant_d32_ref_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking autoquant_d32 node %p",self);
-	int k = node_check_inputs_range( self, nn, "autoquant_d32", 1, -5);
-	if( k == 0 ){
-		k = node_check_outputs_n( self, nn, "autoquant_d32", 3);
-	}
-	logmsg(nn,2,"autoquant_d32 node %p OK",self);
-	return 0;
-}
-#endif
 //
 // QuantizeForTest:
 // convert float to 8-bit quantized, using the actual min and max
 // range the data.
 // Output is d32 tensor, and min/max values.
 // Optional 4th output is the same data requantized back to float.
-// optional inputs/outputs may be NULL.
 
 //  input 0:   float tensor
 //  input 1:  (optional) scalar int: depth padding start - default 0  (0..31)
@@ -358,17 +332,21 @@ static int autoquant_d32_ref_check(struct nn_node *self, struct nn_graph *nn)
 
 struct nn_node_ops nn_ops_for_QuantizeForTest_16b_d32 = {
 	.execute = quantfortest_execute,
-	.check = quantfortest_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(1,5),
+	.n_outputs = NN_IOCOUNT_RANGE(3,7),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };
 
 struct nn_node_ops nn_ops_for_QuantizeForTest_u16b_d32 = {
 	.execute = quantfortest_execute,
-	.check = quantfortest_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(1,5),
+	.n_outputs = NN_IOCOUNT_RANGE(3,7),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };
 
@@ -377,9 +355,11 @@ struct nn_node_ops nn_ops_for_QuantizeForTest_u16b_d32 = {
 #if 0
 struct nn_node_ops nn_ops_for_AutoQuantize_16b_d32_ref = {
 	.execute = quantfortest_execute,
-	.check = autoquant_d32_ref_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(1,5),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };
 #endif

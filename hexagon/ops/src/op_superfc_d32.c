@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -180,7 +180,7 @@ struct superfc_info {
 //
 
 
-static void setup_initial_output_range( struct superfc_info *info, float,float,float,float);
+static int setup_initial_output_range( struct nn_graph *nn, struct superfc_info *info, float,float,float,float);
 
 #define roundup(a, p2)       (((a)+(p2)-1)&~((p2)-1))
 
@@ -585,7 +585,10 @@ static void superfc_execute_hvx_matmul(struct nn_graph *nn, void * vinfo)
         }
 
              //for (b = 0; b < num_batches2; b++) logmsg(nn,2,"in/out ptrs for %d: in: %p out: %p",b,work->ptr_in_batches[b],work->ptr_out_batches[b]);
-		for (w = 0; w < weight_chunks; w++) {
+        int even_batches = num_batches & (~1);
+        int odd_batch = num_batches & (1);
+        if(odd_batch) logmsg(nn,3,"running odd batch code %d + %d", even_batches, odd_batch);
+	for (w = 0; w < weight_chunks; w++) {
 
 	     // matrix multiply 2 batches per output depth 32 slice
 #if 0
@@ -602,16 +605,28 @@ static void superfc_execute_hvx_matmul(struct nn_graph *nn, void * vinfo)
                                   32*w
              );
 #endif
-             fullconnlayerbatch_asm(
+             if(even_batches) fullconnlayerbatch_asm(
                                   work_ptr_in_batches,
                                   weights + w*32*info->in_depth_pad,
                                   work_ptr_out_batches,
                                   in_depth,
-                                  num_batches2,
+                                  even_batches,
                                   minmax.words,
                                   recip_val, //reciprocal of max for quantization
                                   biasbuf + 32*w,
                                   work_suma_buf,
+                                  32*w
+             );
+             if(odd_batch) fullconnlayerbatch1_asm(
+                                  work_ptr_in_batches[even_batches],
+                                  weights + w*32*info->in_depth_pad,
+                                  work_ptr_out_batches[even_batches],
+                                  in_depth,
+                                  odd_batch,
+                                  minmax.words,
+                                  recip_val, //reciprocal of max for quantization
+                                  biasbuf + 32*w,
+                                  work_suma_buf+even_batches,
                                   32*w
              );
         } // end for weights
@@ -890,7 +905,6 @@ void superfc_rearrange_and_sum_for_d32(
 	};
 	nn_sem_init( & rpfparms.done_sem, 0);
 	// call it directly.
-	int vv = nn_os_vector_acquire();
 	repack_filter_for_d32( nn, &rpfparms);
 
 	// repack_filter_for_d32 found the filter sums across depth, including padding; we need to
@@ -902,10 +916,10 @@ void superfc_rearrange_and_sum_for_d32(
 		gsumv[i] = Q6_Vw_vsub_VwVw( vadj, gsumv[i]);
 	}
 	// flush last vector store...
+#if defined(__hexagon__)
 	asm volatile( "/*  */");
+#endif
 	((volatile int32_t *)gsumb)[filt_batches_total-1];
-
-	nn_os_vector_release(vv);
 
 #if 0
     int w,x,y,z,sumw;
@@ -962,7 +976,7 @@ void superfc_rearrange_and_sum_for_d32(
  *   find some combination of slices of weights and slices of activations that fits nicely.
  */
 
-static void fill_info_minmax_basics(
+static int fill_info_minmax_basics(
 	struct nn_graph *nn,
 	struct nn_node *self,
 	struct superfc_info *info)
@@ -977,8 +991,13 @@ static void fill_info_minmax_basics(
 
 	/* Get min/max values for input, weights, and bias data */
 	float in_min_float = tensor_get_float(min_in_tensor,0);
-	float in_max_float = fmaxf(tensor_get_float(max_in_tensor,0),in_min_float+0.00001f);
-	//float filt_min_float = tensor_get_float(min_filt_tensor,0);
+	//float in_max_float = fmaxf(tensor_get_float(max_in_tensor,0),in_min_float+0.00001f);
+	float in_max_float =tensor_get_float(max_in_tensor,0);
+
+    if( in_min_float > 0.0f || in_max_float < 0.0f || in_min_float >= in_max_float )
+        return errlog(nn, "SuperFC: invalid input min/max");
+
+    //float filt_min_float = tensor_get_float(min_filt_tensor,0);
 	//float filt_max_float = fmaxf(tensor_get_float(max_filt_tensor,0),filt_min_float+0.00001f);
 	//float bias_min_float = tensor_get_float(bias_min_tensor,0);
 	//float bias_max_float = tensor_get_float(bias_max_tensor,0);
@@ -1024,7 +1043,7 @@ static void fill_info_minmax_basics(
 	}
 	info->recip_val = recip_val_64;
 	info->recip_shamt = recip_shamt;
-	return;
+	return 0;
 }
 
 static int fill_bias_buf(
@@ -1219,7 +1238,7 @@ int superfc_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 
 
 	/* Compute reciprocal and shift amount and associated scaling info */
-	fill_info_minmax_basics(nn,self,info);
+	if(fill_info_minmax_basics(nn,self,info)) return -1;
 
 	logmsg(nn,2,"out_maxval=%f in_level_size=%f filt_level_size=%f prod_level_size=%2.12f max_valid ~= %d",
 		info->out_maxval,
@@ -1546,8 +1565,8 @@ static int superfc_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 int superfc_check_ref(struct nn_node *self, struct nn_graph *nn)
 {
 	struct superfc_info *info = self->opaque;
-	if (self->n_inputs != 11) return errlog(nn,"superfc wrong # inputs... now need min/max with inf for self-detecting");
-	if (self->n_outputs != 3) return errlog(nn,"superfc wrong # outputs");
+	//if (self->n_inputs != 11) return errlog(nn,"superfc wrong # inputs... now need min/max with inf for self-detecting");
+	//if (self->n_outputs != 3) return errlog(nn,"superfc wrong # outputs");
 	float specified_minval = tensor_get_float(self->inputs[ 9],0);
 	float specified_maxval = tensor_get_float(self->inputs[10],0);
 
@@ -1564,7 +1583,7 @@ int superfc_check_ref(struct nn_node *self, struct nn_graph *nn)
 	info->strategy_valid = 0;	/* Redundant w/ calloc */
 	self->opaque = info;
 
-	setup_initial_output_range( info, specified_minval, specified_maxval, 0.0f, 0.5f);
+	if(setup_initial_output_range(nn, info, specified_minval, specified_maxval, 0.0f, 0.5f)) return -1;
 
 	return 0;
 }
@@ -1577,8 +1596,8 @@ int superfc_check_ref(struct nn_node *self, struct nn_graph *nn)
 int superfc_check(struct nn_node *self, struct nn_graph *nn)
 {
 	struct superfc_info *info = self->opaque;
-	if (self->n_inputs != 11) return errlog(nn,"superfc wrong # inputs... now need min/max with inf for self-detecting");
-	if (self->n_outputs != 3) return errlog(nn,"superfc wrong # outputs");
+	//if (self->n_inputs != 11) return errlog(nn,"superfc wrong # inputs... now need min/max with inf for self-detecting");
+	//if (self->n_outputs != 3) return errlog(nn,"superfc wrong # outputs");
 	const struct tensor *filt_tensor = self->inputs[1];
 	const struct tensor *filt_min_tensor = self->inputs[4];
 	const struct tensor *filt_max_tensor = self->inputs[5];
@@ -1716,7 +1735,7 @@ int superfc_check(struct nn_node *self, struct nn_graph *nn)
 	info->filt_offset = filt_offset;
 	info->weights_level_size = filt_level_size;
 
-	setup_initial_output_range( info, specified_minval, specified_maxval, 0.0f, 0.5f);
+	if(setup_initial_output_range( nn, info, specified_minval, specified_maxval, 0.0f, 0.5f)) return -1;
 
 	// figure out scratch requirements
 	// components are ( each rounded up to vector):
@@ -1784,8 +1803,8 @@ int superfc_check(struct nn_node *self, struct nn_graph *nn)
 // It is assumed that minval_default <=0, maxval_default >=1/128
 // But the range need not be 'proper'.
 //
-static void
-setup_initial_output_range( struct superfc_info *info,
+static int
+setup_initial_output_range( struct nn_graph *nn, struct superfc_info *info,
 	float specified_minval,		// range specified by inputs
 	float specified_maxval,
 	float minval_default,			// use when specified_minval = -INF
@@ -1794,9 +1813,12 @@ setup_initial_output_range( struct superfc_info *info,
 	// enforce sanity:  min <= 0.0 <= max
 	// and max > min + 1/128
 	//
-	specified_minval = fminf( specified_minval, 0.0f);
-	specified_maxval = fmaxf( fmaxf( specified_maxval, 0.f),
-								specified_minval + 0x1.0p-7f);
+	if( specified_minval > 0.0f || specified_maxval < 0.0f || specified_minval >= specified_maxval )
+	    return errlog(nn, "SuperFC: invalid input min/max");
+	//specified_minval = fminf( specified_minval, 0.0f);
+    //specified_maxval = fmaxf( specified_maxval, 0.f);
+    //specified_maxval = fmaxf( fmaxf( specified_maxval, 0.f),
+    //							specified_minval + 0x1.0p-7f);
 
 	info->out_minval_spec = specified_minval;
 	info->out_maxval_spec = specified_maxval;
@@ -1819,6 +1841,7 @@ setup_initial_output_range( struct superfc_info *info,
 	if( info->out_minval < 0.0f ){
 		adjust_minmax_for_zero_with_constraints( &info->out_minval, &info->out_maxval, corr_code);
 	}
+	return 0;
 }
 
 static int superfc_dtor(struct nn_node *self, struct nn_graph *nn)
@@ -1857,12 +1880,16 @@ struct nn_node_ops nn_ops_for_SuperFC_8x8p32to8_ref = {
 	.check = superfc_check_ref,
 	.ctor = node_alloc_common,
 	.dtor = superfc_dtor_ref,
+	.n_inputs = NN_IOCOUNT(11),
+	.n_outputs = NN_IOCOUNT(3),
 };
 struct nn_node_ops nn_ops_for_SuperFC_8x8p32to8 = {
 	.execute = superfc_execute_hvx,
 	.check = superfc_check,
 	.ctor = node_alloc_common,
 	.dtor = superfc_dtor,
+	.n_inputs = NN_IOCOUNT(11),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = 0,
 };
 struct nn_node_ops nn_ops_for_SuperFC_8x8p32to8_d32 = {
@@ -1870,5 +1897,7 @@ struct nn_node_ops nn_ops_for_SuperFC_8x8p32to8_d32 = {
 	.check = superfc_check,
 	.ctor = node_alloc_common,
 	.dtor = superfc_dtor,
+	.n_inputs = NN_IOCOUNT(11),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };

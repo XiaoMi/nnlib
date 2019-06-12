@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -511,10 +511,15 @@ printf("left_padding = %d; right = %d; infeas_w = %d\n",ibp->wpad_left, ibp->wpa
 	}else{
 		// else
 		// allocate scratch for the integral buffers
+		
 		integ_buf_bytes = ibp->ibuf_total_bytes;
+		if (nn_scratch_grow(nn, integ_buf_bytes*n_threads)){
+			return errlog(nn, "scratch too small");
+		}
+		nn_scratch_reset(nn);
 		integ_buf = nn_scratch_alloc(nn, integ_buf_bytes*n_threads);
 		if( integ_buf == NULL){
-			return errlog(nn, "could not alloc %d bytes of scratch",integ_buf_bytes*n_threads );
+			return errlog(nn, "could not alloc %d bytes of scratch %d",integ_buf_bytes*n_threads,nn->scratch_size);
 		}
 	}
 	// fill in the 'thrinfo' and launch threads
@@ -1234,9 +1239,6 @@ static void avgpool_process_slice_special( struct avgpool_runstate const *rstp, 
 
 static int avgpool_check(struct nn_node *self, struct nn_graph *nn)
 {
-	if (self->n_inputs != 5) return errlog(nn,"avgpool wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"avgpool wrong # outs");
-
 	const struct tensor *window_tensor = self->inputs[3];
 	const struct tensor *stride_tensor = self->inputs[4];
 
@@ -1282,7 +1284,9 @@ struct nn_node_ops nn_ops_for_QuantizedAvgPool_8_d32 = {
 	.ctor = node_alloc_common,
 	.dtor = avgpool_dtor,
 	.earlywork_register = avgpool_earlywork_register,
-	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT | NN_NODE_FLAG_OUTPUT_ACCEPTS_PREPARATION
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT | NN_NODE_FLAG_OUTPUT_ACCEPTS_PREPARATION,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedAvgPool_8_d32_ref = {
@@ -1290,6 +1294,8 @@ struct nn_node_ops nn_ops_for_QuantizedAvgPool_8_d32_ref = {
 	.check = avgpool_check,
 	.ctor = node_alloc_common,
 	.dtor = avgpool_dtor,
-	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT | NN_NODE_FLAG_OUTPUT_ACCEPTS_PREPARATION
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT | NN_NODE_FLAG_OUTPUT_ACCEPTS_PREPARATION,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
 };
 

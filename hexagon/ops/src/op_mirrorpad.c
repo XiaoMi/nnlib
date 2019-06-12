@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -100,7 +100,7 @@ static inline void do_mirrorpad(
 }
 
 
-static int mirrorpad_f_execute(struct nn_node *self, struct nn_graph *nn)
+static int mirrorpad_execute(struct nn_node *self, struct nn_graph *nn, const uint32_t elementsize, int dtype)
 {
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *pads_tensor = self->inputs[1];
@@ -112,7 +112,6 @@ static int mirrorpad_f_execute(struct nn_node *self, struct nn_graph *nn)
 	if( padt_len> 4) padt_len = 4;		// ignore > 4
 
 	const int32_t *pads = pads_tensor->data;
-	const uint32_t element_size = sizeof(float);
 
 	// exract the pads, based on w dimension; ensure all are >=0 and
 	//
@@ -136,7 +135,7 @@ static int mirrorpad_f_execute(struct nn_node *self, struct nn_graph *nn)
 		new_shape_count = mulu32_sat( new_shape_count, new_dim);
 	}
 	if (new_shape_count ==0 || new_shape_count == (uint32_t)-1
-			|| mulu32_sat( new_shape_count, element_size) == (uint32_t)-1 )
+			|| mulu32_sat( new_shape_count, elementsize) == (uint32_t)-1 )
 		return errlog(nn,"padded size overflow");
 
 	const int32_t pad_b_before = padby[0];
@@ -157,10 +156,11 @@ static int mirrorpad_f_execute(struct nn_node *self, struct nn_graph *nn)
 	const int32_t h_out = out_shape.height;
 	const int32_t b_out = out_shape.batches;
 
-	const float *in_base = in_tensor->data;
-	float *out_base = out_tensor->data;
-	const float *inp;
-	float *outp;
+	const char *in_base = in_tensor->data;
+	char *out_base = out_tensor->data;
+	const char *inp;
+	char *outp;
+
 	int b;
 	logmsg(nn,2,"in tensor: %dx%dx%dx%d",b_in,h_in,w_in,d_in);
 	if (pads_tensor->shape.depth != 2) return errlog(nn,"bad pad shape");
@@ -172,13 +172,13 @@ static int mirrorpad_f_execute(struct nn_node *self, struct nn_graph *nn)
 	if (pad_h_before >= h_in) return errlog(nn,"height too small");
 	if (pad_h_after >= h_in) return errlog(nn,"height too small");
 
-	if( tensor_out_prepare_normal(out_tensor, b_out,h_out,w_out,d_out, NN_TYPE_FLOAT)!= 0 ){
+	if( tensor_out_prepare_normal(out_tensor, b_out,h_out,w_out,d_out, dtype)!= 0 ){
 		return errlog(nn,"out too small");
 	}
 
 	for (b = 0; b < b_in; b++) {
-		inp = in_base + b*h_in*w_in*d_in;
-		outp = out_base + b*h_out*w_out*d_out;
+		inp = in_base + b*h_in*w_in*d_in*elementsize;
+		outp = out_base + b*h_out*w_out*d_out*elementsize;
 		do_mirrorpad(
 			outp,
 			inp,
@@ -188,30 +188,50 @@ static int mirrorpad_f_execute(struct nn_node *self, struct nn_graph *nn)
 			pad_w_after,
 			pad_h_before,
 			pad_h_after,
-			d_in*element_size,
+			d_in*elementsize,
 			(self->padding == NN_PAD_MIRROR_REFLECT));
 
 	}
 	return 0;
 }
 
-static int mirrorpad_f_check(struct nn_node *self, struct nn_graph *nn)
+static int mirrorpad_execute_f(struct nn_node *self, struct nn_graph *nn)
+{
+    return mirrorpad_execute(self,nn,sizeof(float),NN_TYPE_FLOAT);
+}
+
+static int mirrorpad_execute_8(struct nn_node *self, struct nn_graph *nn)
+{
+	tensor_copy(self->outputs[1],self->inputs[2]);
+	tensor_copy(self->outputs[2],self->inputs[3]);
+	return mirrorpad_execute(self,nn,sizeof(uint8_t),NN_TYPE_QUINT8);
+}
+
+static int mirrorpad_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"mirrorpad node %p",self);
 	if ((self->padding != NN_PAD_MIRROR_REFLECT) 
 		&& (self->padding != NN_PAD_MIRROR_SYMMETRIC)) {
 			return errlog(nn,"bad mirror pad type");
 	}
-	if (self->n_inputs != 2) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
 	logmsg(nn,2,"mirrorpad %p check OK",self);
 	return 0;
 }
-
 struct nn_node_ops nn_ops_for_MirrorPad_f = {
-	.execute = mirrorpad_f_execute,
-	.check = mirrorpad_f_check,
+	.execute = mirrorpad_execute_f,
+	.check = mirrorpad_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(2),
+	.n_outputs = NN_IOCOUNT(1),
+};
+
+struct nn_node_ops nn_ops_for_MirrorPad_8 = {
+	.execute = mirrorpad_execute_8,
+	.check = mirrorpad_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(4),
+	.n_outputs = NN_IOCOUNT(3),
 };
 

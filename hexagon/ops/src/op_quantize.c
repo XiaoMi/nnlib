@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -101,7 +101,7 @@ static int quantize32_execute(struct nn_node *self, struct nn_graph *nn)
 }
 
 
-static int quantize_execute(struct nn_node *self, struct nn_graph *nn)
+static int quantize_execute_ref(struct nn_node *self, struct nn_graph *nn)
 {
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *min_tensor = self->inputs[1];
@@ -278,25 +278,6 @@ find_minmax_of_floats_hvx( float const * ptr, uint32_t nvals, HVX_Vector *out )
 }
 #endif
 
-//
-// parms for converting from float.
-// Procedure for input 'x', in the hvx code, is:
-//    (1) extract mantissa, restoring 'hidden bit', to get 24 bit #
-//    (2) >> (common_exp- exp), where 'exp' is the exponent field from input.
-//       (if >> more than 24, result is 0)
-//    (3) negate, if x input has sign bit
-//    (4) add 'min_offs' to that
-//    (5) multiply the result (considered unsigned) by uint16 value 'scaling'.
-//        Result is guaranteed (by contrivance of the numbers,vs known min,max)
-//        to fit in u32
-//    (6) upper 8 bits of the 32-bit product are the quantized result.
-//
-struct hvx_quant_parms {
-	int scaling;
-	int min_offset;
-	int common_exp;
-	float minval, maxval;
-};
 // work out the 'scale', 'min_offs' and 'common_exp'
 // which are used in the hvx code to do quantizing.
 // Note: the input is actually {-min and max} (both >= 0)
@@ -305,7 +286,7 @@ struct hvx_quant_parms {
 // and also the 'adjusted' min and max.
 //
 // returns -1 if either minmax input is inf or Nan
-static inline int
+int
 find_scaling_for_hvx_quant ( float const minmax[2], struct hvx_quant_parms *out)
 {
 	union {
@@ -324,7 +305,6 @@ find_scaling_for_hvx_quant ( float const minmax[2], struct hvx_quant_parms *out)
 	uint32_t rangemant;
 	uint32_t rangeexp;
 	uint32_t scaling;
-
 	if( !flt_isfinite(minmax[0]) || !flt_isfinite(minmax[1])) return -1;
 
 
@@ -364,11 +344,81 @@ find_scaling_for_hvx_quant ( float const minmax[2], struct hvx_quant_parms *out)
 	out->maxval = maxv;
 	return 0;
 }
+
 struct autoquant_info {
 	struct nn_node * self;
 	nn_sem_t done_sem;
 	volatile int err_flag;
 };
+struct autoquantminmax_info {
+	struct nn_node * self;
+	nn_sem_t done_sem;
+	volatile int err_flag;
+	struct hvx_quant_parms* qparms;
+	const float * in;
+	uint8_t * out;
+	int32_t elements;
+
+};
+void quantize_opt(struct nn_graph* nn, void* vinfo){
+	struct autoquantminmax_info* info = (struct autoquantminmax_info*) vinfo;
+	struct hvx_quant_parms* qparms = info->qparms;
+	int32_t elements = info->elements;
+	const float* in = info->in;
+	uint8_t* out = info->out;
+	// 	/* Quantize! */
+	quantize_floats_to_8b_asm(in,out, elements, qparms->min_offset, qparms->common_exp, qparms->scaling);
+	nn_sem_post(& info->done_sem);
+}
+static int quantize_execute_opt(struct nn_node *self, struct nn_graph *nn)
+{
+	const struct tensor *in_tensor = self->inputs[0];
+	const struct tensor *min_tensor = self->inputs[1];
+	const struct tensor *max_tensor = self->inputs[2];
+	struct tensor *out_tensor = self->outputs[0];
+	struct tensor *out_min_tensor = self->outputs[1];
+	struct tensor *out_max_tensor = self->outputs[2];
+	float min_in = tensor_get_float(min_tensor,0);
+	float max_in = tensor_get_float(max_tensor,0);
+
+	float batches = in_tensor->shape.batches;
+	float height = in_tensor->shape.height;
+	float width = in_tensor->shape.width;
+	float depth = in_tensor->shape.depth;
+	const float *in = in_tensor->data;
+	uint8_t *out = out_tensor->data;
+	int out_bytes = batches*height*width*depth;
+	logmsg(nn,2,"quantize execute. self=%p ",self);
+	struct hvx_quant_parms qparms;
+
+	if( tensor_out_prepare_normal( out_tensor, batches,height,width,depth, NN_TYPE_QUINT8)!= 0 ){
+		return errlog(nn,"out too small for node %d (%p) %d < %d",
+			      self->node_id, out_tensor, out_tensor->max_size,out_bytes);
+	}
+
+	float minmaxbuf[2] = {-min_in,max_in};
+	if( find_scaling_for_hvx_quant(minmaxbuf, &qparms) !=0 ){
+		return errlog(nn,"inf or NaN input, to autoquantize");
+	}
+	logmsg(nn,2,"minval=%f maxval=%f range=%f scaling = %d, common_exp = %d min_offset=%x",
+		qparms.minval,qparms.maxval, qparms.maxval-qparms.minval, qparms.scaling, qparms.common_exp, qparms.min_offset);
+
+	struct autoquantminmax_info aqinfo;
+	aqinfo.self = self;
+	aqinfo.err_flag = 0;
+	aqinfo.elements = out_bytes;
+	aqinfo.in = in;
+	aqinfo.out = out;
+	aqinfo.qparms = &qparms;
+
+	nn_sem_init(&aqinfo.done_sem,0);
+	nn_os_work_for_vector(nn,quantize_opt,&aqinfo);
+	nn_sem_wait(&aqinfo.done_sem);
+
+	tensor_set_single_float(out_min_tensor, qparms.minval);
+	tensor_set_single_float(out_max_tensor, qparms.maxval);
+	return 0;
+}
 #if 0
 static void autoquantize_hvx(struct nn_graph *nn, void *infov)
 {
@@ -490,6 +540,8 @@ static void autoquantize_hvx(struct nn_graph *nn, void *infov)
 	}
 	nn_sem_post(& info->done_sem);
 }
+
+
 #endif
 
 //
@@ -1396,48 +1448,6 @@ static int dequantize_i32_execute(struct nn_node *self, struct nn_graph *nn)
 }
 
 
-static int quantize_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking quantize node %p",self);
-	int k = node_check_inputs_outputs_n( self, nn, "quantize", 3, 3 );
-	if(k!=0) return k;
-	logmsg(nn,2,"quantize node %p OK",self);
-	return 0;
-}
-
-
-static int autoquantize_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking quantize node %p",self);
-	int k = node_check_inputs_outputs_n( self, nn, "autoquant", 1, 3 );
-	if(k!=0) return k;
-	logmsg(nn,2,"quantize node %p OK",self);
-	return 0;
-}
-
-//
-// autoquantize_d32 has 1..5 inputs; 4 are optional
-//
-static int autoquantize_d32_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking autoquant_d32 node %p",self);
-	int k = node_check_inputs_range( self, nn, "autoquant_d32", 1, -5 );
-	if(k==0) k = node_check_outputs_n( self, nn, "autoquant_d32", 3);
-	if(k!=0) return k;
-	logmsg(nn,2,"autoquant_d32 node %p OK",self);
-	return 0;
-
-}
-
-static int dequantize_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking dequantize node %p",self);
-	int k = node_check_inputs_outputs_n( self, nn, "dequantize", 3, 1 );
-	if(k!=0) return k;
-	logmsg(nn,2,"dequantize node %p OK",self);
-	return 0;
-}
-
 //
 // Quantize:
 // convert float to 8-bit quantized, using the supplied
@@ -1453,18 +1463,22 @@ static int dequantize_check(struct nn_node *self, struct nn_graph *nn)
 
 
 struct nn_node_ops nn_ops_for_Quantize = {
-	.execute = quantize_execute,
-	.check = quantize_check,
+	.execute = quantize_execute_opt,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags  = NN_NODE_FLAG_CLS_QUANTIZE,
 };
 
 struct nn_node_ops nn_ops_for_Quantize_ref = {
-	.execute = quantize_execute,
-	.check = quantize_check,
+	.execute = quantize_execute_ref,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 
@@ -1479,9 +1493,11 @@ struct nn_node_ops nn_ops_for_Quantize_ref = {
 
 struct nn_node_ops nn_ops_for_AutoQuantize = {
 	.execute = autoquantize_execute_opt,
-	.check = autoquantize_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(1),
+	.n_outputs = NN_IOCOUNT(3),
 	// this is in the 'Quantize' class,  since we need that pass to run
 	// in prepare which checks for AutoQuantize(const).
 	.flags = NN_NODE_FLAG_CLS_QUANTIZE
@@ -1489,9 +1505,11 @@ struct nn_node_ops nn_ops_for_AutoQuantize = {
 
 struct nn_node_ops nn_ops_for_AutoQuantize_ref = {
 	.execute = autoquantize_execute,
-	.check = autoquantize_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(1),
+	.n_outputs = NN_IOCOUNT(3),
 };
 // AutoQuantize for d32
 // convert float to 8-bit quantized, using the actual
@@ -1512,9 +1530,11 @@ struct nn_node_ops nn_ops_for_AutoQuantize_ref = {
 //
 struct nn_node_ops nn_ops_for_AutoQuantize_d32 = {
 	.execute = autoquantize_d32_execute_opt,
-	.check = autoquantize_d32_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(1,5),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 
@@ -1527,17 +1547,22 @@ struct nn_node_ops nn_ops_for_AutoQuantize_d32 = {
 
 struct nn_node_ops nn_ops_for_Dequantize = {
 	.execute = dequantize_execute,
-	.check = dequantize_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(1),
+
 };
 
 
 struct nn_node_ops nn_ops_for_Dequantize_ref = {
 	.execute = dequantize_execute,
-	.check = dequantize_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 ///////////////////
@@ -1551,22 +1576,28 @@ struct nn_node_ops nn_ops_for_Dequantize_ref = {
 
 struct nn_node_ops nn_ops_for_Dequantize_qint32_f = {
 	.execute = dequantize_i32_execute,
-	.check = dequantize_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 struct nn_node_ops nn_ops_for_Quantize_int32 = {
 	.execute = quantize32_execute,
-	.check = quantize_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 };
 struct nn_node_ops nn_ops_for_Quantize_int32_ref = {
 	.execute = quantize32_execute,
-	.check = quantize_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 
@@ -1699,6 +1730,8 @@ struct nn_node_ops nn_ops_for_QuantizeINPUT_f_to_8 = {
 	.check = input_quantize_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_GE(0),
+	.n_outputs = NN_IOCOUNT_GE(0),
 };
 
 // output dequantize opt
@@ -1876,4 +1909,6 @@ struct nn_node_ops nn_ops_for_DequantizeOUTPUT_8tof = {
     .check = output_dequantize_check,
     .ctor = node_alloc_common,
     .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT_GE(0),
+    .n_outputs = NN_IOCOUNT_GE(0),
 };

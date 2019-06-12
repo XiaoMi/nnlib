@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -185,8 +185,11 @@ static inline int __attribute__((always_inline)) NAME( \
 	return 0; \
 }
 
-CREATE_ELEMENTWISE_INLINE(broadcast_elementwise_execute_f,float,float,NN_TYPE_FLOAT)
+#if 0	// no longer in use
+CREATE_ELEMENTWISE_INLINE(broadcast_elementwise_execute_f,float,float,NN_TYPE_QUINT8)
 CREATE_ELEMENTWISE_INLINE(broadcast_elementwise_execute_int32,int32_t,int32_t,NN_TYPE_INT32)
+#endif
+
 CREATE_ELEMENTWISE_INLINE(broadcast_elementwise_execute_qint32_quint8,uint8_t,int32_t,NN_TYPE_INT32)
 CREATE_ELEMENTWISE_INLINE(broadcast_elementwise_execute_quint8,uint8_t,uint8_t,NN_TYPE_QUINT8)
 
@@ -266,42 +269,38 @@ int nn_elementwise_with_broadcast(
 	struct nn_node *self,
 	struct nn_graph *nn,
 	struct elementwise_funcs const * functabp,
+	void * intermed_a,
+	void * intermed_b,
 	void *opaque);
 
 // use to make most "op_stride_11" functions
 // OPER is a function accepting two vars; can be a #define
-#define BROADCAST_STRIDE_11_FUNC( FNAME,DTYPE, OPER)\
+#define BROADCAST_STRIDE_11_FUNC( FNAME,DTYPE_IN, DTYPE_OUT, OPER)\
 static void FNAME( void *out, void const *in1, void const *in2, int n, void *opaque)\
 {\
-	DTYPE * op = (DTYPE*)out;\
-	DTYPE const * inp1 = (DTYPE const *)in1;\
-	DTYPE const * inp2 = (DTYPE const *)in2;\
-	if( n > 0){\
-		DTYPE s = OPER((*inp1++),(*inp2++));\
-		for(int i = 0; i < n-1; i++){\
-			*op++ = s;\
-			s = OPER((*inp1++),(*inp2++));\
-		}\
-		*op = s;\
-	}\
+	DTYPE_OUT * op = (DTYPE_OUT*)out;\
+	DTYPE_IN const * inp1 = (DTYPE_IN const *)in1;\
+	DTYPE_IN const * inp2 = (DTYPE_IN const *)in2;\
+	for( int i =0; i < n; i++) op[i] = OPER(inp1[i],inp2[i]);\
 }
 // use to make most op_stride_10 funcs
-#define BROADCAST_STRIDE_10_FUNC( FNAME, DTYPE, OPER)\
+#define BROADCAST_STRIDE_10_FUNC( FNAME, DTYPE_IN, DTYPE_OUT, OPER)\
 static void  FNAME( void *out, void const *in1, void const *in2, int n, void *opaque)\
 {\
-	DTYPE * op = (DTYPE*)out;\
-	DTYPE const * inp1 = (DTYPE const *)in1;\
-	DTYPE xin2 = *(DTYPE const *)in2;\
+	DTYPE_OUT * op = (DTYPE_OUT*)out;\
+	DTYPE_IN const * inp1 = (DTYPE_IN const *)in1;\
+	DTYPE_IN xin2 = *(DTYPE_IN const *)in2;\
 	for( int i =0; i < n; i++) op[i] = OPER(inp1[i],xin2);\
 }
 
 // use to make most op_rev_stride_10 funcs, where needed
-#define BROADCAST_REV_STRIDE_01_FUNC( FNAME, DTYPE, OPER)\
+#define BROADCAST_REV_STRIDE_01_FUNC( FNAME, DTYPE_IN, DTYPE_OUT, OPER)\
 static void  FNAME( void *out, void const *in1, void const *in2, int n, void *opaque)\
 {\
-	DTYPE * op = (DTYPE*)out;\
-	DTYPE const * inp1 = (DTYPE const *)in1;\
-	DTYPE xin2 = *(DTYPE const *)in2;\
+	DTYPE_OUT * op = (DTYPE_OUT*)out;\
+	DTYPE_IN const * inp1 = (DTYPE_IN const *)in1;\
+	DTYPE_IN xin2 = *(DTYPE_IN const *)in2;\
+	printf("HHHH\n");\
 	for( int i =0; i < n; i++) op[i] = OPER(xin2,inp1[i]) ;\
 }
 

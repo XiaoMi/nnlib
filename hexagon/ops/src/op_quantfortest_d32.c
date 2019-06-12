@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -286,26 +286,6 @@ static int quantfortest_execute(struct nn_node *self, struct nn_graph *nn)
 }
 
 
-static int quantfortest_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking quantfortest node %p",self);
-	int k = node_check_inputs_range( self, nn, "quantfortest", 1, -5);
-	if( k == 0 ){
-		k = node_check_outputs_range( self, nn, "quantfortest", 3, -4);
-	}
-	logmsg(nn,2,"quantfortest node %p OK",self);
-	return 0;
-}
-static int autoquant_d32_ref_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking autoquant_d32 node %p",self);
-	int k = node_check_inputs_range( self, nn, "autoquant_d32", 1, -5);
-	if( k == 0 ){
-		k = node_check_outputs_n( self, nn, "autoquant_d32", 3);
-	}
-	logmsg(nn,2,"autoquant_d32 node %p OK",self);
-	return 0;
-}
 //
 // QuantizeForTest:
 // convert float to 8-bit quantized, using the actual min and max
@@ -329,10 +309,12 @@ static int autoquant_d32_ref_check(struct nn_node *self, struct nn_graph *nn)
 
 struct nn_node_ops nn_ops_for_QuantizeForTest_d32 = {
 	.execute = quantfortest_execute,
-	.check = quantfortest_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
-	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
+	.n_inputs = NN_IOCOUNT_RANGE(1,5),
+	.n_outputs = NN_IOCOUNT_RANGE(3,4),
+	.flags =  NN_NODE_FLAG_D32_OUTPUT,
 };
 
 // The QuantizeForTest_d32 serves as 'reference' for
@@ -340,8 +322,10 @@ struct nn_node_ops nn_ops_for_QuantizeForTest_d32 = {
 
 struct nn_node_ops nn_ops_for_AutoQuantize_d32_ref = {
 	.execute = quantfortest_execute,
-	.check = autoquant_d32_ref_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
-	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
+	.n_inputs = NN_IOCOUNT_RANGE(1,5),
+	.n_outputs = NN_IOCOUNT(3),
+	.flags =  NN_NODE_FLAG_D32_OUTPUT,
 };

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -176,20 +176,13 @@ static int fullyconnected_execute(struct nn_node *self, struct nn_graph *nn)
     return 0;
 }
 
-static int fullyconnected_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking fully-connected node %p",self);
-	if (self->n_inputs  != 5) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"fully-connected node %p check OK",self);
-	return 0;
-}
-
 struct nn_node_ops nn_ops_for_FullyConnected_u8 = {
     .execute = fullyconnected_execute,
-    .check = fullyconnected_check,
+    .check = NULL,
     .ctor = node_alloc_common,
     .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT(5),
+    .n_outputs = NN_IOCOUNT(3),
 };
 
 #if 0
@@ -317,9 +310,7 @@ static int fc_layer_check(struct nn_node *self, struct nn_graph *nn)
 	int32_t biasbuf_size = biasbuf_elements * sizeof(int32_t);
 	int32_t in_batches = in_tensor->shape.batches;
 	logmsg(nn,2,"Checking fully-connected node %p",self);
-	if (self->n_inputs  != 11) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"fully-connected node %p check OK",self);
+
 	if (info == NULL) {
 		if ((info = nn_calloc(1,sizeof(*info))) == NULL) {
 			return errlog(nn,"calloc");
@@ -333,6 +324,7 @@ static int fc_layer_check(struct nn_node *self, struct nn_graph *nn)
 	}
 	/* Reserve space for minmax and GEMSUMA buffer for at least 128 batches */
 	nn_scratch_grow(nn,128*2+128*4);
+	logmsg(nn,2,"fully-connected node %p check OK",self);
 	return 0;
 }
 
@@ -352,6 +344,8 @@ struct nn_node_ops nn_ops_for_QuantizedFC_8x8p8to8 = {
 	.check = fc_layer_check,
 	.ctor = node_alloc_common,
 	.dtor = fc_dtor,
+	.n_inputs = NN_IOCOUNT(11),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedFC_8x8p8to8 = {
@@ -359,6 +353,8 @@ struct nn_node_ops nn_ops_for_QuantizedFC_8x8p8to8 = {
 	.check = fc_layer_check,
 	.ctor = node_alloc_common,
 	.dtor = fc_dtor,
+	.n_inputs = NN_IOCOUNT(11),
+	.n_outputs = NN_IOCOUNT(3),
 };
 #endif
 

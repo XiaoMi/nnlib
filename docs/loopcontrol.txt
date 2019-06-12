@@ -1,0 +1,165 @@
+
+Overview of mods for 'graph looping' (HEXNN-537)
+
+===================================
+new 'core' definitions in nn_graph.h
+====================================
+#define NN_MAX_LOOPSTACK 4		// max # of loop control nodes in graph
+
+struct nn_loopcounts {
+	uint32_t itercount;		    // no. of iterations, not including current
+	uint32_t prev_batches;	    // no. of batches previously generated in loop
+	uint32_t current_batches;	// no. of batches in current iterations
+	uint32_t total_batches;		// if prev + current >= total, this is last run.
+	uint32_t prev_outer_batches;	// previous batches in outer loops
+};
+typedef int (*nn_loopend_fp)( struct nn_graph *nn, struct nn_node *node, 
+			struct nn_loopcounts *counts, void *opaque);
+
+
+struct nn_loopstack_entry {
+	nn_loopend_fp loopend_function;
+	struct nn_node * nodep;
+	void *opaque;
+	struct nn_loopcounts counts;
+};
+
+struct nn_loopstack {
+	int n;
+	struct nn_loopstack_entry entries[NN_MAX_LOOPSTACK+1];
+};
+
+(inside struct nn_graph):
+
+	struct nn_loopstack loopstack;  // initially cleared
+
+// API to read the current loop state
+struct nn_loopcounts const * nn_loopstack_get_counts(struct nn_graph const *nn);
+uint32_t nn_loopstack_get_itercount(struct nn_graph const *nn);
+uint32_t nn_loopstack_get_prev_batches(struct nn_graph const *nn);
+
+// API to push a loop using default loopend_function
+// loop-control node .execute() must always call one of these two functions.
+// The total_batches can be an estimate; 
+//   if prev_batches + current_batches < total_batches, the LCN
+//   will be executed again, with prev_batches updated; if not,
+//   it will not be executed again.
+
+// push using standard loop-end function
+
+int nn_loopstack_push( struct nn_graph *nn, struct nn_node * self,
+	unsigned current_batches,
+	unsigned total_batches);
+	
+// API to push a loop using specified loopend_function
+int nn_loopstack_push_withfunc( struct nn_graph *nn,  struct nn_node * self,
+	unsigned current_batches,
+	unsigned total_batches,
+	nn_loopend_fp loopend_function,
+	void *opaque);
+
+===========================================
+Note:
+   - the loop stack is considered to have loopstack.n+1 of the 'struct nn_loopcounts',
+      the topmost of which is 'dummy' and set to zero. The remainder of the loopstack
+	  record (the function and node pointer) is only valid in the top loopstack.n.
+	  Exception: when a LCN execute() is called, the topmost loop count is the one
+	  pertaining to that loop (and it will thus be zero the first time that happens). When
+	  the LCN execute returns, the loop stack has been pushed and the (new) topmost
+	  loop record is dummy-zero.
+
+--> The nn_loopstack_push functions write pointers to the record at [loopstack.n]
+and bump the count; they do not clear the count in the newly generated
+'topmost' count. The counts are cleared at start of graph execution, and the loopend function
+is expected to clean up for the next invocation at the same level. This allows
+cumulative counts in inner loops to be carried across outer loop iterations.
+==========================================
+Before graph execution:
+
+ - clear loopstack.n (and the entire loopstack record).
+
+At the end of graph execution:
+
+while loop stack is not empty:
+	- 'pop' the stack (dropping the dummy loop count, and reading the function pointer)
+	- call the loopend function, with pointer to the node and to the count record below
+      - if the function returns <0: stop with error
+	  - if the function returns >0:
+		 graph execution goes back up to the node at 'nodep'.
+	  - if function returns 0, continue popping loop stack.
+
+The OUTPUT node uses 'prev_batches + prev_outer_batches' in the second 
+loopcounts struct from the top, to determine where in the output the
+result should go.
+==================================================
+// standard loop-end function
+//
+int 
+nn_loopend_default(struct nn_graph *nn, struct nn_node *node, 
+			struct nn_loopcounts *counts, void *opaque)
+{
+	uint32_t new_batches = counts->prev_batches + counts->current_batches;
+	if ( new_batches < counts->total_batches ){
+		counts->itercount ++;
+		counts->prev_batches = new_batches;
+		return 1;			// keep looping
+	}else{
+		counts->prev_outer_batches += new_batches;
+		counts->itercount = 0;
+		counts->prev_batches = 0;
+		return 0;				// done looping.
+	}
+}
+=====================================
+GRAPH STRUCTURE 
+=====================================
+We need four things:
+   (1) identify which nodes are 'loop control' modes. This will be done via a new flag
+       in the nn_node_ops.flags field.
+    (2) identify each non-const node's partition according to how many LCNs are upstream from it (i.e. which loop
+	    is it in). By 'A upstream from B' I mean, there is a path from A to B via tensors.
+		It is also required that each LCN is downstream from the previous one, and that the OUTPUT
+		node is downstream from the last LCN (i.e. is in the largest partition).
+		Each LCN is considered to be downstream from itself for the purpose of partitioning; i.e.
+		an LCN node will always be first node to bear any given partition number.
+    (3) When the partitions numbers are known, ideally, the sequence of non-const nodes is such that none are
+	    following another which is in a higher partition. If this is the case, we can do a 'stable sort' of the
+		nodes to produce the proper ordering.
+	(4) we need to identify all tensors which are consumed by any node in a higher partition that the one in which
+	    is generated. All of these tensors are to be provided as an input to a 'Sink' node which goes at the
+		end of the graph.
+		
+These operations must be done after optimize() and before prepare_inputs().
+
+Here is a method. The nodep->refs field is used to assign a partition index.
+
+ - init current_partn = 0
+ - init need_sort = 0.
+ - start at *nn->nonconst_head_ptr  to skip all the const nodes.
+ - allocate a fairly large array of "struct input" to keep the list of
+    tensors that cross boundaries (tensors_need_sink).
+ - for each non-const node 'nodep':
+ 
+	(1) shortcut: if current_partn==0 and *nodep is not a LCN, 
+	    set nodep->refs = 0 and continue.
+		
+	(2) check all of the non-const nodes which are inputs to the *nodep; let 'minpar' and 'maxpar' be the
+	    smallest and largest 'refs' field seen on any of those.
+        if the current node is not an LCN:
+			- set nodep->refs to maxpar. if this value is less than the 'refs' value set on the previous
+			   node visited, set need_sort = 1.
+			- if minpar <maxpar, then the node has at least one input which needs a sink. Traverse the inputs
+			  again, and any from a non-const node with a 'refs' < maxpar add to the tensors_need_sink.
+        else the node is an LCN
+		    - if maxpar != current_partn, the structure is incorrect, this is an error.
+		    - add 1 to current_partn, set nodep->refs to that value. Error if >NN_MAX_LOOPSTACK
+		    - Traverse the inputs; all inputs from non-const nodes are added to tensors_need_sink.
+
+	 - remember where the OUTPUT node was found; check at the to ensure its refs = current_partn.
+	 
+	if need_sort = 0 at the end, need to make a pass to sort the nodes, while keeping them in the same order
+	within partitions (this is not essential for correct operation, I think).
+
+        At the end, 'tensors_need_sink' is the set of 'struct input' that need to be connected to a Sink node,
+        and appended to the end. It is likely that there will be duplicate entries, so it would be good to try to
+        eliminate these, either during the process or at the end ('duplicate' meaning the same src_id and output_idx).

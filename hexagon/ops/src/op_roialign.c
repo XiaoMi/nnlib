@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -109,22 +109,6 @@ struct pooling_region {
 	uint8_t corner_weights[NUM_CORNERS];
 };
 
-//static int32_t max (int a, int32_t b) { return((a>b) ? a : b); }
-//static int32_t min (int32_t a, int32_t b) {return((a<b)?a:b);}
-static inline void logmsg_input(
-		struct nn_graph *nn,
-		int logval,
-		int index,
-		const struct tensor *tens) {
-	logmsg(nn,logval,"input %d: BHWD=%d,%d,%d,%d data %d bytes @ %p",
-	       index,
-	       tens->shape.batches,
-	       tens->shape.height,
-	       tens->shape.width,
-	       tens->shape.depth,
-	       tens->data_size,
-	       tens->data);
-}
 
 void pre_calc_for_bilinear_interpolate(
 		struct nn_graph *nn,
@@ -220,27 +204,6 @@ static int check_roishape(struct nn_graph *nn, const struct tensor* tens, int lo
 		res = -1;
 	}
 	return res;
-}
-
-static int roialign_check(struct nn_node *self, struct nn_graph *nn)
-{
-	int i;
-	logmsg(nn,2,"Checking roiaign node %p",self);
-	if (self->n_inputs != OP_ROIALIGN_NUM_INPUTS) return errlog(nn,"roialign wrong # inputs");
-	if (self->n_outputs != OP_ROIALIGN_NUM_OUTPUTS) return errlog(nn,"roialign wrong # outs");
-	for (i = 0; i < self->n_inputs; i++) {
-		if (self->inputs[i] == NULL) {
-			return errlog(nn,"roialign NULL input %d",i);
-		}
-		logmsg_input(nn,2,i,self->inputs[i]);
-	}
-	for (i = 0; i < self->n_outputs; i++) {
-		if (self->outputs[i] == NULL) {
-			return errlog(nn,"roialign NULL output %d",i);
-		}
-	}
-	logmsg(nn,2,"roialign node %p check OK",self);
-	return 0;
 }
 
 static void doRoiAlignBatch_ref(struct nn_graph *nn, int start_batch,int end_batch,
@@ -668,14 +631,18 @@ static int roialign_execute_hvx(struct nn_node *self, struct nn_graph *nn) {
 
 struct nn_node_ops nn_ops_for_QuantizedRoiAlign_8 = {
 		.execute = roialign_execute_hvx,
-		.check = roialign_check,
+		.check = NULL,
 		.ctor = node_alloc_common,
 		.dtor = node_free_common,
+		.n_inputs = NN_IOCOUNT(OP_ROIALIGN_NUM_INPUTS),
+		.n_outputs = NN_IOCOUNT(OP_ROIALIGN_NUM_OUTPUTS),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedRoiAlign_8_ref = {
 		.execute = roialign_execute_ref,
-		.check = roialign_check,
+		.check = NULL,
 		.ctor = node_alloc_common,
 		.dtor = node_free_common,
+		.n_inputs = NN_IOCOUNT(OP_ROIALIGN_NUM_INPUTS),
+		.n_outputs = NN_IOCOUNT(OP_ROIALIGN_NUM_OUTPUTS),
 };

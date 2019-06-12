@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -60,36 +60,22 @@ static int prod_i32_execute(struct nn_node *self, struct nn_graph *nn)
 	return nn_reduction_int32(self,nn,prod_helper_i32,1);
 }
 
-static int prod_f_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"prod node %p",self);
-	if (self->n_inputs > 3) return errlog(nn,"wrong # inputs");
-	if (self->n_inputs < 1) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"prod %p check OK",self);
-	return 0;
-}
 
-static int prod_i32_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"prod node %p",self);
-	if (self->n_inputs > 3) return errlog(nn,"wrong # inputs");
-	if (self->n_inputs < 1) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"prod %p check OK",self);
-	return 0;
-}
 
 struct nn_node_ops nn_ops_for_Prod_f = {
 	.execute = prod_f_execute,
-	.check = prod_f_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(1,3),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 struct nn_node_ops nn_ops_for_Prod_int32 = {
 	.execute = prod_i32_execute,
-	.check = prod_i32_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(1,3),
+	.n_outputs = NN_IOCOUNT(1),
 };

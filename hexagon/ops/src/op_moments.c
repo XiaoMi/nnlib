@@ -186,7 +186,7 @@ void set_output_range(struct nn_node *self) {
 	tensor_set_single_float(self->outputs[2], minval);
 	tensor_set_single_float(self->outputs[3], maxval);
 	float out_level_size = (maxval - minval) / 255;
-	float out_max = 2147483648.0f/*0x1.0p31f*/ * out_level_size;
+	float out_max = 2147483648.0f/*0x1.0p31f*/ * out_level_size * out_level_size;
 	float out_min = -out_max;
 	tensor_set_single_float(self->outputs[4], out_min);
 	tensor_set_single_float(self->outputs[5], out_max);
@@ -590,20 +590,100 @@ static int moments_execute(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-static int moments_check(struct nn_node *self, struct nn_graph *nn)
-{
-	int k;
-	logmsg(nn, 2, "moments node %p", self);
-	k = node_check_inputs_outputs_n(self, nn, "reducing sum", 4, 6);
-	if (k != 0) return k;
+static int moments_execute_f(struct nn_node *self, struct nn_graph *nn) {
+	const struct tensor *in_tensor = self->inputs[0];
+	const struct tensor *axes_tensor = self->inputs[1];
+	struct tensor *out_m_tensor = self->outputs[0];
+	struct tensor *out_v_tensor = self->outputs[1];
 
-	logmsg(nn, 2, "moments %p check OK", self);
+	int32_t in_batches = in_tensor->shape.batches;
+	int32_t in_height = in_tensor->shape.height;
+	int32_t in_width = in_tensor->shape.width;
+	int32_t in_depth = in_tensor->shape.depth;
+	int32_t elemcount = in_batches * in_height * in_width * in_depth;
+
+	int32_t rflag = check_buffer(in_tensor, axes_tensor, out_m_tensor, out_v_tensor);
+	if (rflag < 0) {
+		return errlog(nn, "Output tensor does NOT match expected output tensor size. Or input axis error!!!");
+	}
+
+	if (tensor_out_prepare_normal_fromshape(out_m_tensor, &out_m_tensor->shape, NN_TYPE_FLOAT) != 0 ||
+		tensor_out_prepare_normal_fromshape(out_v_tensor, &out_v_tensor->shape, NN_TYPE_FLOAT) != 0
+		)
+	{
+		return errlog(nn, "out too small");
+	}
+
+	int32_t rdims[5] = { 0 };
+	rflag2rdim(rflag, rdims, &in_tensor->shape);
+
+	int32_t n_out = rdims[0];
+	int32_t r_out = rdims[1];
+	int32_t n_in = rdims[2];
+	int32_t r_in = rdims[3];
+	int32_t n_vec = rdims[4];
+	float *in = in_tensor->data;
+	float *outm = out_m_tensor->data;
+	float *outv = out_v_tensor->data;
+	if (r_in == 1) { /* no reduction, copy */
+		memcpy(outm, in, elemcount*sizeof(in[0]));
+		for (int32_t i = 0; i < elemcount; i++)
+			outv[i] = 0.0f;
+	}
+	else if (n_vec == 1) {
+		for (int32_t i_out = 0; i_out < n_out; i_out++) {
+			for (int32_t i_in = 0; i_in < n_in; i_in++) {
+				float sum = 0.0f;
+				float sum2 = 0.0f;
+				for (int32_t ir_out = 0; ir_out < r_out; ir_out++) {
+					const float* inp = in + i_in * r_in + ir_out * (r_in*n_in) + i_out * (r_in*n_in*r_out);
+					for (int32_t i = 0;i < r_in; i ++) {
+						sum += inp[i];
+						sum2 += inp[i] * inp[i];
+					}
+				}
+				float out_mean = sum / (r_out*r_in);
+				*outm++ = out_mean;
+				*outv++ = sum2 / (r_out*r_in) - out_mean * out_mean;
+			}
+		}
+	}
+	else {
+		for (int32_t i_in = 0; i_in < n_in; i_in++) {
+			for (int32_t ivec = 0; ivec < n_vec; ivec++) {
+				float sum = 0.0f;
+				float sum2 = 0.0f;
+				for (int32_t ir_out = 0; ir_out < r_out; ir_out++) {
+					const float* inp = in + ivec + i_in * (r_in*n_vec) + ir_out * (n_in*r_in*n_vec);
+					for (int32_t i = 0;i < r_in; i++) {
+						sum += inp[i*n_vec];
+						sum2 += inp[i*n_vec] * inp[i*n_vec];
+					}
+				}
+				float out_mean = sum / (r_out*r_in);
+				*outm++ = out_mean;
+				*outv++ = sum2 / (r_out*r_in) - out_mean * out_mean;
+			}
+		}
+	}
+
 	return 0;
 }
 
 struct nn_node_ops nn_ops_for_Moments_8to32 = {
 		.execute = moments_execute,
-		.check = moments_check,
+		.check = NULL,
 		.ctor = node_alloc_common,
 		.dtor = node_free_common,
+		.n_inputs = NN_IOCOUNT(4),
+		.n_outputs = NN_IOCOUNT(6),
+};
+
+struct nn_node_ops nn_ops_for_Moments_f = {
+		.execute = moments_execute_f,
+		.check = NULL,
+		.ctor = node_alloc_common,
+		.dtor = node_free_common,
+		.n_inputs = NN_IOCOUNT(2),
+		.n_outputs = NN_IOCOUNT(2),
 };

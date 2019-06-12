@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -786,8 +786,8 @@ static int instancenormbg_hvx_execute_wrapper(struct nn_node *self, struct nn_gr
 
 static int instancenormbg_hvx_check(struct nn_node *self, struct nn_graph *nn)
 {
-        if (self->n_inputs !=10) return errlog(nn,"wrong # inputs there are %d should be 10", self->n_inputs);
-        if (self->n_outputs != 3) return errlog(nn,"wrong # outputs there are %d should be 3", self->n_inputs);
+        //if (self->n_inputs !=10) return errlog(nn,"wrong # inputs there are %d should be 10", self->n_inputs);
+        //if (self->n_outputs != 3) return errlog(nn,"wrong # outputs there are %d should be 3", self->n_inputs);
 
         struct instancenormbg_info *info;
         if ((info = nn_calloc(1,sizeof(*info))) == NULL) {
@@ -859,9 +859,8 @@ static int instancenormbg_hvx_check(struct nn_node *self, struct nn_graph *nn)
 
 static int instancenormbg_ref_check(struct nn_node *self, struct nn_graph *nn)
 {
-	if (self->n_inputs !=10) return errlog(nn,"wrong # inputs");
-	//if (self->n_inputs !=3) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
+	//if (self->n_inputs !=10) return errlog(nn,"wrong # inputs");
+	//if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
 
         struct instancenormbg_info *info;
         if ((info = nn_calloc(1,sizeof(*info))) == NULL) {
@@ -955,6 +954,8 @@ struct nn_node_ops nn_ops_for_QuantizedInstanceNormBG_8_ref = {
 	.check = instancenormbg_ref_check,
 	.ctor = node_alloc_common,
         .dtor = instancenormbg_ref_dtor,
+        .n_inputs = NN_IOCOUNT(10),
+        .n_outputs = NN_IOCOUNT(3),
         .flags = NN_NODE_FLAG_D32_OUTPUT,
 };
 struct nn_node_ops nn_ops_for_QuantizedInstanceNormBG_8 = {
@@ -962,6 +963,8 @@ struct nn_node_ops nn_ops_for_QuantizedInstanceNormBG_8 = {
 	.check = instancenormbg_hvx_check,
 	.ctor = node_alloc_common,
         .dtor = instancenormbg_hvx_dtor,
+        .n_inputs = NN_IOCOUNT(10),
+        .n_outputs = NN_IOCOUNT(3),
         .flags = NN_NODE_FLAG_D32_OUTPUT,
 };
 struct nn_node_ops nn_ops_for_QuantizedInstanceNormBG_8_d32 = {
@@ -969,6 +972,8 @@ struct nn_node_ops nn_ops_for_QuantizedInstanceNormBG_8_d32 = {
 	.check = instancenormbg_hvx_check,
 	.ctor = node_alloc_common,
         .dtor = instancenormbg_hvx_dtor,
+        .n_inputs = NN_IOCOUNT(10),
+        .n_outputs = NN_IOCOUNT(3),
         .flags = NN_NODE_FLAG_D32_OUTPUT,
 };
 struct nn_node_ops nn_ops_for_QuantizedInstanceNormBG_8_d32_ref = {
@@ -976,6 +981,8 @@ struct nn_node_ops nn_ops_for_QuantizedInstanceNormBG_8_d32_ref = {
 	.check = instancenormbg_ref_check,
 	.ctor = node_alloc_common,
         .dtor = instancenormbg_ref_dtor,
+        .n_inputs = NN_IOCOUNT(10),
+        .n_outputs = NN_IOCOUNT(3),
         .flags = NN_NODE_FLAG_D32_OUTPUT,
 };
 struct nn_node_ops nn_ops_for_QuantizedInstanceNormBG_f = {
@@ -983,5 +990,7 @@ struct nn_node_ops nn_ops_for_QuantizedInstanceNormBG_f = {
 	.check = instancenormbg_ref_check,
 	.ctor = node_alloc_common,
         .dtor = instancenormbg_ref_dtor,
+        .n_inputs = NN_IOCOUNT(10),
+        .n_outputs = NN_IOCOUNT(3),
         .flags = NN_NODE_FLAG_D32_OUTPUT,
 };

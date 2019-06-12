@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -63,6 +63,7 @@ void nn_os_vector_workers_release(struct nn_graph *nn);
 int nn_os_vector_call(struct nn_graph *nn, int (*f)(struct nn_graph *, void *),void *arg);
 
 int nn_os_vtcm_choose_size(struct nn_graph *nn);
+int nn_os_vtcm_query_page_count(struct nn_graph *nn);
 int nn_os_vtcm_acquire(struct nn_graph *nn);
 int nn_os_vtcm_release(struct nn_graph *nn);
 

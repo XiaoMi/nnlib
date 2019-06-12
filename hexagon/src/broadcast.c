@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -221,17 +221,33 @@ int nn_check_prepare_hvx_opt(
 //    - IMPORTANT: the 'opaque' pointer must point to a struct with a pointer as its first member. This is where the
 //      intermediate buffer address is returned.
 //
-
+static void broadcast_work_for_hvx( struct nn_graph * nn, void * rstpv);
+typedef void (*inner_loop_funcp)( void *out, void const *in1, void const *in2, int n, void *opaque);
+struct bcast_runstate
+{
+	uint8_t const * inp_a;
+	uint8_t const * inp_b;
+	uint8_t * outp;
+	unsigned effective_dim[4];
+	unsigned effective_stride_a[4];
+	unsigned effective_stride_b[4];
+	unsigned in_elbytes, out_elbytes;
+	void *opaque;
+	inner_loop_funcp inner_loop_hvx_fp;
+	nn_sem_t done_sem;
+};
 int nn_elementwise_with_broadcast(
 	struct nn_node *self,
 	struct nn_graph *nn,
 	struct elementwise_funcs const * functabp,
+	void *intermed_a,
+	void *intermed_b,
 	void *opaque)
 {
 	const struct tensor *a_tensor = self->inputs[0];
 	const struct tensor *b_tensor = self->inputs[1];
 	struct tensor *out_tensor;
-	void (* inner_loop_fp)( void *out, void const *in1, void const *in2, int n, void *opaque);
+	inner_loop_funcp inner_loop_fp, inner_loop_hvx_fp;
 	struct shape outshape;
 	int err = 0;
 
@@ -285,7 +301,25 @@ int nn_elementwise_with_broadcast(
 	if( outp == NULL) return errlog(nn,"broadcast: no output address!");
 
 	uint8_t const *inp_a = (uint8_t*) a_tensor->data;
+	if (intermed_a != NULL){
+		inp_a = (uint8_t *) intermed_a;
+	}
 	uint8_t const *inp_b = (uint8_t*) b_tensor->data;
+	if (intermed_b != NULL){
+		inp_b = (uint8_t *) intermed_b;
+	}
+
+	struct bcast_runstate rst = {
+			.inp_a = inp_a,  // a & b may get reversed, below...
+			.inp_b = inp_b,
+			.outp = outp,
+			.effective_dim = { 1,1,1,1},
+			.effective_stride_a = {0,0,0,0},
+			.effective_stride_b = {0,0,0,0},
+			.opaque = opaque,
+			.out_elbytes = out_elbytes,
+			.in_elbytes = functabp->in_elbytes
+	};
 
 	// deal with common special cases, that can each be done with a single call:
 	//  a_one == b_one: shapes are identical
@@ -294,13 +328,26 @@ int nn_elementwise_with_broadcast(
 	if( a_one == b_one || max_i32(a_one, b_one) == 0xF){
 		if( a_one == b_one){
 			inner_loop_fp = functabp->op_stride_11;
+			inner_loop_hvx_fp = functabp->op_hvx_stride_11;
 		}else if( b_one == 0xF){	// broadcast b->a
 			inner_loop_fp = functabp->op_stride_10;
+			inner_loop_hvx_fp = functabp->op_hvx_stride_10;
 		}else{
 			inner_loop_fp = functabp->op_rev_stride_01;
+			inner_loop_hvx_fp = functabp->op_hvx_rev_stride_01;
 			uint8_t const * tmp = inp_a; inp_a = inp_b; inp_b = tmp;
+			rst.inp_a = inp_a;
+			rst.inp_b = inp_b;
 		}
-		(*inner_loop_fp)( outp, inp_a, inp_b, n_all, opaque);
+		if( inner_loop_hvx_fp != NULL && n_all >= functabp->minlen_hvx ){
+			rst.inner_loop_hvx_fp = inner_loop_hvx_fp;
+			rst.effective_dim[0] = n_all;
+			nn_sem_init(&rst.done_sem,0);
+			nn_os_work_for_vector( nn,broadcast_work_for_hvx, &rst);
+			nn_sem_wait(&rst.done_sem);
+		}else{
+			(*inner_loop_fp)( outp, inp_a, inp_b, n_all, opaque);
+		}
 		return 0;
 	}
 	//
@@ -329,9 +376,6 @@ int nn_elementwise_with_broadcast(
 	// and then each 'inner loop' becomes a function call.
 	//
 	//
-	unsigned effective_dim[4] = { 1,1,1,1};
-	unsigned effective_stride_a[4] = {0,0,0,0};
-	unsigned effective_stride_b[4] = {0,0,0,0};
 	unsigned a_strideacc = 1;
 	unsigned b_strideacc = 1;
 	int eff_loopn = 0;			// number of actual loops identified so far
@@ -349,6 +393,8 @@ int nn_elementwise_with_broadcast(
 		unsigned t = a_one; a_one = b_one; b_one = t;
 		uint8_t const * tp = inp_a; inp_a = inp_b; inp_b = tp;
 		a_b_reverse = 1;
+		rst.inp_a = inp_a;
+		rst.inp_b = inp_b;
 	}
 
 	// 'mode' for each dimension coded as:
@@ -367,11 +413,11 @@ int nn_elementwise_with_broadcast(
 		unsigned size = outshape.dimension[dimn];
 		if (new_mode != 0){
 			if( new_mode == prev_mode){		// no change in mode...
-				effective_dim[eff_loopn-1] *= size;	// glom it onto previous loop.
+				rst.effective_dim[eff_loopn-1] *= size;	// glom it onto previous loop.
 			}else{	// add a loop level
-				effective_dim[ eff_loopn] = size;
-				effective_stride_a[eff_loopn] = (a_one&m)? 0 : a_strideacc;
-				effective_stride_b[eff_loopn] = (b_one&m)? 0 : b_strideacc;
+				rst.effective_dim[ eff_loopn] = size;
+				rst.effective_stride_a[eff_loopn] = (a_one&m)? 0 : a_strideacc;
+				rst.effective_stride_b[eff_loopn] = (b_one&m)? 0 : b_strideacc;
 				eff_loopn++;
 				prev_mode = new_mode;
 			}
@@ -400,50 +446,117 @@ int nn_elementwise_with_broadcast(
 	// And the inner loop (first one) should have effective_dim > 1.
 	// The inner loop's A_stride must be 1. (broadcast from A should have been flipped).
 	// The B stride should be 0 or 1.
-	if( eff_loopn <2  || effective_dim[0] < 2 || effective_stride_a[0] != 1 || effective_stride_b[0] >= 2)
+	if( eff_loopn <2  || rst.effective_dim[0] < 2 || rst.effective_stride_a[0] != 1 || rst.effective_stride_b[0] >= 2)
 		return errlog(nn,"loop analysis failure");
 	// figure out what function to use based on the inner loop
-	if( effective_stride_b[0] == 0 ){
-		inner_loop_fp = a_b_reverse? functabp->op_rev_stride_01: functabp->op_stride_10;
+	int bcast_inner = 0;
+	if( rst.effective_stride_b[0] == 0 ){
+		bcast_inner = 1;
+		if(a_b_reverse){
+			inner_loop_fp = functabp->op_rev_stride_01;
+			inner_loop_hvx_fp = functabp->op_hvx_rev_stride_01;
+		}else{
+			inner_loop_fp = functabp->op_stride_10;
+			inner_loop_hvx_fp = functabp->op_hvx_stride_10;
+		}
 	}else{
 		inner_loop_fp = functabp->op_stride_11;	// full elementwise inner loop.
+		inner_loop_hvx_fp = functabp->op_hvx_stride_11;	// full elementwise inner loop.
 	}
 
 
-
-	int inner_n = effective_dim[0];
-	int out_bump = inner_n * out_elbytes;
-
 	unsigned in_elbytes = functabp->in_elbytes;
+	int inner_n = rst.effective_dim[0];
+	int use_hvx = 0;
+	if( inner_loop_hvx_fp != NULL 	// can maybe use hvx?
+		&& inner_n >= functabp->minlen_hvx ){	// big enough chunks?
+		rst.inner_loop_hvx_fp = inner_loop_hvx_fp;
+		use_hvx = 1;
+		if( functabp->hvx_need_align ){  // pointers must be aligned.
+			use_hvx = 0;			// need to insert checking for this.
+		}
+	}
 
-	effective_stride_a[3] *= in_elbytes;
-	effective_stride_b[3] *= in_elbytes;
+	// multiply the input strides by in_elbytes
+	if(in_elbytes > 1){
+		rst.effective_stride_a[3] *= in_elbytes;
+		rst.effective_stride_b[3] *= in_elbytes;
+		rst.effective_stride_a[2] *= in_elbytes;
+		rst.effective_stride_b[2] *= in_elbytes;
+		rst.effective_stride_a[1] *= in_elbytes;
+		rst.effective_stride_b[1] *= in_elbytes;
+	}
+	// if using hvx, spawn that loop instead
+	if( use_hvx){
+		nn_sem_init(&rst.done_sem,0);
+		nn_os_work_for_vector( nn,broadcast_work_for_hvx, &rst);
+		nn_sem_wait(&rst.done_sem);
+	}else{
+		int out_bump = inner_n * out_elbytes;
+		int n1 = rst.effective_dim[1];
+		int n2 = rst.effective_dim[2];
+		int a_stride1 = rst.effective_stride_a[1];
+		int a_stride2 = rst.effective_stride_a[2];
+		int b_stride1 = rst.effective_stride_b[1];
+		int b_stride2 = rst.effective_stride_b[2];
 
-	int a_stride1 = effective_stride_a[1] * in_elbytes;
-	int a_stride2 = effective_stride_a[2] * in_elbytes;
-	int b_stride1 = effective_stride_b[1] * in_elbytes;
-	int b_stride2 = effective_stride_b[2] * in_elbytes;
-	int n1 = effective_dim[1];
-	int n2 = effective_dim[2];
+		// in most cases the outer loop (or two loops) will run only once.
 
+		for( int i3 = 0; i3 < rst.effective_dim[3]; i3++ ){
+			uint8_t const * aptr0 = inp_a + i3 * rst.effective_stride_a[3];
+			uint8_t const * bptr0 = inp_b + i3 * rst.effective_stride_b[3];
+
+			for( int i2 = 0; i2 < n2; i2++){
+				for( int i1 = 0; i1 < n1; i1++){
+					uint8_t const * in_a = aptr0 + a_stride1 * i1 + a_stride2 * i2;
+					uint8_t const * in_b = bptr0 + b_stride1 * i1 + b_stride2 * i2;
+					(*inner_loop_fp)( outp, in_a, in_b, inner_n, opaque);
+					outp += out_bump;
+				}
+			}
+		}
+	}
+	return 0;
+}
+
+// work function for hvx
+// does the same thing as the scalar loop, but in an hvx thread, using
+// the hvx inner_loop_fp.
+//
+static void
+broadcast_work_for_hvx( struct nn_graph * nn, void * rstpv)
+{
+	struct bcast_runstate *rstp= (struct bcast_runstate*)rstpv;
+	int a_stride1 = rstp->effective_stride_a[1];
+	int a_stride2 = rstp->effective_stride_a[2];
+	int b_stride1 = rstp->effective_stride_b[1];
+	int b_stride2 = rstp->effective_stride_b[2];
+
+	int inner_n = rstp->effective_dim[0];
+	int out_bump = inner_n * rstp->out_elbytes;
+	int n1 = rstp->effective_dim[1];
+	int n2 = rstp->effective_dim[2];
+	uint8_t * outp = rstp->outp;
+	inner_loop_funcp inner_loop_hvx_fp = rstp->inner_loop_hvx_fp;
+	void * opaque = rstp->opaque;
 	// in most cases the outer loop (or two loops) will run only once.
 
-	for( int i3 = 0; i3 < effective_dim[3]; i3++ ){
-		uint8_t const * aptr0 = inp_a + i3 * effective_stride_a[3];
-		uint8_t const * bptr0 = inp_b + i3 * effective_stride_b[3];
+	for( int i3 = 0; i3 < rstp->effective_dim[3]; i3++ ){
+		uint8_t const * aptr0 = rstp->inp_a + i3 * rstp->effective_stride_a[3];
+		uint8_t const * bptr0 = rstp->inp_b + i3 * rstp->effective_stride_b[3];
 
 		for( int i2 = 0; i2 < n2; i2++){
 			for( int i1 = 0; i1 < n1; i1++){
 				uint8_t const * in_a = aptr0 + a_stride1 * i1 + a_stride2 * i2;
 				uint8_t const * in_b = bptr0 + b_stride1 * i1 + b_stride2 * i2;
-				(*inner_loop_fp)( outp, in_a, in_b, inner_n, opaque);
+				(*inner_loop_hvx_fp)( outp, in_a, in_b, inner_n, opaque);
 				outp += out_bump;
 			}
 		}
 	}
-
-	return 0;
+	nn_sem_post( &rstp->done_sem);
 }
+
 
 #endif
 

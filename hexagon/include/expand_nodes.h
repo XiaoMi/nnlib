@@ -40,5 +40,8 @@
 
 int expand_transpose_conv_nodes(struct nn_graph *nn, struct nn_node **transpose_conv_node_p);
 int expand_grouped_conv_nodes(struct nn_graph *nn, struct nn_node **grouped_conv_node_p);
+int expand_dilated_conv_nodes(struct nn_graph *nn, struct nn_node **grouped_conv_node_p);
+
+int expand_transpose_conv16_nodes(struct nn_graph *nn, struct nn_node **transpose_conv_node_p);
 
 #endif //NN_GRAPH_EXPAND_NODES_H

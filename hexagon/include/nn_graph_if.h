@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -83,12 +83,15 @@ struct initinfo {
 int hexagon_nn_get_dsp_offset(uint32_t *libhexagon_addr, uint32_t *fastrpc_shell_addr);
 int hexagon_nn_version(int *ver);
 int hexagon_nn_last_execution_cycles(nn_id_t id, unsigned int *cycles_lo, unsigned int *cycles_hi);
+int hexagon_nn_multi_execution_cycles(nn_id_t id, unsigned int *cycles_lo, unsigned int *cycles_hi);
 int hexagon_nn_init(hexagon_nn_nn_id *g);
 int hexagon_nn_config();
+int hexagon_nn_get_power(int type);
 int hexagon_nn_snpprint(nn_id_t id, unsigned char *buf, uint32_t length);
 int hexagon_nn_getlog(nn_id_t id, unsigned char *buf, uint32_t length);
 int hexagon_nn_set_debug_level(nn_id_t id, int level);
 int print_node_perf(nn_id_t id);
+int hexagon_nn_get_power(int type);
 
 struct almost_a_tensor ;
 
@@ -202,5 +205,7 @@ int hexagon_nn_op_name_to_id(const char *name, unsigned int *id);
 int hexagon_nn_op_id_to_name(const unsigned int id, char *name, int name_len);
 int hexagon_nn_set_powersave_level(unsigned int level);
 int hexagon_nn_set_powersave_details(hexagon_nn_corner_type corner, hexagon_nn_dcvs_type dcvs, unsigned int latency);
+
+int hexagon_nn_set_graph_option( nn_id_t id, char const *opname, int value);
 
 #endif

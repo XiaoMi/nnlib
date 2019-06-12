@@ -7,15 +7,17 @@ Try the "calculator" or other examples in the SDK to make sure you can execute o
 
 2) Build the Hexagon NN dynamic library
 
-  For SD820: make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv82_v60
-  For SD660: make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv82_v60
-  For SD835: make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv82_v60
-  For SD845: (best performance): make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv82_v65 V65=1
-  For SD845: (Don't use V65 code): make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv82_v65
-  For SD670: (best performance): make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv82_v65 V65=1
-  For SD670: (Don't use V65 code): make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv82_v65
-  For SD855: make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv82_v66 V66=1
-  For SD855: (Don't use V66 code): make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv82_v66
+  Note: For Hexagon SDK 3.4.0 and 3.4.1, please use toolv82 instead of toolv83 in all build instructions below.
+
+  For SD820: make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v60
+  For SD660: make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v60
+  For SD835: make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v60
+  For SD845: (best performance): make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v65 V65=1
+  For SD845: (Don't use V65 code): make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v65
+  For SD670: (best performance): make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v65 V65=1
+  For SD670: (Don't use V65 code): make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v65
+  For SD855: make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v66 V66=1
+  For SD855: (Don't use V66 code): make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v66
 
 3) Build the Hexagon NN test app
 
@@ -33,7 +35,7 @@ Try the "calculator" or other examples in the SDK to make sure you can execute o
    or
    adb push android_Release_aarch64/ship/graph_app /data
 
-6) adb push hexagon_Release_dynamic_toolv82_v60/ship/libhexagon_nn_skel.so /system/vendor/lib/rfsa/adsp/
+6) adb push hexagon_Release_dynamic_toolv83_v60/ship/libhexagon_nn_skel.so /system/vendor/lib/rfsa/adsp/
 	 (Replace with the actual V= path that gets created from the appropriate option from above)
 
 7) adb shell /data/graph_app --help for info

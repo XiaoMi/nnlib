@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -344,60 +344,25 @@ static int maxpool_execute_asm(struct nn_node *self, struct nn_graph *nn)
 	return maxpool_execute(self,nn,maxpool_execute_slice_asm);
 }
 
-static inline void logmsg_input(
-	struct nn_graph *nn,
-	int logval,
-	int index,
-	const struct tensor *tens)
-{
-	logmsg(nn,logval,"input %d: BHWD=%d,%d,%d,%d data %d bytes @ %p",
-		index,
-		tens->shape.batches,
-		tens->shape.height,
-		tens->shape.width,
-		tens->shape.depth,
-		tens->data_size,
-		tens->data);
-}
-
-static int maxpool_check(struct nn_node *self, struct nn_graph *nn)
-{
-	int i;
-	logmsg(nn,2,"Checking maxpool node %p",self);
-	if (self->n_inputs != 5) return errlog(nn,"maxpool wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"maxpool wrong # outs");
-	logmsg(nn,3,"conv2d node %p inputs: "
-		"[in, min_in, max_in, window, stride]:",
-		self);
-	for (i = 0; i < self->n_inputs; i++) {
-		if (self->inputs[i] == NULL) {
-			return errlog(nn,"maxpool NULL input %d",i);
-		}
-		logmsg_input(nn,3,i,self->inputs[i]);
-	}
-	for (i = 0; i < self->n_outputs; i++) {
-		if (self->outputs[i] == NULL) {
-			return errlog(nn,"maxpool NULL output %d",i);
-		}
-	}
-	logmsg(nn,2,"maxpool node %p check OK",self);
-	return 0;
-}
 
 struct nn_node_ops nn_ops_for_QuantizedMaxPool_8 = {
 	.execute = maxpool_execute_asm,
-	.check = maxpool_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
 	.flags = NN_NODE_FLAG_OUTPUT_USES_INPUT_RANGE,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedMaxPool_8_ref = {
 	.execute = maxpool_execute_ref,
-	.check = maxpool_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
 	.flags = NN_NODE_FLAG_OUTPUT_USES_INPUT_RANGE,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 

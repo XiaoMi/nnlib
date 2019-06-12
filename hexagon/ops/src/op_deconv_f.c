@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -183,20 +183,13 @@ static int deconv_f_execute_ref(struct nn_node *self, struct nn_graph *nn)
 }
 
 
-static int deconv_check_ref(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking deconv node %p",self);
-	if (self->n_inputs != 3) return errlog(nn,"deconv id %x wrong # inputs",self->node_id);
-	if (self->n_outputs != 1) return errlog(nn,"deconv wrong # outputs");
-	logmsg(nn,2,"deconv node %p check OK",self);
-	return 0;
-}
-
 struct nn_node_ops nn_ops_for_Deconv_f = {
 	.execute = deconv_f_execute_ref,
-	.check = deconv_check_ref,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 

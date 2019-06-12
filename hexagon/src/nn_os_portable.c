@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -101,11 +101,12 @@ void nn_mutex_lock_slowpath(nn_mutex_t *mutex)
 		/* change lock to "maybe waiters".  If was 0, we're owner */
 		old = mutex->raw;
 		if ((nn_atomic_casu32(&mutex->raw,old,2)) == old) {
+			/* Successfully updated mutex to 2 (waiters) */
 			if (old == 0) return;
-			else continue;
-		}
-		/* go to sleep until it changes */
-		nn_futex_wait(&mutex->as_futex,2);
+			/* Else successfully set to two, wait for change */
+			nn_futex_wait(&mutex->as_futex,2);
+		} 
+		/* Else, atomic update failed, try again */
 	}
 }
 
@@ -114,9 +115,10 @@ void nn_mutex_unlock_slowpath(nn_mutex_t *mutex)
 	uint32_t old = mutex->raw;
 	/* Swap 0 into lock */
 	if (nn_atomic_casu32(&mutex->raw,old,0) != old) {
+		/* Oops! atomic update failed, try again */
 		return nn_mutex_unlock_slowpath(mutex);
 	}
-	/* If old value 1, done */
+	/* If old value 1 (or somehow unlocked already...), done */
 	if (old < 2) return;
 	/* Else, nn_futex_wake(mutex,1); */
 	nn_futex_wake(&mutex->as_futex,1);

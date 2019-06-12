@@ -34,6 +34,8 @@
  *
  */
 
+#define GROUPEDCONV_MAX_GROUPS 1024 
+
 #include "expand_nodes.h"
 #include "nn_prepare.h"
 #include "data_utils.h"
@@ -48,8 +50,8 @@ int expand_grouped_conv_nodes(struct nn_graph *nn, struct nn_node **grouped_conv
     /* find the preceeding node */
     uint32_t src_id = grouped_conv_node->input_refs[0].src_id;
     struct nn_node *producer;
-    if((producer = find_node(nn, src_id)) == NULL)
-        return errlog(nn, "Cannot find src_id for GroupedConv2d");
+    if(NULL == (producer = find_node(nn, src_id)))
+        return errlog(nn, "Cannot find parent node for OP_QuantizedGroupedConv2d_8x8p32to8!");
 
     /* get node for num_groups */
     uint32_t num_groups_nid = grouped_conv_node->input_refs[10].src_id;
@@ -57,45 +59,133 @@ int expand_grouped_conv_nodes(struct nn_graph *nn, struct nn_node **grouped_conv
     uint32_t num_groups = tensor_get_int32(num_groups_node->outputs[0], 0);
 
     /* some constant properties for convenience */
-    const struct shape *constant_shape = &num_groups_node->outputs[0]->shape;
     const int split_num_outputs = num_groups+2;
     const int concat_num_inputs = 3*num_groups+1;
-    const int num_new_nodes = 1 + 3*num_groups + 1; // split, G x (conv>biasadd>shrink), concat
+    uint32_t has_channel_scale = (grouped_conv_node->n_inputs == 14) ? 1 : 0;
+    uint32_t num_core_nodes = 4;
+
+    const int num_new_nodes = 1 + num_core_nodes*num_groups + 1; // split, G x (conv>(maybe) channel scale>biasadd>requant), concat
 
     /* add node for split dimension */
-    uint32_t split_dim = 3;
-    uint32_t split_dim_nid = create_const_int32_op(nn, split_dim); 
+    const uint32_t split_dim = 3;
+    const uint32_t split_dim_nid = create_const_int32_op(nn, split_dim); 
 
-    /* Pre-split the filter and bias and add const nodes */
-    const struct tensor *filter_tensor = grouped_conv_node->inputs[1];
-    const struct tensor *bias_tensor = grouped_conv_node->inputs[2];
-    uint32_t filter_split_height = filter_tensor->shape.filt_height * filter_tensor->shape.filt_width;
-    uint32_t bias_split_height = 1;
-    if (filter_tensor->data_size % num_groups != 0 || bias_tensor->data_size % num_groups != 0)
-        return errlog(nn, "Weights and biases must both be divisible by groups");
-    uint32_t filter_split_size = filter_tensor->data_size / num_groups;
-    uint32_t bias_split_size = bias_tensor->data_size / num_groups;
-    uint8_t *filter_splits = (uint8_t *) nn_memalign(sizeof(HVX_Vector), filter_tensor->data_size);
-    uint8_t *bias_splits = (uint8_t *) nn_memalign(sizeof(HVX_Vector), bias_tensor->data_size);
-    if( split_data(filter_tensor->data, filter_splits, filter_split_height, filter_tensor->shape.filt_depth, filter_tensor->shape.filt_batches, num_groups, 2) &
-        split_data(bias_tensor->data, bias_splits, bias_split_height, bias_tensor->shape.width, bias_tensor->shape.depth, num_groups, 2) ) {
-        nn_free(filter_splits);
-        nn_free(bias_splits);
-        return errlog(nn, "Bias pre-split failed!");
+    /* Get the tensors for filter and bias */
+    struct nn_node *filter_node, *bias_node, *channel_scale_node = NULL;
+    if(NULL == (filter_node = find_node_must_be_Const(nn, grouped_conv_node->input_refs[1].src_id))) {
+        return errlog(nn, "Unable to find const filter node!");
+    }
+    else if (NULL == (bias_node = find_node_must_be_Const(nn, grouped_conv_node->input_refs[2].src_id))) {
+        return errlog(nn, "Unable to find const bias node!");
+    }
+    if (has_channel_scale) {
+        if (NULL == (channel_scale_node = find_node_must_be_Const(nn, grouped_conv_node->input_refs[13].src_id))) {
+            return errlog(nn, "Unable to find const channel scale node!");
+        }
+    }
+    const struct tensor *filter_tensor = filter_node->outputs[0];
+    const struct tensor *bias_tensor = bias_node->outputs[0];
+    const struct tensor *channel_scale_tensor = NULL;
+    if (has_channel_scale) {
+        channel_scale_tensor = channel_scale_node->outputs[0];
     }
 
+    /* Check the dimensions of inputs */
+    const uint32_t in_depth = producer->outputs[grouped_conv_node->input_refs[0].output_idx]->shape.depth;
+    const uint32_t out_depth = filter_tensor->shape.filt_batches;
+    const uint32_t split_data_depth = in_depth / num_groups;
+
+    uint32_t groups_limit = min_u32(min_u32(in_depth, out_depth), GROUPEDCONV_MAX_GROUPS);
+    if(num_groups < 1 || num_groups > groups_limit) {
+        return errlog(nn, "Bad num_groups: %d : Must be an integer in the range [1, %d]", num_groups,  groups_limit);
+    }
+    if(in_depth % num_groups != 0) {
+        return errlog(nn, "Input depth (%d) must be divisible by num_groups(%d)!", in_depth, num_groups);
+    }
+    if(out_depth % num_groups != 0) {
+        return errlog(nn, "Number of output channels in filter(%d) must be divisible by num_groups(%d)", out_depth, num_groups);
+    }
+    if(bias_tensor->shape.depth != out_depth) {
+        return errlog(nn, "Depth of bias(%d) must be equal to output depth (%d)!", bias_tensor->shape.depth, out_depth);
+    }
+    if(filter_tensor->shape.filt_depth != split_data_depth) {
+        return errlog(nn, "Depth (dimension 2) of filter should be in_depth / num_groups (%d)", split_data_depth);
+    }
+
+    /* Pre-split the filter and bias and add const nodes, if groups > 1 */
     uint32_t filter_split_nids[num_groups];
     uint32_t bias_split_nids[num_groups];
+    uint32_t channel_scale_nids[num_groups];
     uint32_t i;
-    for(i=0; i<num_groups; i++) {
-       filter_split_nids[i] = nn_graph_new_internal_node_id(nn); 
-       bias_split_nids[i] = nn_graph_new_internal_node_id(nn); 
-       if( do_prepend_const_node(nn, filter_split_nids[i], filter_tensor->shape.filt_height, filter_tensor->shape.filt_width, filter_tensor->shape.filt_depth, filter_tensor->shape.filt_batches / num_groups, &filter_splits[i * filter_split_size], filter_split_size) &
-           do_prepend_const_node(nn, bias_split_nids[i], 1, 1, 1, bias_tensor->shape.depth / num_groups, &bias_splits[i * bias_split_size], bias_split_size) ) {
-            nn_free(filter_splits);
-            nn_free(bias_splits);
-           return errlog(nn, "Failed to prepend const nodes for split filter and bias");
-       }
+
+    if(num_groups == 1) {
+        filter_split_nids[0] = filter_node->node_id;
+        bias_split_nids[0] = bias_node->node_id;
+        if (has_channel_scale)
+            channel_scale_nids[0] = channel_scale_node->node_id;
+    }
+    else {
+        //combine first two dimensions for split_data function
+        uint32_t filter_split_height = filter_tensor->shape.filt_height * filter_tensor->shape.filt_width;
+        uint32_t bias_split_height = 1;
+        uint32_t channel_scale_split_height = 1;
+        //size of each split
+        uint32_t filter_split_size = filter_tensor->data_size / num_groups;
+        uint32_t bias_split_size = bias_tensor->data_size / num_groups;
+        uint32_t channel_scale_split_size;
+        uint32_t channel_scale_buffer_size;
+        if (has_channel_scale) {
+            channel_scale_split_size = channel_scale_tensor->data_size / num_groups;
+            channel_scale_buffer_size = roundf(channel_scale_split_size / sizeof(HVX_Vector) + 0.5f) * sizeof(HVX_Vector);
+        }
+
+
+        //size of smallest 128-byte aligned buffer to contain each split
+        uint32_t filt_split_buffer_size = roundf(filter_split_size / sizeof(HVX_Vector) + 0.5f) * sizeof(HVX_Vector);
+        uint32_t bias_split_buffer_size = roundf(bias_split_size * sizeof(int32_t) / sizeof(HVX_Vector) + 0.5f) * sizeof(HVX_Vector);
+        uint8_t *filter_splits[num_groups], *bias_splits[num_groups], *channel_scale_splits[num_groups];
+
+        if(nn_split_data_hvx_aligned(nn, filter_tensor->data, filter_splits, sizeof(uint8_t), filt_split_buffer_size, filter_split_height, 
+            filter_tensor->shape.filt_depth, out_depth, num_groups, 2)) {
+            return errlog(nn, "Failed to pre-split filter tensor!");
+        } 
+        if (nn_split_data_hvx_aligned(nn, bias_tensor->data, bias_splits, sizeof(int32_t), bias_split_buffer_size, bias_split_height, 
+                bias_tensor->shape.width, bias_tensor->shape.depth, num_groups, 2)) {
+            free_splits(filter_splits, num_groups);
+            return errlog(nn, "Failed to pre-split bias tensor!");
+        }
+        if (has_channel_scale && nn_split_data_hvx_aligned(nn, channel_scale_tensor->data, channel_scale_splits, sizeof(float), channel_scale_buffer_size, channel_scale_split_height, 
+                channel_scale_tensor->shape.width, channel_scale_tensor->shape.depth, num_groups, 2)) {
+            free_splits(channel_scale_splits, num_groups);
+            return errlog(nn, "Failed to pre-split channel scale tensor!");
+        }
+
+        for(i=0; i<num_groups; i++) {
+           filter_split_nids[i] = nn_graph_new_internal_node_id(nn); 
+           bias_split_nids[i] = nn_graph_new_internal_node_id(nn);
+           channel_scale_nids[i] = nn_graph_new_internal_node_id(nn); 
+           if(do_prepend_const_node(nn, filter_split_nids[i], filter_tensor->shape.filt_height, 
+                filter_tensor->shape.filt_width, filter_tensor->shape.filt_depth, out_depth / num_groups, 
+                filter_splits[i], filter_tensor->data_size / num_groups)) {
+                free_splits(filter_splits, num_groups); free_splits(bias_splits, num_groups);
+                return errlog(nn, "Failed to prepend const node for the %dth split of filter tensor", i);
+            }
+            if(do_prepend_const_node(nn, bias_split_nids[i], 1, 1, 1, bias_tensor->shape.depth / num_groups, 
+                    bias_splits[i], bias_tensor->data_size / num_groups) ) {
+                free_splits(filter_splits, num_groups); free_splits(bias_splits, num_groups);
+                return errlog(nn, "Failed to prepend const node for the %dth split of bias tensor", i);
+            }
+            if(has_channel_scale && do_prepend_const_node(nn, channel_scale_nids[i], 1, 1, 1, channel_scale_tensor->shape.depth / num_groups, 
+                    channel_scale_splits[i], channel_scale_tensor->data_size / num_groups) ) {
+                free_splits(filter_splits, num_groups); free_splits(bias_splits, num_groups); free_splits(channel_scale_splits, num_groups);
+                return errlog(nn, "Failed to prepend const node for the %dth split of channel scale tensor", i);
+            }
+        }
+        // Should already be memcopyed into the const nodes' outputs, can free now
+        free_splits(filter_splits, num_groups);
+        free_splits(bias_splits, num_groups);
+        if (has_channel_scale)
+            free_splits(channel_scale_splits, num_groups);
     }
 
     /* Split node for data tensor - inputs */
@@ -107,23 +197,22 @@ int expand_grouped_conv_nodes(struct nn_graph *nn, struct nn_node **grouped_conv
 
     /* Split node for data tensor - outputs */
     struct output data_split_output_defs[split_num_outputs];
-    struct shape data_split_outshape = grouped_conv_node->inputs[0]->shape; 
-    data_split_outshape.depth /= num_groups;
 
     /* make output descriptors for each split node */
     for(i=0; i<num_groups; i++) {
-        make_outputdesc_from_shape(&data_split_output_defs[i], &data_split_outshape, sizeof(uint8_t), 0); 
+        data_split_output_defs[i] = producer->output_defs[grouped_conv_node->input_refs[0].output_idx];
+        data_split_output_defs[i].max_sizes[3] = split_data_depth;
     }
 
-    //mins and maxes
-    make_outputdesc_from_shape(&data_split_output_defs[num_groups], constant_shape, sizeof(float), 0);
-    make_outputdesc_from_shape(&data_split_output_defs[num_groups+1], constant_shape, sizeof(float), 0);
+    // split output min and max
+    data_split_output_defs[num_groups] = data_split_output_defs[num_groups+1] = Output_ScalarFloat;
 
     /* add Split node to graph */
     struct nn_node *data_split_node = create_node(nn, 0, OP_QuantizedSplit_8, NN_PAD_NA, 4, split_num_outputs, data_split_input_refs, data_split_output_defs); 
 
     /* (Conv2d + BiasAdd + Shrink) x num_groups */
     // all this should be converted to supernodes
+
     struct input conv_input_refs[7];
     struct output conv_output_defs[3];
     struct nn_node *conv_nodes[num_groups];
@@ -132,18 +221,24 @@ int expand_grouped_conv_nodes(struct nn_graph *nn, struct nn_node **grouped_conv
         return errlog(nn, "Conv output depth %d should be a multiple of num groups %d", conv_outshape.depth, num_groups);
     conv_outshape.depth /= num_groups;
 
+    struct input channel_scale_input_refs[4];
+    struct output channel_scale_output_defs[3];
+    struct nn_node *channel_scale_nodes[num_groups];
+
     struct input biasadd_input_refs[6];
     struct output biasadd_output_defs[3];
     struct nn_node *biasadd_nodes[num_groups];
 
-    struct input shrink_input_refs[3];
-    struct output shrink_output_defs[3];
-    struct nn_node *shrink_nodes[num_groups];
+    struct input requant_input_refs[5];
+    struct output requant_output_defs[3];
+    struct nn_node *requant_nodes[num_groups];
+    
+    struct nn_node *biasdd_predecessor;
 
     for(i=0; i<num_groups; i++) {
         // Conv2d
         conv_input_refs[0] = (struct input){ data_split_node->node_id, i }; //data
-        conv_input_refs[1] = (struct input){ filter_split_nids[i], 0 };
+        conv_input_refs[1] = (struct input){ filter_split_nids[i], 0 }; //filter
         conv_input_refs[2] = (struct input){ data_split_node->node_id, num_groups }; //data min
         conv_input_refs[3] = (struct input){ data_split_node->node_id, num_groups+1 }; //data max
         conv_input_refs[4] = grouped_conv_node->input_refs[5]; //filter min
@@ -151,35 +246,44 @@ int expand_grouped_conv_nodes(struct nn_graph *nn, struct nn_node **grouped_conv
         conv_input_refs[6] = grouped_conv_node->input_refs[9]; //stride
 
         make_outputdesc_from_shape(&conv_output_defs[0], &conv_outshape, sizeof(uint32_t), 0); //conv out
-        make_outputdesc_from_shape(&conv_output_defs[1], constant_shape, sizeof(float), 0); //min
-        make_outputdesc_from_shape(&conv_output_defs[2], constant_shape, sizeof(float), 0); //max
+        conv_output_defs[1] = conv_output_defs[2] = Output_ScalarFloat; //min and max
+        conv_nodes[i] = create_node(nn, 0, OP_QuantizedConv2d_8x8to32, grouped_conv_node->padding, 7, 3, conv_input_refs, conv_output_defs); 
+        biasdd_predecessor = conv_nodes[i];
 
-        conv_nodes[i] = create_node(nn, 0, OP_QuantizedConv2d_8x8to32, NN_PAD_VALID, 7, 3, conv_input_refs, conv_output_defs); 
+        //Channel Scale
+        if (has_channel_scale) {
+            channel_scale_input_refs[0] = (struct input){ conv_nodes[i]->node_id, 0 }; //conv out
+            channel_scale_input_refs[1] = (struct input) { channel_scale_nids[i], 0}; //channel scales
+            channel_scale_input_refs[2] = (struct input){ conv_nodes[i]->node_id, 1 }; //conv min
+            channel_scale_input_refs[3] = (struct input){ conv_nodes[i]->node_id, 2 }; //conv max
+
+            make_outputdesc_from_shape(&channel_scale_output_defs[0], &conv_outshape, sizeof(int32_t), 0);
+            channel_scale_output_defs[1] = channel_scale_output_defs[2] = Output_ScalarFloat; //min and max
+            channel_scale_nodes[i] = create_node(nn, 0, OP_QuantizedChannelScale_32xf, NN_PAD_NA, 4, 3, channel_scale_input_refs, channel_scale_output_defs);
+            biasdd_predecessor = channel_scale_nodes[i];
+        }
         // BiasAdd
-        biasadd_input_refs[0] = (struct input){ conv_nodes[i]->node_id, 0 }; //conv out
+        biasadd_input_refs[0] = (struct input){ biasdd_predecessor->node_id, 0 }; //conv out
         biasadd_input_refs[1] = (struct input){ bias_split_nids[i], 0 }; //bias
-        biasadd_input_refs[2] = (struct input){ conv_nodes[i]->node_id, 1 }; //conv min
-        biasadd_input_refs[3] = (struct input){ conv_nodes[i]->node_id, 2 }; //conv max
+        biasadd_input_refs[2] = (struct input){ biasdd_predecessor->node_id, 1 }; //conv min
+        biasadd_input_refs[3] = (struct input){ biasdd_predecessor->node_id, 2 }; //conv max
         biasadd_input_refs[4] = grouped_conv_node->input_refs[7]; //bias min
         biasadd_input_refs[5] = grouped_conv_node->input_refs[8]; //bias max
 
-        make_outputdesc_from_shape(&biasadd_output_defs[0], &conv_outshape, sizeof(uint32_t), 0); //bias out
-        make_outputdesc_from_shape(&biasadd_output_defs[1], constant_shape, sizeof(float), 0); //min
-        make_outputdesc_from_shape(&biasadd_output_defs[2], constant_shape, sizeof(float), 0); //max
-
+        make_outputdesc_from_shape(&biasadd_output_defs[0], &conv_outshape, sizeof(uint32_t), 0); //biasadd out
+        biasadd_output_defs[1] = biasadd_output_defs[2] = Output_ScalarFloat; //min and max
         biasadd_nodes[i] = create_node(nn, 0, OP_QuantizedBiasAdd_32p32to32, NN_PAD_NA, 6, 3, biasadd_input_refs, biasadd_output_defs);
 
-        // Shrink 32to8
-        shrink_input_refs[0] = (struct input){ biasadd_nodes[i]->node_id, 0 }; //biasadd out
-        shrink_input_refs[1] = (struct input){ biasadd_nodes[i]->node_id, 1 }; //biasadd min
-        shrink_input_refs[2] = (struct input){ biasadd_nodes[i]->node_id, 2 }; //biasadd max
+        // Requant 32to8
+        requant_input_refs[0] = (struct input){ biasadd_nodes[i]->node_id, 0 }; //biasadd out
+        requant_input_refs[1] = (struct input){ biasadd_nodes[i]->node_id, 1 }; //biasadd min
+        requant_input_refs[2] = (struct input){ biasadd_nodes[i]->node_id, 2 }; //biasadd max
+        requant_input_refs[3] = grouped_conv_node->input_refs[11]; //speciefied requant min
+        requant_input_refs[4] = grouped_conv_node->input_refs[12]; //specified requant max
 
-        make_outputdesc_from_shape(&shrink_output_defs[0], &conv_outshape, sizeof(uint8_t), 0); //shrink out
-        make_outputdesc_from_shape(&shrink_output_defs[1], constant_shape, sizeof(float), 0); //min
-        make_outputdesc_from_shape(&shrink_output_defs[2], constant_shape, sizeof(float), 0); //max
-
-        shrink_nodes[i] = create_node(nn, 0, OP_QuantizeDownAndShrinkRange_32to8, NN_PAD_NA, 3, 3, shrink_input_refs, shrink_output_defs);
-
+        make_outputdesc_from_shape(&requant_output_defs[0], &conv_outshape, sizeof(uint8_t), 0); //requant out
+        requant_output_defs[1] = requant_output_defs[2] = Output_ScalarFloat; //min and max
+        requant_nodes[i] = create_node(nn, 0, OP_Requantize_32to8, NN_PAD_NA, 5, 3, requant_input_refs, requant_output_defs);
     }
 
     /* Concat - inputs */
@@ -187,16 +291,15 @@ int expand_grouped_conv_nodes(struct nn_graph *nn, struct nn_node **grouped_conv
     concat_input_refs[0] = (struct input){ split_dim_nid, 0 };
 
     for(i=1; i<=num_groups; i++) {
-        concat_input_refs[i] = (struct input){ shrink_nodes[i-1]->node_id, 0 }; //tensor pieces
-        concat_input_refs[num_groups+i] = (struct input){ shrink_nodes[i-1]->node_id, 1 }; //mins
-        concat_input_refs[2*num_groups+i] = (struct input){ shrink_nodes[i-1]->node_id, 2 }; //maxes
+        concat_input_refs[i] = (struct input){ requant_nodes[i-1]->node_id, 0 }; //tensor pieces
+        concat_input_refs[num_groups+i] = (struct input){ requant_nodes[i-1]->node_id, 1 }; //mins
+        concat_input_refs[2*num_groups+i] = (struct input){ requant_nodes[i-1]->node_id, 2 }; //maxes
     }
 
     /* Concat - outputs */
     struct output concat_output_defs[3];
-    make_outputdesc_from_shape(&concat_output_defs[0], &grouped_conv_node->outputs[0]->shape, sizeof(uint8_t), 0);
-    make_outputdesc_from_shape(&concat_output_defs[1], constant_shape, sizeof(float), 0);
-    make_outputdesc_from_shape(&concat_output_defs[2], constant_shape, sizeof(float), 0);
+    concat_output_defs[0] = grouped_conv_node->output_defs[0];
+    concat_output_defs[1] = concat_output_defs[2] = Output_ScalarFloat;
 
     /* Add Concat node */
     struct nn_node *concat_node = create_node(nn, 0,  OP_QuantizedConcat_8, NN_PAD_NA, concat_num_inputs, 3, concat_input_refs, concat_output_defs);
@@ -208,8 +311,9 @@ int expand_grouped_conv_nodes(struct nn_graph *nn, struct nn_node **grouped_conv
 
     for(i=0; i<num_groups; i++) {
         new_nodes[i+1] = conv_nodes[i];
-        new_nodes[i+1+num_groups] = biasadd_nodes[i];
-        new_nodes[i+1+2*num_groups] = shrink_nodes[i];
+        new_nodes[i+1+num_groups] = has_channel_scale ? channel_scale_nodes[i] : NULL;
+        new_nodes[i+1+2*num_groups] = biasadd_nodes[i];
+        new_nodes[i+1+3*num_groups] = requant_nodes[i];
     }
     new_nodes[num_new_nodes-1] = concat_node;
 
@@ -221,7 +325,7 @@ int expand_grouped_conv_nodes(struct nn_graph *nn, struct nn_node **grouped_conv
     };
 
     // do replacement
-    change_multi_output_refs_table(nn, grouped_conv_node, grouped_conv_node->node_id, 3, new_input_refs);
+    change_multi_output_refs_table(nn, grouped_conv_node, grouped_conv_node->node_id, num_core_nodes, new_input_refs);
     replace_node_with_sequence(nn, grouped_conv_node_p, grouped_conv_node, new_nodes, num_new_nodes);
 
     return 0;

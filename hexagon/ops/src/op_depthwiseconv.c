@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -171,24 +171,22 @@ static int depthwiseconv2d_execute_ref(struct nn_node *self, struct nn_graph *nn
 	return 0;
 }
 
-static int depthwiseconv2d_check_ref(struct nn_node *self, struct nn_graph *nn)
-{
-	if (self->n_inputs != 7) return errlog(nn,"depthwiseconv2d id %x wrong # inputs",self->node_id);
-	if (self->n_outputs != 3) return errlog(nn,"depthwiseconv2d wrong # outputs");
-	return 0;
-}
 
 struct nn_node_ops nn_ops_for_QuantizedDepthwiseConv2d_8x8to32 = {
 	.execute = depthwiseconv2d_execute_ref,
-	.check = depthwiseconv2d_check_ref,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(7),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedDepthwiseConv2d_8x8to32_ref = {
 	.execute = depthwiseconv2d_execute_ref,
-	.check = depthwiseconv2d_check_ref,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(7),
+	.n_outputs = NN_IOCOUNT(3),
 };
 

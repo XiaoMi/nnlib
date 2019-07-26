@@ -1493,6 +1493,7 @@ static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode
 		 return OP_QuantizedSub_8p8to8_d32;
 
 	 case OP_QuantizedAdd_8p8to8:
+	 case OP_QuantizedMul_8x8to8:
 	  {
 		struct nn_node *src0;
 		struct nn_node *src1;
@@ -1527,7 +1528,12 @@ static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode
 		if( bcode < 0		// # <0 means incompatible even with broadcasting
 			|| !( (bcode& 0x0C) == 0 || ( bcode & 0x30) == 0x30 ))
 			  return -1;
-		 return (try_op==OP_QuantizedAdd_8p8to8)? OP_QuantizedAdd_8p8to8_d32: OP_QuantizedSub_8p8to8_d32;
+		switch (try_op) {
+			case OP_QuantizedAdd_8p8to8: return OP_QuantizedAdd_8p8to8_d32;
+			case OP_QuantizedSub_8p8to8: return OP_QuantizedSub_8p8to8_d32;
+			case OP_QuantizedMul_8x8to8: return OP_QuantizedMul_8x8to8_d32;
+			default: return -1;
+		}
 	  }
 	 case OP_QuantizedPad_8:		// this can be converted if it does not do depth padding.
 	 {
@@ -2210,7 +2216,7 @@ static int do_convert_to_depth32(struct nn_graph *nn, struct nn_node **nodeptr)
 		}
 		convinput_set = 2;		// convert input #1, not #0
 	}
-	if(new_operation == OP_QuantizedAdd_8p8to8_d32 || new_operation ==  OP_QuantizedSub_8p8to8_d32){
+	if(new_operation == OP_QuantizedAdd_8p8to8_d32 || new_operation ==  OP_QuantizedSub_8p8to8_d32 || new_operation == OP_QuantizedMul_8x8to8_d32){
 		convinput_set = 1 + 2;		// convert both inputs.
 	}
 

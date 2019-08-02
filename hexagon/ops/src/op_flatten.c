@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -112,42 +112,29 @@ static int qflatten_execute(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-static int flatten_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking flatten node %p",self);
-	if (self->n_inputs > 2) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
-	if (self->inputs[0] == NULL) return errlog(nn,"NULL input");
-	if (self->outputs[0] == NULL) return errlog(nn,"NULL output");
-	logmsg(nn,2,"flatten node %p check OK",self);
-	return 0;
-}
-
-static int qflatten_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking Qflatten node %p",self);
-	if (self->n_inputs != 3) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"Qflatten node %p check OK",self);
-	return 0;
-}
 
 // supports aliasing: so it is possible the input and output
 // tensors will be at the same address.
 
+// note: some graphs have a second input
+// on Flatten, which is ignored. Not sure
+// what it's for but we need to tolerate it
 struct nn_node_ops nn_ops_for_Flatten = {
 	.execute = flatten_execute,
-	.check = flatten_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
-	.flags = NN_NODE_FLAG_CLS_SUPPORTS_ALIAS
+	.flags = NN_NODE_FLAG_CLS_SUPPORTS_ALIAS,
+	.n_inputs = NN_IOCOUNT_RANGE(1,2),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedFlatten = {
 	.execute = qflatten_execute,
-	.check = qflatten_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
-	.flags = NN_NODE_FLAG_CLS_SUPPORTS_ALIAS
+	.flags = NN_NODE_FLAG_CLS_SUPPORTS_ALIAS,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 };
-

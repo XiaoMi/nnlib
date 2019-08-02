@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -167,40 +167,22 @@ int node_free_softmax_uint8(struct nn_node *node, struct nn_graph *nn)
 }
 
 
-static int softmax_check_uint8(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking softmax_uint8 node %p",self);
-	int k = node_check_inputs_range( self,nn, "softmax",3,4);
-	if( k==0) k = node_check_outputs_n( self, nn, "softmax", 1);	// 1 output
-	if( k!=0)
-		return k;
-	logmsg(nn,2,"softmax node %p check OK",self);
-	return 0;
-}
-
-static int softmax_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking softmax node %p",self);
-	int k = node_check_inputs_range( self,nn, "softmax",1,2);	// 1 or 2 inputs
-	if( k==0) k = node_check_outputs_n( self, nn, "softmax", 1);	// 1 output
-	if( k!=0)
-		return k;
-	logmsg(nn,2,"softmax node %p check OK",self);
-	return 0;
-}
-
 struct nn_node_ops nn_ops_for_Softmax_f = {
 	.execute = softmax_execute,
-	.check = softmax_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(1,2),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 
 struct nn_node_ops nn_ops_for_Softmax_uint8 = {
 	.execute = softmax_execute_uint8,
-	.check = softmax_check_uint8,
+	.check = NULL,
 	.ctor = node_alloc_softmax_uint8,
 	.dtor = node_free_softmax_uint8,
+	.n_inputs = NN_IOCOUNT_RANGE(3,4),
+	.n_outputs = NN_IOCOUNT(1),
 };
 

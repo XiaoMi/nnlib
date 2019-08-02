@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016,2017,2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -754,6 +754,9 @@ static int maxpool_execute(struct nn_node *self, struct nn_graph *nn)
 	rstt.pool_alloc = 0;
 
 	if( use_rollbuf){
+		if (nn_scratch_grow(nn, rstt.rollbuf.total_bytes * n_threads)){
+			return errlog(nn, "scratch too small" );
+		}
 		nn_scratch_reset(nn);
 		rstt.rollbuf_pool = nn_scratch_alloc(nn, rstt.rollbuf.total_bytes * n_threads);
 		if( rstt.rollbuf_pool == NULL){
@@ -835,13 +838,6 @@ int do_maxpool_out1x1_slice(
 }
 
 
-static int maxpool_check(struct nn_node *self, struct nn_graph *nn)
-{
-	if (self->n_inputs != 5) return errlog(nn,"maxpool wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"maxpool wrong # outs");
-	return 0;
-}
-
 static int maxpool_dtor(struct nn_node *self, struct nn_graph *nn)
 {
 	self->opaque = NULL;
@@ -856,18 +852,22 @@ static int maxpool_earlywork_register(struct nn_node *self, struct nn_graph *nn,
 
 struct nn_node_ops nn_ops_for_QuantizedMaxPool_8_d32 = {
 	.execute = maxpool_execute,
-	.check = maxpool_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = maxpool_dtor,
 	.earlywork_register = maxpool_earlywork_register,
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT | NN_NODE_FLAG_OUTPUT_ACCEPTS_PREPARATION | NN_NODE_FLAG_OUTPUT_USES_INPUT_RANGE,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedMaxPool_8_d32_ref = {
 	.execute = maxpool_d32_ref,
-	.check = maxpool_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT | NN_NODE_FLAG_OUTPUT_ACCEPTS_PREPARATION | NN_NODE_FLAG_OUTPUT_USES_INPUT_RANGE,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
 };
 

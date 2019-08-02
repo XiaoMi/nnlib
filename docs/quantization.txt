@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -72,3 +72,80 @@ offset values.  I think it would be cleaner if we migrate to that over time,
 although we're clearly using it internally already.
 
 https://petewarden.com/2017/06/22/what-ive-learned-about-neural-network-quantization/
+
+
+
+===================================================
+Quantized formats
+===================================================
+In all cases, a value is dequantized by the formula
+	y = (quantized_val - zero_code) * stepsize
+
+---------------
+qint32
+---------------
+	element   :  int32
+	zero_code :  fixed at 0
+	minval    :  stepsize * -(2^31)
+	maxval    :  stepsize * (2^31)
+	Note:
+		minval = -maxval
+		stepsize can be found as (maxval-minval)/(float)(2^32)
+		It is very common for the actual range of data in a
+		'qint32' tensor to be far less than the full range as
+		    indicated by minval and maxval; this is not
+			not the case for the other formats.
+
+
+---------------
+qu8
+---------------
+	element   :  uint8
+	zero_code :  0..255
+	minval    :  stepsize * (-zero_code)/255.0
+	maxval    :  stepsize * (255-zero_code)/255.0
+	Note:
+		maxval >=0; minval <=0
+		stepsize can be found as (maxval-minval)/255.
+		zero_code can be found as -minval/stepsize
+		   It should be an integer value, otherwise the downstream
+		   node may not correctly interpret the value. In particular
+		   maxval = -minval is not a proper range (since zero_code = 127.5).
+		   To support a -1.0 to 1.0 range, you can use e.g
+		      minval = -1.0, maxval = 1.007874 (i.e. 128/127)
+
+---------------
+qint16
+---------------
+	element   :  int16
+	zero_code :  fixed at 0
+	minval    :  stepsize * -32768.0
+	maxval    :  stepsize * 32768.0
+	Note:
+		minval = -maxval
+		stepsize can be found as (maxval-minval)/65536.
+		The maximum *representable* value is actually maxval-stepsize.
+		A qint16 tensor can be converted to qu16 exactly, by inverting
+		   bit 15 of each value, and using the same minval and maxval.
+
+---------------
+qu16
+---------------
+	element   :  uint16
+	zero_code :  0..65535
+	minval    :  stepsize * (-zero_code)/65536.0
+	maxval    :  stepsize * (65536-zero_code)/65536.0
+	Note:
+		maxval > 0; minval <=0
+		stepsize can be found as (maxval-minval)/65536.
+		The maximum *representable* value is actually maxval-stepsize.
+		zero_code can be found as -minval/stepsize
+		   It should be an integer value, otherwise the downstream
+		   node may not correctly interpret the value.
+		   However, unlike the qu8 case, minval = -maxval is
+		   OK and results in zero_code = 32768.
+		Even in the best case, a calculated zero_code may be different
+		   from the nearest integer by +/- 0.01 or so, due to rounding errors.
+		minval can be zero, but maxval cannot; it should be at
+		   least -minval/65535 in order to meet the conditions
+		   above.

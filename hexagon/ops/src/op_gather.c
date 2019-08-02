@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -87,6 +87,8 @@
 //          -  leading 1's in the table shape are dropped (table is considered to be (8,64,20) in examples)
 //          -  leading 1's in the index tensor are dropped.
 //          -  The index tensor shape replaces the 'index dimension' in the tables shape.
+//     By defining a dimension select, you can force use of a table dimension which is size 1;
+//    in this case the index input must be all 0 (or will be ignored, if range-clipping is used).
 //
 // (C) if the 'index_rank' is given, this must be 0..4 and overrides auto-detecting the rank
 //     of the index tensor. Any leading dimensions (the first '4-index_rank') must be 1.
@@ -194,7 +196,7 @@
 //
 // OUT-OF-RANGE indices:
 //   handled according to the 'padding' field:
-//     NN_PAD_NA:    same as 'NN_PAD_SAME'
+//     NN_PAD_NA:    same as 'NN_PAD_VALID'
 //     NN_PAD_SAME :  error if the value is < 0 or >= TabN
 //     NN PAD_VALID:   values are 'clipped' to range 0 .. TabN-1
 //   Others are undefined.
@@ -292,16 +294,29 @@ analyze_gather_op( struct nn_graph * nn, struct tensor const *index_tensor, stru
 			return errlog(nn, "dimension_index = %d : must be -1 ...3", dimension_index);
 		}
 		index_dim = dimension_index;
+		// expand trank to include specified dim, if needed
+		if( 4-index_dim > trank)
+			trank = 4-index_dim;		// still in range 1..4
 	}
+	// When we have a table (1,1,3,5), then trank=2 and the default index_dim is 2.
+	// if you select dimension_index= 0 or 1, then technically the table's rank
+	// has been increased to 4 or 3 (resp), i.e. to (4-dimension_index)
+	// The computations below are such that if (4-dimension_index)>trank,
+	// it will still work as dei
+
 	int tabsize = table_tensor->shape.dimension[index_dim];
-	if( tabsize <= 1){
+	//
+	// Now allowing tabsize == 1
+	// In this situation, index must be 0 (unless we are clipping, in which case it will be ignored)
+	//
+	if( 0 && tabsize <= 1){
 		return errlog(nn,"can't lookup on dimension %d of table tensor (size=%d)", index_dim, tabsize);
 	}
 	// proven:
 	//    irank is 0..4
 	//    trank is 1..4
 	//     index_dim  is 0..3
-	//    index_dim + trank >=4
+	//    index_dim + trank_full >=4
 
 	// work out the output shape
 	int out_rank = irank + trank -1;		// guaranteed >= 0 since trank >= 1
@@ -1064,10 +1079,6 @@ variant_token_for_Table_8 = {
 static int gather_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking gather node %p",self);
-	int k = node_check_inputs_range( self,nn, "gather", 2, 4);
-	if(k==0) k = node_check_outputs_n( self,nn, "gather", 1);
-	if (k!=0)
-		return k;
 
 	int n_in = self->n_inputs;
 
@@ -1095,10 +1106,7 @@ static int gather_check(struct nn_node *self, struct nn_graph *nn)
 static int gather_q8_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking gather_8 node %p",self);
-	int k = node_check_inputs_range( self,nn, "gather", 4, 6);
-	if(k==0) k = node_check_outputs_n( self,nn, "gather", 3);
-	if (k!=0)
-		return k;
+
 	if( self->node_type == OP_Gather_8
 			|| self->n_inputs == 4 ){
 		self->opaque = (void*)&variant_token_for_Gather_8;
@@ -1120,18 +1128,24 @@ struct nn_node_ops nn_ops_for_Gather_f = {
 	.check = gather_check,
 	.ctor = node_alloc_common,
 	.dtor = gather_dtor,
+	.n_inputs = NN_IOCOUNT_RANGE(2,4),
+	.n_outputs = NN_IOCOUNT(1),
 };
 struct nn_node_ops nn_ops_for_Gather_int32 = {
 	.execute = gather_execute,
 	.check = gather_check,
 	.ctor = node_alloc_common,
 	.dtor = gather_dtor,
+	.n_inputs = NN_IOCOUNT_RANGE(2,4),
+	.n_outputs = NN_IOCOUNT(1),
 };
 struct nn_node_ops nn_ops_for_Gather_8 = {
 	.execute = gather_execute,
 	.check = gather_q8_check,
 	.ctor = node_alloc_common,
 	.dtor = gather_dtor,
+	.n_inputs = NN_IOCOUNT_RANGE(4,6),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 
@@ -1141,16 +1155,22 @@ struct nn_node_ops nn_ops_for_Table_f = {
 	.check = gather_check,
 	.ctor = node_alloc_common,
 	.dtor = gather_dtor,
+	.n_inputs = NN_IOCOUNT_RANGE(2,4),
+	.n_outputs = NN_IOCOUNT(1),
 };
 struct nn_node_ops nn_ops_for_Table_int32 = {
 	.execute = table_execute,
 	.check = gather_check,
 	.ctor = node_alloc_common,
 	.dtor = gather_dtor,
+	.n_inputs = NN_IOCOUNT_RANGE(2,4),
+	.n_outputs = NN_IOCOUNT(1),
 };
 struct nn_node_ops nn_ops_for_Table_8 = {
 	.execute = table_execute,
 	.check = gather_q8_check,
 	.ctor = node_alloc_common,
 	.dtor = gather_dtor,
+	.n_inputs = NN_IOCOUNT_RANGE(4,6),
+	.n_outputs = NN_IOCOUNT(3),
 };

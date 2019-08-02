@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -320,38 +320,25 @@ static int resizenear_f_execute(struct nn_node *self, struct nn_graph *nn)
 }
 
 
-static int resizenear_f_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"resizenear_f node %p",self);
-	// TODO support align corners input
-	if (self->n_inputs != 2) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"resizenear_f %p check OK",self);
-	return 0;
-}
-
-static int resizenear_8_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"resizenear_8 node %p",self);
-	// INS: intensor, inmin, inmax, newdims, align_corners (optional)
-	// OUTS: outputtensor, outmax, outmin
-	if ((self->n_inputs != 4) && (self->n_inputs != 5)) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"resizenear_8 %p check OK",self);
-	return 0;
-}
 
 struct nn_node_ops nn_ops_for_ResizeNearestNeighbor_f = {
 	.execute = resizenear_f_execute,
-	.check = resizenear_f_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(2),		// TODO support align corners input
+	.n_outputs = NN_IOCOUNT(1),
 };
+
+// INS: intensor, inmin, inmax, newdims, align_corners (optional)
+// OUTS: outputtensor, outmax, outmin
 
 struct nn_node_ops nn_ops_for_ResizeNearestNeighbor_8 = {
 	.execute = resizenear_8_execute,
-	.check = resizenear_8_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(4,5),
+	.n_outputs = NN_IOCOUNT(3),
 };
 

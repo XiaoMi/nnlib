@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -76,6 +76,45 @@ struct tdata_pad {
 	int    padval;
 	nn_sem_t donesem;
 };
+struct tdata_pad_batch {
+	struct nn_node *self;
+	void * optr;
+	int    b_in;
+	int32_t non_batch_outsize;
+	int    pad_b_before;
+	int    pad_b_after;
+	int    padval;
+	int    element_size;
+	nn_sem_t donesem;
+};
+
+static void do_pad_batch(struct nn_graph *nn, void *vinfo){
+	struct tdata_pad_batch *tdb = vinfo;
+	uint8_t *out =  (uint8_t*) tdb->optr;
+	int32_t non_batch_outsize = tdb->non_batch_outsize ;
+	int padval = tdb->padval ;
+	int pad_b_after = tdb->pad_b_after ;
+	int pad_b_before = tdb->pad_b_before ;
+	int b_in = tdb->b_in;
+	int element_size = tdb->element_size;
+
+	int32_t pad_before_size =  pad_b_before * non_batch_outsize;
+	int32_t pad_after_size =  pad_b_after * non_batch_outsize;
+
+	struct nn_memcpy_manager  mcman;
+	if( element_size==1) padval = Q6_R_vsplatb_R(padval);
+	else if ( element_size == 2) padval = Q6_R_combine_RlRl(padval,padval);
+	nn_mcmanager_init(nn, &mcman );
+	if(pad_b_before){
+		nn_mcmanager_vmemset32(nn, &mcman,  out, padval,pad_before_size);
+	}
+	if(pad_b_after){
+		out += pad_before_size+(b_in)*non_batch_outsize;
+		nn_mcmanager_vmemset32(nn, &mcman,  out, padval,pad_after_size);
+	}
+	nn_mcmanager_wait( nn, &mcman );
+
+}
 
 //  Hvx implementation . Intrinsic/ASM 
 static void do_pad_edge_hvx(struct nn_graph *nn, void *vinfo)
@@ -258,10 +297,16 @@ static int pad_generic_execute(struct nn_node *self,
 	// extract the pads, based on w dimension; ensure all are >=0 and
 	//
 	unsigned padby[4*2] = {0,0, 0,0, 0,0, 0,0};
-	for( int i = 0; i < (int)padt_len*2; i++ ){
-		int p = pads[i];
-		if( p < 0) return errlog(nn,"pad bad tensor");
-		padby[i] = p;
+	//backfill pads
+	for( int pad_idx = 0; pad_idx < (int)padt_len; pad_idx++ ){
+		int pad_backfill_idx = (4 -padt_len)/*last idx*/ + pad_idx;
+		for (int i = 0; i<2;i++){
+			int pad_old_idx = pad_idx*2+i;
+			int pad_new_idx = pad_backfill_idx*2+i;
+			int p = pads[pad_old_idx];
+			if( p < 0) return errlog(nn,"pad bad tensor");
+			padby[pad_new_idx] = p;
+		}
 	}
 	// find the new shape; validate sanity
 	struct shape out_shape;
@@ -296,7 +341,7 @@ static int pad_generic_execute(struct nn_node *self,
 	const int32_t d_out = out_shape.depth;
 	const int32_t w_out = out_shape.width;
 	const int32_t h_out = out_shape.height;
-	const int32_t b_out = out_shape.batches;
+
 	uint8_t *in_base = in_tensor->data;
 	uint8_t *inp;
 	uint8_t *out_base = out_tensor->data;
@@ -310,18 +355,31 @@ static int pad_generic_execute(struct nn_node *self,
 		pad_h_before,pad_h_after,
 		pad_w_before,pad_w_after,
 		pad_d_before,pad_d_after);
-	if (pad_b_before || pad_b_after) return errlog(nn,"can't pad batches");
 
 	if( tensor_out_prepare_normal_fromshape( out_tensor, &out_shape, element_type)!=0)
 		 return errlog(nn,"out too small");
 
-	for (b = 0; b < b_out; b++) {
-		inp = in_base + b*h_in*w_in*d_in*element_size;
-		outp = out_base + b*h_out*w_out*d_out*element_size;
+	if(hvx_flag)
+	{
+		//pad batches
+		if (pad_b_before || pad_b_after){
+			struct tdata_pad_batch tdb;
+			tdb.self = self;
+			tdb.optr = out_base;
+			tdb.b_in = b_in;
+			tdb.non_batch_outsize = h_out*w_out*d_out*element_size;
+			tdb.pad_b_before = pad_b_before;
+			tdb.pad_b_after = pad_b_after;
+			tdb.padval = padval;
+			tdb.element_size = element_size;
 
+			do_pad_batch(nn,&tdb);
+		}
+		//pad inner dims
+		for (b = 0; b < b_in; b++) {
+			inp = in_base + b*h_in*w_in*d_in*element_size;
+			outp = out_base + (b+pad_b_before)*h_out*w_out*d_out*element_size;
 	
-		if(hvx_flag)
-		{
 		    int bytes = h_in*w_in*d_in*element_size;
 
 		    td.self = self;
@@ -351,25 +409,25 @@ static int pad_generic_execute(struct nn_node *self,
 		    //nn_sem_init(&td.donesem,0);
 		    //nn_os_work_for_vector(nn,do_pad_edge_hvx, &td);
 		    //nn_sem_wait(&td.donesem);
-
-		} else {
-		    do_pad( outp,
-			inp,
-			0,
-			h_in,
-			w_in,
-			d_in,
-			0,
-			0,
-			pad_h_before,
-			pad_h_after,
-			pad_w_before,
-			pad_w_after,
-			pad_d_before,
-			pad_d_after,
-			element_size,
-			padval);
 		}
+	} else {
+		if (pad_b_before || pad_b_after) return errlog(nn,"can't pad batches in scalar");
+		do_pad( out_base,
+		in_base,
+		b_in,
+		h_in,
+		w_in,
+		d_in,
+		pad_b_before,
+		pad_b_after,
+		pad_h_before,
+		pad_h_after,
+		pad_w_before,
+		pad_w_after,
+		pad_d_before,
+		pad_d_after,
+		element_size,
+		padval);
 	}
 	return 0;
 }
@@ -381,7 +439,7 @@ static int pad_f_execute(struct nn_node *self, struct nn_graph *nn)
 	uint32_t start_time =  nn_os_get_cycles(nn);
 #endif
 	
-	ret = pad_generic_execute(self,nn,self->inputs[0],self->inputs[1],NN_TYPE_FLOAT,0, 0);
+	ret = pad_generic_execute(self,nn,self->inputs[0],self->inputs[1],NN_TYPE_FLOAT,0, USE_HVX_FLAG);
 #ifdef DEBUG_PRINT_GENERIC_PAD_REF_PERFORMANCE
 	uint32_t end_time =  nn_os_get_cycles(nn);
 	printf("Pad -f cycles = %ld (elements = %d)\n", (end_time-start_time), self->outputs[0].data_size);
@@ -439,39 +497,140 @@ static int pad_q_execute(struct nn_node *self, struct nn_graph *nn)
 
 	return ret;
 }
-
-static int pad_f_check(struct nn_node *self, struct nn_graph *nn)
+static int pad_q_v2_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	logmsg(nn,2,"pad node %p",self);
-	int k = node_check_inputs_outputs_n( self,nn, "pad", 2,1);
-	if (k!=0)
-		return k;
-	logmsg(nn,2,"pad %p check OK",self);
-	return 0;
+	const struct tensor *in_tensor = self->inputs[0];
+	const struct tensor *in_min_tensor = self->inputs[1];
+	const struct tensor *in_max_tensor = self->inputs[2];
+	const struct tensor *in_pads_tensor = self->inputs[3];
+	struct tensor *out_min_tensor = self->outputs[1];
+	struct tensor *out_max_tensor = self->outputs[2];
+
+	int ret;
+	uint8_t pad_val_q = ((uint8_t*)self->inputs[4]->data)[0];
+	
+	tensor_copy(out_min_tensor,in_min_tensor);
+	tensor_copy(out_max_tensor,in_max_tensor);
+
+#ifdef	DEBUG_PRINT_EDGE_PAD_HVX_PERFORMANCE
+	uint32_t start_time =  nn_os_get_cycles(nn);
+#endif
+	ret = pad_generic_execute(self,nn,in_tensor,in_pads_tensor, NN_TYPE_QUINT8,pad_val_q, USE_HVX_FLAG);
+#ifdef	DEBUG_PRINT_EDGE_PAD_HVX_PERFORMANCE
+	uint32_t end_time=  nn_os_get_cycles(nn);
+	printf("Pad  HVX cycles = %lu (elements = %d)\n",  (end_time-start_time), self->outputs[0].data_size);
+#endif
+
+	return ret;
+}
+/*
+ *   Pad 16-bit values (_16 for signed-16-symmetric, and _u16 for unsigned-16-asymmetric.
+ *    Inputs:
+ *         0  - input tensor
+ *         1 -  min for input
+ *         2 -  max for input
+ *         3 - 'pads' tensor
+ *         4 - (optional)pad value - scalar float; default is 0.0
+ *    Outputs:
+ *         0 - output tensor
+ *         1 - min out (same as input 1)
+ *         2 - max out (same as input 2)
+ *
+ *    NOTE: if the 'pad' value is present, and is outside the quantization range, it will
+ *          be truncated; if it is outside by more than 1536 codes (about 2.3% of full range), an error will occur.
+ *          Exception: +/-inf is always allowed and generates the max or min code.
+ */
+
+static int pad_q16_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	const struct tensor *in_tensor = self->inputs[0];
+	const struct tensor *in_min_tensor = self->inputs[1];
+	const struct tensor *in_max_tensor = self->inputs[2];
+	const struct tensor *in_pads_tensor = self->inputs[3];
+	struct tensor *out_min_tensor = self->outputs[1];
+	struct tensor *out_max_tensor = self->outputs[2];
+	float in_min = tensor_get_float(in_min_tensor,0);
+	float in_max = tensor_get_float(in_max_tensor,0);
+	int ret;
+	int is_signed = (self->node_type == OP_QuantizedPad_16);
+	int dtype = is_signed? NN_TYPE_QINT16: NN_TYPE_QUINT16;
+
+	int pad_q_val = 0;			// valid if only 4 inputs, and is_signed.
+	float pad_val_f = 0.0f;
+	if (self->n_inputs > 4) {
+		pad_val_f = tensor_get_float(self->inputs[4],0);
+	}
+	if( self->n_inputs > 4 || !is_signed){		// work out the quantized 'pad' value.
+		// find in u16 range first; correct for signed later.
+		if( fabsf(pad_val_f) != (float)INFINITY ){
+			float qscale = 65536.0f/(in_max - in_min);
+			int pqval  = roundf_i32( (pad_val_f-in_min)*qscale);
+			pad_q_val = max_i32(0, min_i32(0xFFFF, pqval));
+			if( pqval < -1536 || pqval > 0xFFFF + 1536){
+				return errlog(nn, "Pad value (%f) is outside the range of inputs (%f,%f)", pad_val_f, in_min, in_max);
+			}
+		}else{
+			// treat -/+ inf as min or max representable
+			pad_q_val = (pad_val_f < 0)?0:0xFFFF;
+		}
+		if(is_signed) pad_q_val -= 32768;
+	}
+
+	tensor_copy(out_min_tensor,in_min_tensor);
+	tensor_copy(out_max_tensor,in_max_tensor);
+
+#ifdef	DEBUG_PRINT_EDGE_PAD_HVX_PERFORMANCE
+	uint32_t start_time =  nn_os_get_cycles(nn);
+#endif
+	ret = pad_generic_execute(self,nn,in_tensor,in_pads_tensor, dtype,pad_q_val, USE_HVX_FLAG);
+#ifdef	DEBUG_PRINT_EDGE_PAD_HVX_PERFORMANCE
+	uint32_t end_time=  nn_os_get_cycles(nn);
+	printf("Pad  HVX cycles = %lu (elements = %d)\n",  (end_time-start_time), self->outputs[0].data_size);
+#endif
+
+	return ret;
 }
 
-static int pad_q_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"qpad node %p",self);
-	int k = node_check_inputs_range( self, nn, "pad", 4, 6 );
-	if(k==0) k = node_check_outputs_n( self, nn, "pad", 3 );
-	if (k!=0)
-		return k;
-	logmsg(nn,2,"pad %p check OK",self);
-	return 0;
-}
+
 
 struct nn_node_ops nn_ops_for_Pad_f = {
 	.execute = pad_f_execute,
-	.check = pad_f_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(2),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedPad_8 = {
 	.execute = pad_q_execute,
-	.check = pad_q_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(4,6),
+	.n_outputs = NN_IOCOUNT(3),
 };
-
+struct nn_node_ops nn_ops_for_QuantizedPad_V2_8 = {
+	.execute = pad_q_v2_execute,
+	.check = NULL,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
+};
+struct nn_node_ops nn_ops_for_QuantizedPad_16 = {
+	.execute = pad_q16_execute,
+	.check = NULL,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(4,5),
+	.n_outputs = NN_IOCOUNT(3),
+};
+struct nn_node_ops nn_ops_for_QuantizedPad_u16 = {
+	.execute = pad_q16_execute,
+	.check = NULL,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(4,5),
+	.n_outputs = NN_IOCOUNT(3),
+};

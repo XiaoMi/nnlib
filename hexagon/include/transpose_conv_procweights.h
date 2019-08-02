@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -41,7 +41,10 @@
 #include "nn_graph_types.h"
 struct transpose_conv_filter_parms {
   struct tensor const * filt_tensor;
-  struct tensor const * strides_tensor;
+  uint32_t block_h;
+  uint32_t block_w;
+  uint8_t pad_num_filters;			// expand output depth to multiple of 32?
+  uint8_t elbytes;					// 1 or 2, for 8 or 16-bit data.
   uint8_t *out_data;
   uint32_t zero_offset;      			// byte to fill when padding
   uint32_t data_size;
@@ -57,4 +60,5 @@ static inline uint32_t roundup(uint32_t numToRound, uint32_t multiple)
 }
 
 int process_tranpose_conv_filter(struct nn_graph *nn, struct transpose_conv_filter_parms * rtcwparms);
+int process_tranpose_conv16_filter(struct nn_graph *nn, struct transpose_conv_filter_parms * rtcwparms);
 #endif /* TRANSPOSE_CONV_PROCWEIGHTS_H_ */

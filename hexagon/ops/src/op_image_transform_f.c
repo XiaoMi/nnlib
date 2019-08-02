@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -354,18 +354,13 @@ static int image_transform_execute_f(struct nn_node *self, struct nn_graph *nn){
 	return 0;
 }
 
-static int image_transform_check_f(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking image transform node %p",self);
-	if (self->n_inputs != 2) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # outs");
-	logmsg(nn,2,"image transform node %p check OK",self);
-	return 0;
-}
 
 struct nn_node_ops nn_ops_for_ImageTransform_f = {
 		.execute = image_transform_execute_f,
-		.check = image_transform_check_f,
+		.check = NULL,
 		.ctor = node_alloc_common,
 		.dtor = node_free_common,
+		.n_inputs = NN_IOCOUNT(2),
+		.n_outputs = NN_IOCOUNT(1),
+		.flags = NN_NODE_FLAG_CLS_IMAGETRANSFORM,
 };

@@ -1,0 +1,32 @@
+
+Format Conversions
+==================
+
+from\to| float  |  u8 | u16 | i16 | i32
+-------+--------+-----+-----+-----+-----
+float  |   .    | *** |  *1 |  *1 |  *1
+u8     |  ***   |  .  |  *  |  *  |  :
+u16    |   *    |  *1 |  .  | ***1|  :
+i16    |   *    |  *1 | ***1|  .  |  :
+i32    |   *    | *** |  @  | *** |  .
+
+*     present
+*** = vectorized
+@   = missing, needed
+:   = maybe not needed
+1  (does not autorange)
+
+
+----------------------------------------------------------------------------------
+     (.)              AutoQuantize   Quantize_u16     Quantize_16   Quantize_int32
+ Dequantize               (.)        Convert_8_u16   Convert_8_16     (:)
+ Dequantize_u16       Convert_u16_8      (.)         Convert_u16_16   (:)
+ Dequantize_16        Convert_16_8   Convert_16_u16          (.)      (:)
+ Dequantize_qint32_f   QDSR_32to8      (missing)      QDSR_32to16     (.)
+
+QDSR = QuantizeDownAndShrinkRange
+
+We should have RequantizationRange_16 RequantizationRange_u16
+.. so that Convert_16_8 and Convert_u16_8 can convert to actual range.
+
+

@@ -128,9 +128,9 @@ static inline void topk_f_push_value_to_heap(struct topk_f_heap * heap,float val
     int p = PARENT_IDX(i);
     while (i != 0 && topk_f_less_than(heap->list+i,heap->list+p)==1) {
         //current value is smaller than parent value in min-heap
-        topk_f_swap_elements(heap,p,i); 
-        i = p; 
-   } 
+        topk_f_swap_elements(heap,p,i);
+        i = p;
+   }
 }
 
 static inline void topk_f_add_value(struct topk_f_heap * heap,float value, int32_t index){
@@ -206,15 +206,13 @@ static int topk_f_execute(struct nn_node *self, struct nn_graph *nn){
 	return 0;
 }
 
-static int top_k_check(struct nn_node *self, struct nn_graph *nn){
-	logmsg(nn,2,"Checking topkf node %p",self);
-	return node_check_inputs_outputs_n(self, nn, "topkf", 2, 2);
-}
 
 struct nn_node_ops nn_ops_for_TopK_f = {
 	.execute = topk_f_execute,
-	.check = top_k_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(2),
+	.n_outputs = NN_IOCOUNT(2),
 };
 

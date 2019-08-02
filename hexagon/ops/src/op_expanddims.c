@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -49,7 +49,7 @@ static int expanddims_execute(struct nn_node *self, struct nn_graph *nn)
 	}
 	return 0;
 }
-
+/*
 static int expanddims_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking expand dims node %p",self);
@@ -58,18 +58,23 @@ static int expanddims_check(struct nn_node *self, struct nn_graph *nn)
 	logmsg(nn,2,"expand dims rank %p check OK",self);
 	return 0;
 }
+*/
 
 struct nn_node_ops nn_ops_for_ExpandDims_int32 = {
 	.execute = expanddims_execute,
-	.check = expanddims_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(1,3),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 struct nn_node_ops nn_ops_for_ExpandDims_f = {
 	.execute = expanddims_execute,
-	.check = expanddims_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(1,3),
+	.n_outputs = NN_IOCOUNT(1),
 };
 

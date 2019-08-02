@@ -381,11 +381,11 @@ patterns which are recognized by later passes. But roughly the order is
 
 The code which runs the passes looks like this (excerpt):
 
-	OPTIMIZE_PERF(4)
+	PREPARE_TIME();
 	if ((err = remove_unnecessary_quants(nn)) != 0) return err;
-	OPTIMIZE_PERF(5)
+	PREPARE_TIME();
 	if ((err = remove_unnecessary_dequant_quants(nn)) != 0) return err;
-	OPTIMIZE_PERF(6)
+	PREPARE_TIME();
 	if( (nn->op_class_set & NN_NODE_FLAG_CLS_CHANSHUFFLE)!= 0){			// any QuantizedChannelShuffle_8 ?
 		if ((err = combine_chanshuffle(nn)) != 0) return err;
 	}
@@ -393,24 +393,20 @@ The code which runs the passes looks like this (excerpt):
 Here, the 'combine_chanshuffle(nn)' pass is only run if nodes marked NN_NODE_FLAG_CLS_CHANSHUFFLE
 are in the list.
 
-     *********************
-     ****  IMPORTANT  ****
-     *********************
-The OPTIMIZE_PERF() macros save the cycle counts between each in a table to help understand
-how long the passes take; by default this is completely #ifdef'd out, and is not frequently used. 
-If you add a new pass please DO NOT add a new OPTIMIZE_PERF() to separate it from the
-existing adjacent passes. The necessary changes to the rest of the function clutter the diffs and
-are very likely to cause merge conflicts.
+The PREPARE_TIME() macros save the cycle counts between each in a table to help understand
+how long the passes take; by default this is completely #ifdef'd out, and is not frequently used.
+If you insert a new pass you can insert a new PREPARE_TIME to separate it from others, but this
+is not necessary. Each 'CHECK(..)' macro also includes a PREPARE_TIME (This has been reworked from
+a previous form that resulted in a lot of merge conflicts)
+
 
 ========================================================================
 check_graph
 ========================================================================
 Amongst the optimization passes you will see lines like this
-	CHECK(GRAPHCHECK_HASH)  OPTIMIZE_PERF(-1)
+	CHECK(GRAPHCHECK_HASH)
 ... the CHECK expands to 
    if ((err= check_graph(nn,(GRAPHCHECK_HASH)))!=0) return err;
-(the OPTIMIZE_PERF(-1) is so that the time calling check_graph is not attributed
- to the following optimization pass).
 
 'check_graph' is defined in graph_check.c; it does nothing unless debug_level>=1
  since it is quite time-consuming. The parameter is a set of or'd flags which indicates

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -195,17 +195,15 @@ static int bbox_transform_execute_f(struct nn_node *self, struct nn_graph *nn){
     return 0;
 }
 
-static int bbox_transform_check_f(struct nn_node *self, struct nn_graph *nn){
-    logmsg(nn,2,"Checking bbox node %p",self);
-    if (self->n_inputs != 6) return errlog(nn,"bbox check: wrong # inputs");
-    if (self->n_outputs != 2 && self->n_outputs != 1) return errlog(nn,"bbox check: wrong # outputs");
-    logmsg(nn,2,"bbox node %p check OK",self);
-    return 0;
-}
+
+// must have 6 inputs, and 1 or 2 outputs
 
 struct nn_node_ops nn_ops_for_Bbox_Transform_f = {
     .execute = bbox_transform_execute_f,
-    .check = bbox_transform_check_f,
+    .check = NULL,
     .ctor = node_alloc_common,
     .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT(6),
+    .n_outputs = NN_IOCOUNT_RANGE(1,2),
+
 };

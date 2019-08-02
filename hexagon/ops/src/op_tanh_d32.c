@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -699,31 +699,16 @@ static void operate_hvx_function(
 }
 
 #endif
-static int tanh_dtor(struct nn_node *self, struct nn_graph *nn)
-{
-	if(self->opaque != NULL){
-		nn_free( self->opaque);
-		self->opaque = NULL;
-	}
-	return node_free_common(self,nn);
-}
+
 
 static int tanh_d32_check(struct nn_node *self, struct nn_graph *nn)
 {
-	int k;
 	logmsg(nn,2,"Checking tanh_d32 node %p",self);
-
-	k = node_check_inputs_outputs_n( self,nn, "tanh_d32", 3, 3);
-	if( k!= 0) return k;
-
-	if( self->node_type != OP_QuantizedTanh_8_d32_ref && self->node_type != OP_QuantizedSigmoid_8_d32_ref)
-	{
-		// allocate space for the table cache
-		void * t = nn_calloc(1, sizeof(struct lookup_table_cache ));
-		if( t == NULL)return errlog(nn,"can't alloc %d bytes",(int)sizeof(struct lookup_table_cache ) );
-		self->opaque = t;
-		((struct lookup_table_cache*)t)->maxval = -999.0f;	// anything impossible, to invalidate
-	}
+	// allocate space for the table cache
+	void * t = nn_calloc(1, sizeof(struct lookup_table_cache ));
+	if( t == NULL)return errlog(nn,"can't alloc %d bytes",(int)sizeof(struct lookup_table_cache ) );
+	self->opaque = t;
+	((struct lookup_table_cache*)t)->maxval = -999.0f;	// anything impossible, to invalidate
 
 	logmsg(nn,2,"tanh_d32 node %p check OK",self);
 	return 0;
@@ -733,15 +718,19 @@ struct nn_node_ops nn_ops_for_QuantizedTanh_8_d32 = {
 	.execute = tanh_d32_execute,
 	.check = tanh_d32_check,
 	.ctor = node_alloc_common,
-	.dtor = tanh_dtor,
+	.dtor = node_free_common_release_opaque,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
 };
 
 struct nn_node_ops nn_ops_for_QuantizedTanh_8_d32_ref = {
 	.execute = tanh_d32_execute,
-	.check = tanh_d32_check,
+	.check = NULL, //tanh_d32_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
 };
 
@@ -749,15 +738,19 @@ struct nn_node_ops nn_ops_for_QuantizedSigmoid_8_d32 = {
 	.execute = tanh_d32_execute,
 	.check = tanh_d32_check,
 	.ctor = node_alloc_common,
-	.dtor = tanh_dtor,
+	.dtor = node_free_common_release_opaque,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
 };
 
 struct nn_node_ops nn_ops_for_QuantizedSigmoid_8_d32_ref = {
 	.execute = tanh_d32_execute,
-	.check = tanh_d32_check,
+	.check = NULL,//tanh_d32_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
 };
 
@@ -768,14 +761,18 @@ struct nn_node_ops nn_ops_for_QuantizedTanh_8 = {
 	.execute = tanh_d32_execute,
 	.check = tanh_d32_check,
 	.ctor = node_alloc_common,
-	.dtor = tanh_dtor
+	.dtor = node_free_common_release_opaque,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3)
 };
 
 struct nn_node_ops nn_ops_for_QuantizedSigmoid_8= {
 	.execute = tanh_d32_execute,
 	.check = tanh_d32_check,
 	.ctor = node_alloc_common,
-	.dtor = tanh_dtor
+	.dtor = node_free_common_release_opaque,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3)
 };
 
 

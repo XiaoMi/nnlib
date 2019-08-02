@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -36,8 +36,6 @@
 #include <nn_graph.h>
 #include <string.h>
 
-#define D32_INPUT 1
-#define FLAT_INPUT 2
 /*
  * 
  * Now that that's out of the way, let's get to the good stuff.
@@ -65,78 +63,54 @@ struct tdata
     int out_depth;
 };
 
-static void convert_flat_to_aix_d32(struct nn_graph *nn, void *vtd)
-{
-    struct tdata *td = vtd;
-    int start_batch = td->start_batch;
-    int end_batch = td->end_batch;
-    int height = td->in_height;
-    int width = td->in_width;
-    int depth = td->in_depth;
-    struct shape input_shape = (struct shape){
-        .batches = end_batch - start_batch,
-        .height = height,
-        .width = width,
-        .depth = depth};
-    const struct tensor *in_tensor = td->in_tensor;
-    const struct tensor *out_tensor = td->out_tensor;
-    uint8_t *in_data = in_tensor->data;
-    int in_idx = 0;
-    int d_valid = 32;
-
-    for (int b = start_batch; b < end_batch; b++)
-    {
-        for (int h = 0; h < height; h++)
-        {
-            for (int w = 0; w < width; w++)
-            {
-                int d = 0;
-                while (d < depth)
-                {
-                    int d_left = depth - d;
-                    d_valid = 32;
-                    if (d_left < d_valid)
-                    {
-                        d_valid = d_left;
-                    }
-                    uint8_t *out_ptr = tensor_location_d32_aix(out_tensor, b, h, w, d, &input_shape);
-                    vmemcpy_asm(out_ptr, &in_data[in_idx], d_valid);
-                    d += d_valid;
-                    in_idx += d_valid;
-                }
-            }
-        }
-    }
-    nn_sem_post(&td->donesem);
-}
-
 static void convert_to_aix_d32_work(struct nn_graph *nn, void *vtd)
 {
     struct tdata *td = vtd;
-    int start_batch = td->start_batch;
-    int end_batch = td->end_batch;
-    int out_height = td->out_height;
-    int out_width = td->out_width;
-    int out_depth = td->out_depth;
-    int depth_padding = 32;
-    int in_nd32 = out_depth / depth_padding;
+    const int start_batch = td->start_batch;
+    const int end_batch = td->end_batch;
+    const int out_height = td->out_height;
+    const int out_width = td->out_width;
+    const int out_depth = td->out_depth;
+    const int depth_padding = 32;
+    const int in_nd32 = out_depth / depth_padding;
     const struct tensor *in_tensor = td->in_tensor;
     const struct tensor *out_tensor = td->out_tensor;
-    int height_stride = tensor_d32_stride_d32(in_tensor);
-    int out_height_stride = depth_padding * out_width;
+    const int height_stride = tensor_d32_stride_d32(in_tensor);
+    const int out_height_stride = depth_padding * out_width;
+    const int src_stride = tensor_row_stride_d32(in_tensor);
+    const int dst_stride = out_height_stride * in_nd32;
     uint8_t *out_data = out_tensor->data;
+    uint8_t *in_data = tensor_location_d32(in_tensor, 0, 0, 0, 0);
+    l2fetch(in_data, 128, 128, (out_height * height_stride + 127) / 128u);
+    const int rows = (in_nd32 == 1) ? 1 : out_height;
+    const int row_bytes = (in_nd32 == 1) ? out_height : in_nd32;
     for (int b = start_batch; b < end_batch; b++)
     {
-        for (int h = 0; h < out_height; h++)
+        in_data = tensor_location_d32(in_tensor, b, 0, 0, 0);
+        for (int h = 0; h < rows; h++)
         {
-            uint8_t * dst = out_data + h * out_height_stride * in_nd32;
-            vmemcpy_2d_general_asm(
-                depth_padding * out_width,
-                in_nd32,
-                dst,
-                out_height_stride,
-                tensor_location_d32(in_tensor, b, h, 0, 0),
-                height_stride);
+            if (out_width % 4 == 0)
+            {
+                vmemcpy_2d_asm(
+                    depth_padding * out_width,
+                    row_bytes,
+                    out_data,
+                    out_height_stride,
+                    in_data,
+                    height_stride);
+            }
+            else
+            {
+                vmemcpy_2d_general_asm(
+                    depth_padding * out_width,
+                    row_bytes,
+                    out_data,
+                    out_height_stride,
+                    in_data,
+                    height_stride);
+            }
+            out_data += dst_stride;
+            in_data += src_stride;
         }
     }
     nn_sem_post(&td->donesem);
@@ -178,13 +152,9 @@ static int convert_to_aix_d32_execute(struct nn_node *self, struct nn_graph *nn)
         .out_depth = out_depth,
     };
     nn_sem_init(&td.donesem, 0);
-    if (need_convert == D32_INPUT) //Tensor is d32, run d32->aix d32 convert
+    if (need_convert) //Tensor is d32, run d32->aix d32 convert
     {
         nn_os_work_for_vector(nn, convert_to_aix_d32_work, &td);
-    }
-    else if (need_convert == FLAT_INPUT) //Tensor is flat, run flat->d32 convert
-    {
-        nn_os_work_for_vector(nn, convert_flat_to_aix_d32, &td);
     }
     else
     {
@@ -199,27 +169,52 @@ static int convert_to_aix_d32_execute(struct nn_node *self, struct nn_graph *nn)
 static void convert_from_aix_d32_work(struct nn_graph *nn, void *vtd)
 {
     struct tdata *td = vtd;
-    int in_height = td->in_height;
-    int in_width = td->in_width;
-    int out_width = td->out_width;
-    int out_depth = td->out_depth;
-    int depth_padding = 32;
-    int in_nd32 = out_depth / depth_padding;
+    const int start_batch = td->start_batch;
+    const int end_batch = td->end_batch;
+    const int in_height = td->in_height;
+    const int in_width = td->in_width;
+    const int out_width = td->out_width;
+    const int out_depth = td->out_depth;
+    const int depth_padding = 32;
+    const int in_nd32 = out_depth / depth_padding;
     const struct tensor *in_tensor = td->in_tensor;
     const struct tensor *out_tensor = td->out_tensor;
     int height_stride = depth_padding * in_width;
+    const int src_stride = height_stride * in_nd32;
+    const int dst_stride = tensor_row_stride_d32(out_tensor);
     uint8_t *in_data = in_tensor->data;
-
-    for (int h = 0; h < in_height; h++)
+    uint8_t *out_data = out_tensor->data;
+    l2fetch(in_data, 128, 128, (in_height * height_stride + 127) / 128u);
+    const int rows = (in_nd32 == 1) ? 1 : in_height;
+    const int row_bytes = (in_nd32 == 1) ? in_height : in_nd32;
+    for (int b = start_batch; b < end_batch; b++)
     {
-        uint8_t *start = in_data + h * height_stride * in_nd32;
-        vmemcpy_2d_general_asm(
-            depth_padding * in_width,
-            in_nd32,
-            tensor_location_d32(out_tensor, 0, h, 0, 0),
-            depth_padding * out_width,
-            start,
-            height_stride);
+        out_data = tensor_location_d32(out_tensor, b, 0, 0, 0);
+        for (int h = 0; h < rows; h++)
+        {
+            if (in_width % 4 == 0)
+            {
+                vmemcpy_2d_asm(
+                    depth_padding * in_width,
+                    row_bytes,
+                    out_data,
+                    depth_padding * out_width,
+                    in_data,
+                    height_stride);
+            }
+            else
+            {
+                vmemcpy_2d_general_asm(
+                    depth_padding * in_width,
+                    row_bytes,
+                    out_data,
+                    depth_padding * out_width,
+                    in_data,
+                    height_stride);
+            }
+            in_data += src_stride;
+            out_data += dst_stride;
+        }
     }
     nn_sem_post(&td->donesem);
 }
@@ -281,54 +276,40 @@ static int convert_from_aix_d32_execute(struct nn_node *self, struct nn_graph *n
     return 0;
 }
 
-static int convert_from_aix_d32_check(struct nn_node *self, struct nn_graph *nn)
-{
-    int k;
-    logmsg(nn, 2, "Convert from aix d32 check %p", self);
-    k = node_check_inputs_range(self, nn, "convert aix d32 op", 3, 3);
-    if (k != 0)
-        return k;
-    k = node_check_outputs_range(self, nn, "convert aix d32 op", 3, 3);
-    if (k != 0)
-        return k;
-    logmsg(nn, 2, "convert to aix d32 op %p check OK", self);
-    return 0;
-}
-
-static int convert_to_aix_d32_check(struct nn_node *self, struct nn_graph *nn)
-{
-    int k;
-    logmsg(nn, 2, "Convert to aix d32 check %p", self);
-    k = node_check_inputs_range(self, nn, "convert aix d32 op", 4, 4);
-    if (k != 0)
-        return k;
-    k = node_check_outputs_range(self, nn, "convert aix d32 op", 3, 3);
-    if (k != 0)
-        return k;
-    logmsg(nn, 2, "convert to aix d32 op %p check OK", self);
-    return 0;
-}
-
+//This should always be converted to the d32 variant
 struct nn_node_ops nn_ops_for_Convert_to_aix_d32 = {
     .execute = convert_to_aix_d32_execute,
-    .check = convert_to_aix_d32_check,
+    .check = NULL,
     .ctor = node_alloc_common,
     .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT(4),
+    .n_outputs = NN_IOCOUNT(3),
 };
 
-//This is unsued
-struct nn_node_ops nn_ops_for_Convert_from_aix = {
-    .execute = convert_from_aix_d32_execute,
-    .check = convert_from_aix_d32_check,
+struct nn_node_ops nn_ops_for_Convert_to_aix_d32_d32 = {
+    .execute = convert_to_aix_d32_execute,
+    .check = NULL,
     .ctor = node_alloc_common,
     .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT(4),
+    .n_outputs = NN_IOCOUNT(3),
+    .flags = NN_NODE_FLAG_D32_INPUT};
+
+//This should always be converted to the d32 variant
+struct nn_node_ops nn_ops_for_Convert_from_aix = {
+    .execute = convert_from_aix_d32_execute,
+    .check = NULL,
+    .ctor = node_alloc_common,
+    .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT(3),
+    .n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_Convert_from_aix_d32 = {
     .execute = convert_from_aix_d32_execute,
-    .check = convert_from_aix_d32_check,
+    .check = NULL,
     .ctor = node_alloc_common,
     .dtor = node_free_common,
-    .flags = NN_NODE_FLAG_D32_OUTPUT
-};
-    
+    .n_inputs = NN_IOCOUNT(3),
+    .n_outputs = NN_IOCOUNT(3),
+    .flags = NN_NODE_FLAG_D32_OUTPUT};

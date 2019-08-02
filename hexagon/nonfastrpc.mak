@@ -94,6 +94,7 @@ endif
 
 ifdef V66
 CFLAGS += -DHEXAGON_V66=1
+ASFLAGS += -DFAST_16B_CONV
 HEXAGON_NN_ASM_SRCS += hexagon/asm_src/gvconv2dbbb_d32_h_v66.S hexagon/asm_src/gvconv2dbbb_d32_s1f_h_v66.S hexagon/asm_src/gvconv2dbbb_d16_s1f_h_v66.S
 HEXAGON_NN_ASM_SRCS += hexagon/asm_src/gvconv2dbbbs1x4_d32_h_v66.S
 HEXAGON_NN_ASM_SRCS += hexagon/asm_src/gvconv2db2b2b2_d32_h_v66.S
@@ -101,8 +102,14 @@ SIM_OPTIONS += --core V66G_1024
 else
 ifdef V65
 CFLAGS += -DHEXAGON_V65=1
-HEXAGON_NN_ASM_SRCS += hexagon/asm_src/gvconv2dbbb_circ_d64_v65_h.S hexagon/asm_src/gvconv2dbbb_circ_d32_v65_h.S hexagon/asm_src/repstream2_h.S
-HEXAGON_NN_ASM_SRCS += hexagon/asm_src/gvconv2dbbb_circ6_d64_v65_h.S hexagon/asm_src/gvconv2dbbb_circ6_d32_v65_h.S hexagon/asm_src/repstreamN_h.S
+HEXAGON_NN_ASM_SRCS += hexagon/asm_src/gvconv2dbbb_circ_d64_v65_h.S \
+                       hexagon/asm_src/gvconv2dbbb_circ_d32_v65_h.S \
+                       hexagon/asm_src/repstream2_h.S \
+                       hexagon/asm_src/gvconv2dbbb_circ6_d64_v65_h.S \
+                       hexagon/asm_src/gvconv2dbbb_circ6_d32_v65_h.S \
+                       hexagon/asm_src/repstreamN_h.S \
+                       hexagon/asm_src/gvconv2db2b2b2_d32_h_v65.S \
+                       hexagon/asm_src/gvconv2db2b2b2u_d32_h_v65.S
 SIM_OPTIONS += --core V65A_512
 endif
 endif

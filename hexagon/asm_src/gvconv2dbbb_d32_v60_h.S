@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -85,9 +85,9 @@ gvconv2dbbb_v60_asm:
 #define ptr_sumabuf0           r1     //6 filt_offset*in_offset - in_offset*sum(in)
 #define next_sumabuf           r26    //7 stride to get to next row of suma values 
 #define ptr_max                r7     //8 maximum and minum buffer
-#define recip_level            r14    //9 255 / (MAX - MIN) - used to scale to bytes
-#define out_align              r7     //10 alignment of the final results
-#define truncate               r12    //11
+#define recip_level_ptr        r14    //9  pointer to  32 of int32, 255 / (MAX - MIN) - used to scale to bytes
+#define zshift                 r7     //10 amount to << results (re-use ptr_max)
+
 /*=============================================================================*/
 #define ptr_sumabuf            r27    //temp value of suma buffer ptr
 #define in_width_stride_depth  r15    //in_width * stride * in_depth for next output
@@ -161,24 +161,22 @@ gvconv2dbbb_v60_asm:
        } {  
            memd(sp+#0)  = r17:16                        //
            memd(sp+#24) = r23:22                        //
-           nop; nop                                     //
+           r23 = ##0x80000001                           // init for max
        } {
            memd(sp+#8)  = r19:18                        //
            memd(sp+#16) = r21:20                        //
-           nop; nop                                     //
+           maxe = vsplat(r23)                           //
        } {
            memw(sp+#52) = ptr_wi                        //
            memd(sp+#40) = r27:26                        //
-//         r23 = ##0x7fffffff                           //max pos
+           mine.w = vabs(maxe.w)                        // +0x7fffffff
        } {
-           ptr_max = memw(sp+#28<<2)                    //ptr pre computed max value in output
-           ptr_sumabuf0 = memw(sp+#26<<2)               //read in the ptr to the bias buffer value
-//         maxe = #0                                    //
-//         mine = vsplat(r23)                           //
+           zshift = memw(sp+#30<<2)                     // amount to << the products
+           ptr_sumabuf0 = memw(sp+#26<<2)               //read in the ptr to the suma buffer value
        } {
+           p3 = cmp.gt(zshift,#0)                       // do we need to do << on the sums?
            memw(sp+#56) = ptr_zi                        //
            memw(sp+#60) = out_width                     //
-//         maxe.w = vsub(maxe.w, mine.w)                //
        } {
            stride_h_w = memw(sp+#20<<2)                 //extract stride*depth 
            in_depth   = memw(sp+#21<<2)                 //
@@ -187,7 +185,7 @@ gvconv2dbbb_v60_asm:
            filt_height = memw(sp+#23<<2)                //extract filt_height 
            stride_w = zxth(stride_h_w)                  //
            stride_h = lsr(stride_h_w, #16)              //
-       } {   
+       } {
            filt_width = asl(filt_width, #2)             //
            filt_height=mpy(filt_height.L,in_depth.L)    //filt_height*in_depth
            fetch_out = sub(filt_width,stride_w)         // filt_width - stride_w
@@ -199,15 +197,13 @@ gvconv2dbbb_v60_asm:
            out_height  = memw(sp+#24<<2)                //number of output lines
        } {
            memd(sp+#32) = r25:24                        //
-           recip_level  = memw(sp+#29<<2)               // 
+           recip_level_ptr = memw(sp+#29<<2)               //
            filt_width = add(filt_width, #-1)            //account for software pipeline
            in_width_32 = asl(in_width, #5)              //32 * in_width d32 line
        } {
            sum_stride = asl(stride_w, #2)               //stride for th sum data 1 or 2 words
-           recipvec = vsplat(recip_level)               //
-//         out_align = memw(sp+#30<<2)                  //
+           recipvec = vmem(recip_level_ptr+#0)               //
            next_sumabuf = memw(sp+#27<<2)               //stride of ptr pre computed input sum
-           maxe = vmem(ptr_max+#0)                      //
        } {
            M0 = sum_stride                              //allow stride by 4bytes or 8bytes
            wsum = vmem(ptr_filtsum+#0)                  //
@@ -224,8 +220,6 @@ gvconv2dbbb_v60_asm:
            sum0 = memw(ptr_sumabuf++M0)                 //[P, 0]sum 0
            dcfetch(ptr_xi+#3<<5)                        //
        } {
-//         truncate = memw(sp+#31<<2)                   //
-           mine = vmem(ptr_max+#1)                      //
            in_width_stride_depth=mpyi(in_width,stride_h)//
            d0 = vsplat(sum0)                            //[P, 1]
            sum1 = memw(ptr_sumabuf++M0)                 //[P, 1]sum 1
@@ -240,7 +234,6 @@ gvconv2dbbb_v60_asm:
            d2 = vsplat(sum2)                            //[P, 3]
            sum3 = memw(ptr_sumabuf++M0)                 //[P, 3]sum 3
        }{
-//         p2 = !cmp.eq(truncate, #0)                   //if !=0 ten enable last store
            fetch_out = max(fetch_out,fetch_offset)      //if negative, set to 0
            s2.w = vadd(wsum.w, d2.w)                    //[P, 4]
            d3 = vsplat(sum3)                            //[P, 4]
@@ -378,12 +371,14 @@ gvconv2dbbb_v60_asm:
            y2.w  = vmpye(s2.w, recipvec.uh)             //
            ptr_x0 = add(ptr_x0, in_width_32)            //[E, 7]next line ptr_y keeps going
            dcfetch(ptr_sumabuf+#0<<5)                   //fetch next suma's
-       } {
+           if( p3 ) jump:nt .L_do_zshift                // go do (s0,s1,s2,s3) <<= zshift
+       } { //** note ** effect of following packet needs to be duplicated at .L_do_zshift
            s0.uw       += vrmpy(y1.ub, x07x04.ub)       //[1, 4]
            s1.uw       += vrmpy(y1.ub, x17x14.ub)       //[1, 4]
            dcfetch(fetch_ptr+#0<<5)                     //fetch line 
            ptr_x0 = sub(ptr_x0, next_outputs)           //reset data ptr to next 4
        }
+.L_done_zshift:
 /* ---------------------------------------------------------------------------- */
        {   y2.w+= vmpyo(s2.w, recipvec.h):SSR 
            maxe.w = vmax(maxe.w, s0.w)                  //see if s0 is max
@@ -420,12 +415,12 @@ gvconv2dbbb_v60_asm:
            mine.w = vmin(mine.w, sk.w)                  //see if s3 is min
            sum1 = memw(ptr_sumabuf++M0)                 //[P, 1]sum 1
        } {
-           y3.h = vpacke(y3.w, y2.w)                    //#sat8  <0, >255 
+           y3.h = vpack(y3.w, y2.w):sat                 //#sat8  <0, >255
            d0 = vsplat(sum0)                            //[P, 1]
            d1 = vsplat(sum1)                            //[P, 2]
            sum2 = memw(ptr_sumabuf++M0)                 //[P, 2]sum 2
        } {
-           y1.h = vpacke(y1.w, y0.w)                    //#>>16  
+           y1.h = vpack(y1.w, y0.w):sat                    //#>>16
            fetch_ptr0 = add(ptr_x0, in_width_32)        //[P, 4]fetch from next line
            sum3 = memw(ptr_sumabuf++M0)                 //[P, 3]sum 3
        } {
@@ -444,45 +439,70 @@ gvconv2dbbb_v60_asm:
            if(!p0.new) jump:t .L_height                 //
        }//end lines per block
 /* ---------------------------------------------------------------------------- */
-#if 0
-       {   c4 = #4                                      //
-           loop0(.L_peak, #4)                           //[P, 0]
-       } {   
-           ptr_max = memw(sp+#28<<2)                    //ptr pre computed max value in output
-           maxomaxe=vshuff(maxe,maxe,c4)                //[0, 0]
-       } 
-.L_peak:
-       {   minomine=vshuff(mine,mine,c4)                //[0, 1]
-           maxe.w = vmax(maxo.w, maxe.w)                //[0, 1]
+
+
+// scale mine,maxe according to scales
+// find min/max reduced over previous min/max;
+// We don't need to << the min/max by zshift, since they were reduced
+// from the values taken after the << by zshift.
+//
+       {
+           y0.w  = vmpye(maxe.w, recipvec.uh)
+           ptr_max = memw(sp+#28<<2)                    // ptr to existing max/min values
        } {
-           c4 = add(c4, c4)                             //[0, 2]
-           mine.w = vmin(mino.w, mine.w)                //[0, 2]
+           s0  = vmem(ptr_max+#0)                      // previous max
+           y0.w+= vmpyo(maxe.w, recipvec.h):SSR
        } {
-           maxomaxe=vshuff(maxe,maxe,c4)                //[1, 0]
-       }:endloop0 
-       {   minomine=vshuff(mine,mine,c4)                //[1, 1]
-           maxe.w = vmax(maxo.w, maxe.w)                //[1, 1]
-           vmem(ptr_max+#0) = maxe.new                  //[E, 1]
+           maxe.w = vmax(y0.w, s0.w)                   // new max
+           s1  = vmem(ptr_max+#1)                      // previous min
+           y1.w  = vmpye(mine.w, recipvec.uh)
        } {
-           mine.w = vmin(mino.w, mine.w)                //[1, 2]
-           vmem(ptr_max+#1) = mine.new                  //[E, 2]
+           vmem(ptr_max+#0) = maxe
+           y1.w+= vmpyo(mine.w, recipvec.h):SSR
        }
-#endif
+
 /*=============================================================================*/
-       {   vmem(ptr_max+#0) = maxe                      //
-           r17:16 = memd(sp+#0)                         //restore stack
+       {
+           vmem(ptr_max+#1) = mine.new                  //
+           mine.w = vmin(s1.w, y1.w);                   // new min
        } {
-           vmem(ptr_max+#1) = mine                      //
+           r17:16 = memd(sp+#0)                         //restore stack
            r19:18 = memd(sp+#8)                         //Q
        } {
            r21:20 = memd(sp+#16)                        //Q
            r23:22 = memd(sp+#24)                        //Q
-       } {    
+       } {
            r25:24 = memd(sp+#32)                        //Q
            r27:26 = memd(sp+#40)                        //Q
        } {
            dealloc_return                               //Q
        }
+
+// broken-out code to << s0,s1,s2,s3 all by zshift
+// But, at time of branch, sums s0,s1 aren't yet completed;
+// and there are some side effects from a skipped packet that
+// we need to duplicate before going back.
+// Also, y2=s2*scale product is partly done when the branch occurs, so that
+// needs to be redone with the new s2.
+//
+       .balign 32
+.L_do_zshift:
+       {
+           s2.w = vasl(s2.w, zshift )
+           s0.uw       += vrmpy(y1.ub, x07x04.ub)       //[1, 4]
+           s1.uw       += vrmpy(y1.ub, x17x14.ub)       //[1, 4]
+       } {
+           s3.w = vasl(s3.w, zshift )
+           dcfetch(fetch_ptr+#0<<5)                     //fetch line
+           ptr_x0 = sub(ptr_x0, next_outputs)           //reset data ptr to next 4
+       } {
+          s0.w = vasl(s0.w, zshift)
+          y2.w  = vmpye(s2.w, recipvec.uh);             // redo the s2->y2 partial calc
+       } {
+          s1.w = vasl(s1.w, zshift)
+          jump .L_done_zshift;
+       }
+
 .L_end:
 /*=============================================================================*/
       .size gvconv2dbbb_v60_asm, .L_end-gvconv2dbbb_v60_asm

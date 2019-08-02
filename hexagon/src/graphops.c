@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -42,6 +42,7 @@
  */
 
 #include <nn_graph.h>
+#include "nn_prepare.h"
 
 static inline void log_causality(
 	struct nn_graph *nn, 
@@ -269,8 +270,8 @@ struct nn_node* find_unique_consumer(
 //
 int check_single_consumer_all(
 	struct nn_graph *nn, 
-	struct nn_node *producer, 
-	struct nn_node *consumer)
+	struct nn_node const *producer,
+	struct nn_node const *consumer)
 {
 	struct nn_node *tmp;
 	uint32_t prod_id = producer->node_id;

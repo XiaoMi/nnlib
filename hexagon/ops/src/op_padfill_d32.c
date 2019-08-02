@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -212,24 +212,14 @@ general_fill_op_random( uint8_t *out, int len, int fillval,  uint64_t *state)
 }
 
 
-static int padfill_d32_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking padfill_d32 node %p",self);
-
-	int k = node_check_inputs_range( self, nn, "padfill_d32", 1, 3 );
-	if(k==0) k = node_check_outputs_n( self, nn, "padfill_d32", 1 );
-	if( k != 0 ) return k;
-
-	logmsg(nn,2,"padfill_d32 %p check OK",self);
-	return 0;
-}
-
 
 struct nn_node_ops nn_ops_for_FillPadding_8_d32 = {
 	.execute = padfill_d32_execute,
-	.check = padfill_d32_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(1,3),
+	.n_outputs = NN_IOCOUNT(1),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };
 

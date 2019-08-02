@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -326,7 +326,7 @@ tanh_sigmoid_work_func( struct nn_graph *nn, void *rstpv)
 }
 
 
-
+/*
 static int tahn_sigmoid_16_check(struct nn_node *self, struct nn_graph *nn)
 {
 	char const *nm = op_type_to_string_alt(self->node_type, "unknown");
@@ -334,19 +334,23 @@ static int tahn_sigmoid_16_check(struct nn_node *self, struct nn_graph *nn)
 	// must have 3 inputs and 3 outputs
 	return node_check_inputs_outputs_n( self, nn, nm, 3, 3 );
 }
-
+*/
 
 struct nn_node_ops nn_ops_for_QuantizedTanh_16 = {
 	.execute = tahn_sigmoid_16_execute,
-	.check = tahn_sigmoid_16_check,
+	.check = NULL,//tahn_sigmoid_16_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedSigmoid_16 = {
 	.execute = tahn_sigmoid_16_execute,
-	.check = tahn_sigmoid_16_check,
+	.check = NULL, //tahn_sigmoid_16_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 };
 

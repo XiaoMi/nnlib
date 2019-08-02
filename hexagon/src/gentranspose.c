@@ -111,10 +111,15 @@
 
 #include "nn_graph.h"
 #include "nn_gentranspose.h"
+#include "nn_bulk_transpose.h"
 #include "hvx_inlines.h"
 #include "quantize.h"
 
+#define TRANSPOSE_NUM_THREADS 2
 
+// all of these need to be capable of being called with NULL nn
+//  (handle all in the calling hvx thread)
+// or non-null nn (launch vector threads, as needed.
 static int
 __attribute__((unused,noinline))
 transpose_execute_NULL( struct nn_graph *nn, struct nn_transpose_desc const * tdp, void *buffer,
@@ -143,9 +148,12 @@ static void transpose_thread_A8xB8x16( struct nn_graph *nn , void *rstpv );
 static void transpose_thread_1vec_shuffle4( struct nn_graph *nn , void *rstpv );
 static void transpose_thread_deal2( struct nn_graph *nn , void *rstpv );
 
+static void transpose_thread_bulktranspose( struct nn_graph *nn , void *rstpv );
+
 typedef void (*nn_stride_scalar_copy_fp)(uint8_t * outp, uint8_t const *inp, int h, int w, int hsi, int wsi, int hso, int wso);
 
 
+// swap rows i0, i1 of table
 static inline void swap_rows( struct nn_transpose_desc * tdp, int i0, int i1 )
 {
 	struct nn_transpose_tabrow * r0 = &tdp->table[i0];
@@ -156,7 +164,31 @@ static inline void swap_rows( struct nn_transpose_desc * tdp, int i0, int i1 )
 	*r0 = t1;
 	*r1 = t0;
 }
+// if i0 < i1, move row i1 to i0, and rows i0...i1-1 are shifted up to i0+1 ... i1
+static inline void roll_rows( struct nn_transpose_desc * tdp, int i0, int i1 )
+{
+	struct nn_transpose_tabrow * r0 = &tdp->table[i0];
+	struct nn_transpose_tabrow * r1 = &tdp->table[i1];
+	if( r1 > r0){
+		struct nn_transpose_tabrow tmp = *r1;
+		do{
+			r1--;
+			r1[1] = r1[0];
+		}while( r1 > r0);
+		*r1 = tmp;
+	}
+}
 
+// find first table row,  row0 <= i < nrows, with instride = needed_stride.
+// return row index or -1 if not found.
+static inline int
+find_row_with_instride( struct nn_transpose_desc * tdp, int needed_stride, int row0, int nrows)
+{
+	for( int i =row0; i < nrows; i++){
+		if( tdp->table[i].in_stride == needed_stride ) return i;
+	}
+	return -1;
+}
 
 // this does 2 things:
 // (1) check that the permutation is valid
@@ -389,6 +421,61 @@ int nn_transpose_analyze_direct( struct nn_transpose_desc * tdp,
 		if( tdp->table[1].out_stride != dsize || tdp->table[2].out_stride != w*dsize )
 			return - __LINE__;
 
+		// bulk transpose?
+		// requires: d is 1,2,4,8, or 16
+		// prefers:  d*w >= 48
+		//           d*eff_h >= 48  (where eff_h is the n from the row with in_stride = d)
+		//  tdp->outer_size >= 2K
+		//
+		if(  dsize <=16  &&  is_power2(dsize) && dsize*w >= 48  && tdp->outer_size >= 2048){
+			// find the row, in range 2..nrows-1, which has in_stride ==d
+			int xrow = find_row_with_instride( tdp, dsize, 2,nrows);
+			if( xrow < 0) return -__LINE__;
+			if( dsize * tdp->table[xrow].n >= 48){
+				//printf("going with dsize =%d, w = %d, h = %d, outer_size = %d, nrows = %d\n", dsize, w, (int)tdp->table[xrow].n,
+				//		tdp->outer_size, nrows);
+				// OK, decision is made, we will do this..
+				// if xrow is not row 2, roll it down to row 2.
+				if( xrow > 2){
+					roll_rows( tdp, 2, xrow);
+				}
+				// now: if the n_outer is 1, and nrows >= 4, and outer_size >= 32768,
+				// we can drop the last loop and make it an 'outer' loop (with different
+				// input and output strides; but bulk transpose can handle that). This will
+				// allow it to be done across multiple threads.
+				//
+				if( tdp->n_outer ==1 && nrows >= 4 && tdp->outer_size >= 32768){
+					// if nrows = 5, we can drop either of the two extra;
+					//if both n's are small, but row 3 is at least 2 more than
+					// row 4, swap them so we can split the larger one.
+					if( nrows == 5
+					      && tdp->table[3].n > tdp->table[4].n+1
+						  && tdp->table[3].n <= 6 ){
+						swap_rows( tdp, 3,4 );
+					}
+
+					tdp->n_dims = --nrows;
+					struct nn_transpose_tabrow * xrowp = &tdp->table[nrows];
+					tdp->n_outer = xrowp->n;
+					tdp->outer_in_stride = xrowp->in_stride;
+					tdp->outer_out_stride = xrowp->out_stride;
+					tdp->outer_size /= tdp->n_outer;
+					xrowp->n = 1;		// 'extra' rows must always have n=1.
+				}
+				// we need to have a work area for this. just find the largest work area
+				// based on dsize...
+				int work_area_size = 128*128 >> __builtin_ctz(dsize);	// 16K for d=1, 1K for d=16
+				tdp->buffer_needed = work_area_size * TRANSPOSE_NUM_THREADS;
+				tdp->buf_per_thread = work_area_size;
+
+				tdp->execute_fp = transpose_execute_HVXFUNC;
+				tdp->funcp = transpose_thread_bulktranspose;
+				return 0;
+			}
+		}
+
+
+
 		// find the gcf( dsize, 8)
 		int log2_gcf = Q6_R_ct0_R(dsize|8);	//  0...3
 		int gcf = 1<<log2_gcf;
@@ -448,6 +535,47 @@ int nn_transpose_analyze_direct( struct nn_transpose_desc * tdp,
 	}
 }
 
+
+// 'One step' entry point for transpose op
+// The elementsize, perm_arr, permn, dims, ndim are exactly as per
+//     nn_transpose_analyze_direct
+// You can optionally pass in a scratch buffer via scratch, scratch_bytes.
+// If the operation needs a scratch buffer, and the supplied buffer is
+// too small, one will be allocated and freed.
+//
+// Note: nn may be NULL, this causes the execute to take
+// place in the current thread, which must support hvx.
+//
+int nn_transpose_operation( struct nn_graph *nn,
+		void *outp,			// output, vec-aligned
+		void const *inp,	// input, vec-aligned
+        int elementsize,
+        int32_t const*perm_arr, int permn,
+        uint32_t const *dims, int ndim,
+        void * scratch,		// or NULL; must be vector aligned
+        uint32_t scratch_bytes )	// size of scratch buffer.
+{
+	// analyze..
+	struct nn_transpose_desc tdesc;
+	int res = nn_transpose_analyze_direct( &tdesc,
+           elementsize, perm_arr, permn, dims, ndim );
+	if( res != 0 ) return res;
+	void *sbuf = scratch;
+	if( tdesc.buffer_needed != 0 ){
+		if( sbuf == NULL || scratch_bytes < tdesc.buffer_needed){
+			sbuf = nn_memalign( 128, tdesc.buffer_needed);
+			if( sbuf == NULL){
+				return errlog(nn,"can't alloc %u bytes", (unsigned)tdesc.buffer_needed);
+			}
+		}
+	}
+	// execute..
+	res = nn_transpose_execute( nn, &tdesc, sbuf, outp, inp );
+	if( sbuf != scratch)
+		nn_free( sbuf);
+	return res;
+}
+
 //
 // special cases:
 //
@@ -479,13 +607,17 @@ static int transpose_execute_MEMCPY( struct nn_graph *nn, struct nn_transpose_de
 		uint8_t * output, uint8_t const *input)
 {
 	int cpylen = tdp->table[0].n;
-	if( cpylen < 256 ){
-		memcpy( output, input, cpylen );
+	if( nn != NULL){
+		if( cpylen < 256 ){
+			memcpy( output, input, cpylen );
+		}else{
+			struct nn_memcpy_manager  mcman;
+			nn_mcmanager_init(nn, &mcman );
+			nn_mcmanager_vmemcpy( nn, &mcman, output, input, cpylen );
+			nn_mcmanager_wait( nn, &mcman );
+		}
 	}else{
-		struct nn_memcpy_manager  mcman;
-		nn_mcmanager_init(nn, &mcman );
-		nn_mcmanager_vmemcpy( nn, &mcman, output, input, cpylen );
-		nn_mcmanager_wait( nn, &mcman );
+		vmemcpy_asm( output, input, cpylen );
 	}
 	return 0;
 }					
@@ -507,26 +639,39 @@ static int transpose_execute_3DMEMCPY_GEN( struct nn_graph *nn, struct nn_transp
 	int cp_outstride = tdp->table[1].out_stride;
 
 	struct nn_memcpy_manager  mcman;
-	nn_mcmanager_init(nn, &mcman );
+	if( nn != NULL)
+		nn_mcmanager_init(nn, &mcman );
 
 	for( int iout = 0; iout <(int)tdp->n_outer; iout++){
 		for( int iA = 0; iA < (int)tdp->table[4].n; iA++){
 			uint8_t *op_A  = output + iout * tdp->outer_out_stride + iA * tdp->table[4].out_stride;
 			uint8_t const *ip_A  = input + iout * tdp->outer_in_stride + iA * tdp->table[4].in_stride;
 			for( int iB = 0; iB < (int)nB; iB++){
-				for( int iC = 0; iC < (int)nC; iC++){
-					uint8_t *op = op_A + iB *out_stride_B + iC * out_stride_C;
-					uint8_t const *ip = ip_A + iB *in_stride_B + iC * in_stride_C;
-					nn_mcmanager_vmemcpy_2d( nn, &mcman,
-                         cpwid, cpht,          // width, height
-                         op, cp_outstride,      // outp, out_stride
-                         ip, cp_instride);      // inp, in_stride
+				if( nn != NULL){
+					for( int iC = 0; iC < (int)nC; iC++){
+						uint8_t *op = op_A + iB *out_stride_B + iC * out_stride_C;
+						uint8_t const *ip = ip_A + iB *in_stride_B + iC * in_stride_C;
+						nn_mcmanager_vmemcpy_2d( nn, &mcman,
+							 cpwid, cpht,          // width, height
+							 op, cp_outstride,      // outp, out_stride
+							 ip, cp_instride);      // inp, in_stride
+					}
+				}else{
+					for( int iC = 0; iC < (int)nC; iC++){
+						uint8_t *op = op_A + iB *out_stride_B + iC * out_stride_C;
+						uint8_t const *ip = ip_A + iB *in_stride_B + iC * in_stride_C;
+						vmemcpy_2d_general_asm(
+							 cpwid, cpht,          // width, height
+							 op, cp_outstride,      // outp, out_stride
+							 ip, cp_instride);      // inp, in_stride
+					}
 				}
 			}
 		}
 	}
 	
-	nn_mcmanager_wait( nn, &mcman );
+	if( nn != NULL)
+		nn_mcmanager_wait( nn, &mcman );
 	
 	return 0;
 }
@@ -616,6 +761,7 @@ STRIDED_COPY_2D( strided_copy_2d_2b, uint16_t)
 STRIDED_COPY_2D( strided_copy_2d_4b, uint32_t)
 STRIDED_COPY_2D( strided_copy_2d_8b, uint64_t)
 
+
 ///////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////
 // HVX code for special cases
@@ -629,11 +775,14 @@ struct transpose_hvx_runstate {
 	struct nn_transpose_desc const * tdp;
 	uint8_t const* input;
 	uint8_t * output;
+	uint8_t * work_area_base;		// where applicable
+	uint32_t work_area_perthread;	// where applicable
 	int n_outer_chunk;				// number to do in one pass >= 1
 	volatile int job_index;			// used to get next chunk index
-	nn_sem_t done_sem;
+	volatile int thrd_index;		// used to divide up work area (where applicable)
+	nn_sem_t done_sem;				// only used when nn!=NULL
 };
-#define TRANSPOSE_NUM_THREADS 2
+
 
 // find n / ( round_down_to_power_of_2(d))
 // rounding up. n>=0, d>0.
@@ -642,7 +791,7 @@ unsigned approx_divide( unsigned n, unsigned d)
 	int rsh = 31-Q6_R_cl0_R(d);
 	return ((int)(n-1) >> rsh) + 1;
 }
-
+///////////////////////////////////////
 // execute function for generic hvx code.
 // tdp->funcp must contain the pointer to the run thread.
 //
@@ -654,6 +803,9 @@ static int transpose_execute_HVXFUNC( struct nn_graph *nn, struct nn_transpose_d
 	runstate.input = input;
 	runstate.output = output;
 	runstate.job_index = 0;
+	runstate.thrd_index = 0;
+	runstate.work_area_perthread = tdp->buf_per_thread;
+	runstate.work_area_base = buffer;
 
 	int nouter = tdp->n_outer;
 	// each chunk is about 32k, or if total < 32k*threads, divide by threads,
@@ -665,16 +817,96 @@ static int transpose_execute_HVXFUNC( struct nn_graph *nn, struct nn_transpose_d
 		nchunk = (nouter+ (TRANSPOSE_NUM_THREADS-1))/(unsigned)TRANSPOSE_NUM_THREADS;
 	}
 	runstate.n_outer_chunk =  nchunk;
+	void( *work_fp)( struct nn_graph *, void*) = (void(*)( struct nn_graph *, void*)) tdp->funcp;
+
+	if( nn == NULL){		// call directly
+		(*work_fp)( NULL, &runstate);
+		return 0;
+	}
 	nn_sem_init(&runstate.done_sem, 0);
 
 	int nthreads = min_i32( nchunk,TRANSPOSE_NUM_THREADS );
-	void( *work_fp)( struct nn_graph *, void*) = (void(*)( struct nn_graph *, void*)) tdp->funcp;
 	for( int i = 0; i < nthreads; i++){
 		nn_os_work_for_vector( nn,work_fp, & runstate );
 	}
 	nn_sem_wait_n_times( &runstate.done_sem, nthreads);
 	return 0;
 }
+///////////////////////////////////////////////////////////////////////////
+// HVX code for 'bulk 'transpose'.
+// in the below, 'D' is a power of 2, in range 1..16
+// Simpler case: generic 3-row table
+//     D      1        1
+//     W      D     H*D
+//     H      W*D     D
+// (+ 'outer batch loop' = B,H*W*D,H*W*D)
+//
+// More complex 4-row cases (all reduce to):
+//     D      1                       1
+//     W      D                    H*D*N
+//     H     W*D*N                   D
+//     N     D*W                    H*D
+// (note that the strategy will reorder rows so that row 3 has an input stride of D;
+// this is why the W*D*N, W*D are out of order).
+//
+// For 5-row cases, there are 8 distinct cases, each with 2 'outer' dims.
+// In all cases the output stride on 2nd row, and input stride in 3rd row, are 'D'.
+// That's all we really need to know here; we just allow perform_bulk_transpose_2 to handle
+// the first 4 rows of the table; 5th row is handled in 'middle_count' loop here,
+// and there is generally an outer loop which is shared over threads.).
+// If there's no true 'batch' outer loop (with common strides), and the table has >= 4 rows,
+// the strategy may choose to make the table last row an outer loop, so we respect differing
+// outer_in_stride, outer_out_stride here.
+//
+static void transpose_thread_bulktranspose( struct nn_graph *nn , void *rstpv ){
+	struct transpose_hvx_runstate *rstp = (struct transpose_hvx_runstate*) rstpv;
+	struct nn_transpose_desc const * tdp = rstp->tdp;
+
+	int thrdno = __sync_fetch_and_add( &rstp->thrd_index,1);
+	uint8_t * work_area = rstp->work_area_base + thrdno * rstp->work_area_perthread;
+
+	struct bulk_transpose_parms btxp = {
+		.in_dims = {
+				tdp->table[3].n,		// 'batches' (=1 when nrows ==3)
+				tdp->table[1].n,		// input 'h' (output w)
+				tdp->table[2].n,		// input 'w' (output h)
+				tdp->table[0].n,		// depth (bytes)
+		},
+		.in_h_stride = tdp->table[1].in_stride,
+		.out_h_stride = tdp->table[2].out_stride,
+		.in_b_stride = tdp->table[3].in_stride,
+		.out_b_stride = tdp->table[3].out_stride,
+	};
+	uint8_t const * inp0 = rstp->input;
+	uint8_t * outp0 = rstp->output;
+
+
+	// sometimes we'll need a 'middle' loop
+	int middle_count = tdp->table[4].n;  // =1 when nrows < 5
+
+	int njobs = tdp->n_outer;
+	int outer_chunk = rstp->n_outer_chunk;
+	int job0;
+	int res = 0;
+	while( job0 = __sync_fetch_and_add( &rstp->job_index,outer_chunk),   job0 < njobs ){
+		int job1 = min_i32( job0 + outer_chunk, njobs);
+		for(int ijob = job0; ijob < job1; ijob++){
+			uint8_t const * inp = inp0 + ijob * tdp->outer_in_stride;
+			uint8_t * outp = outp0 + ijob * tdp->outer_out_stride;
+			for(int imid =0; imid < middle_count; imid++ ){
+				res = perform_bulk_transpose_2( outp, inp, work_area, &btxp, 0);
+				if(res != 0) goto quit;
+				inp += tdp->table[4].in_stride;
+				outp += tdp->table[4].out_stride;
+			}
+
+		}
+	}
+ quit:
+	if(nn!=NULL)
+		nn_sem_post( &rstp->done_sem);
+}
+
 //////////////////////////////////////////////
 // special case for transposing  [n,28,6,16] - > [n,6,28,16]
 //  or  [n,112,6,4]->[n,6,112,4]
@@ -780,7 +1012,8 @@ transpose_thread_k64_deal6( struct nn_graph *nn , void *rstpv )
 			input += group_stride;
 		}
 	}
-	nn_sem_post(&rstp->done_sem);
+	if(nn!=NULL)
+		nn_sem_post(&rstp->done_sem);
 }
 
 
@@ -904,7 +1137,8 @@ transpose_thread_1vec_shuffle4( struct nn_graph *nn , void *rstpv )
 			}
 		}
 	}
-	nn_sem_post(&rstp->done_sem);
+	if(nn!=NULL)
+		nn_sem_post(&rstp->done_sem);
 }
 
 //
@@ -974,7 +1208,8 @@ transpose_thread_deal2( struct nn_graph *nn , void *rstpv )
 			output += group_stride;
 		}
 	}
-	nn_sem_post(&rstp->done_sem);
+	if(nn!=NULL)
+		nn_sem_post(&rstp->done_sem);
 }
 
 // apply two transposes across 4 vectors (0<->2, 1<->3)
@@ -1018,7 +1253,7 @@ transpose_thread_A8xB8x16( struct nn_graph *nn , void *rstpv )
 	int kB = tdp->table[2].n /8u;
 
 	// this eliminates <=0 tests in inner loops
-	if(kA <=0 || kB <=0) { nn_sem_post(&rstp->done_sem); return; }
+	if(kA <=0 || kB <=0) { if(nn!=NULL)nn_sem_post(&rstp->done_sem); return; }
 	
 	int in_stride = kB*128;
 	int out_stride = kA*128;
@@ -1074,5 +1309,6 @@ transpose_thread_A8xB8x16( struct nn_graph *nn , void *rstpv )
 			output += group_stride;
 		}
 	}
-	nn_sem_post(&rstp->done_sem);
+	if(nn!=NULL)
+		nn_sem_post(&rstp->done_sem);
 }

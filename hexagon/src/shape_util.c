@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -60,9 +60,6 @@ nn_mcmanager_init(struct nn_graph *nn, struct nn_memcpy_manager *mcm )
 	mcm->ready_set = 0;
 }
 static void mcmanager_work_func( struct nn_graph *nn, void * mcmv );
-static void vmemcpy_2d_general_with_prefetch( int width, int height,
-		void * dst, int d_stride,
-		void const * src, unsigned s_stride );
 
 
 // some common code for the mc_manager task buffer protocol
@@ -309,15 +306,14 @@ mcmanager_work_func( struct nn_graph *nn, void * mcmv )
 	nn_sem_post( & mcm->done_sem );
 }
 // this is like memcpy_2d_general_asm except
-// (a) it does prefetch before each pass as needed, or once before
+// it does prefetch before each pass as needed, or once before
 //     the whole thing.
-// (b) it assumes height >=2
-static void
+void
 vmemcpy_2d_general_with_prefetch( int width, int height,
 		void * dst, int d_stride,
 		void  const * src, unsigned s_stride )
 {
-	if( width < 1) return;
+	if( width < 1 || height < 1) return;
 	// how much << do we need to get src & dst both multiples of 128?
 	int Kshift = 7 - Q6_R_ct0_R( (unsigned)d_stride | s_stride | 128 );
 	int K = 1<<Kshift;
@@ -369,6 +365,11 @@ struct tensor_addressing __attribute__((pure))
 nn_tensor_addressing_d32( struct tensor const * src)
 {
 	return tensor_addressing_d32_inline(src);
+}
+struct tensor_addressing __attribute__((pure))
+nn_tensor_addressing_d32_16b( struct tensor const * src)
+{
+	return tensor_addressing_d32_16b_inline(src);
 }
 //
 // check to see if tensorA and tensorB
@@ -1174,7 +1175,7 @@ int nn_generic_unary_float_op( struct nn_node *self, struct nn_graph *nn,
 //
 // to locate a byte at b,h,w,d:
 //     dx = d+ depth_pad_before;
-//     data + batch_stride * b + height_stride * h + d32_stride * (dx/32) + w*3 + (dx%32)
+//     data + batch_stride * b + height_stride * h + d32_stride * (dx/32) + w*32 + (dx%32)
 //
 // Note, if a tensor is sliced in a depth dimension, in such a way that d32 chunks are eliminated, we trim
 // depth_total to keep padding in range 0..31 at both ends
@@ -1389,6 +1390,188 @@ int tensor_slice_progressive_d32(
 	return (next_slicepos == dimsize)?1:0;
 }
 
+// array fill with int32.
+void *
+memset_32( void *dst, int val, unsigned num )
+{
+	int n = num;
+	int32_t * ptr = (int32_t*)dst;
+	if( n >= 5){
+		if( val == 0){
+			//  maybe memset has some zero-fill cache-line mojo
+			return memset(dst,0,n*sizeof(int32_t));
+		}
+		if( ((size_t)ptr&4)  != 0){
+			*ptr++ = val;
+			--n;
+		}
+		int n4 = n>>2;
+		__builtin_assume(n4>0);
+		int64_t v64 = Q6_P_combine_RR( val, val);
+		for( int i  =0; i < n4; i++){
+			((uint64_t*)ptr)[0] = v64;
+			((uint64_t*)ptr)[1] = v64;
+			ptr += 4;
+		}
+		n &=3;
+	}
+	for( int i = 0; i < n; i++){
+		*ptr++ = val;
+	}
+	return dst;
+}
+// array fill with int16
+void *
+memset_16( void *dst, int val, unsigned num )
+{
+	int n = num;
+	int16_t * ptr = (int16_t*)dst;
+	if( n >= 11){
+		if( val == 0){
+			//  maybe memset has some zero-fill cache-line mojo
+			return memset(dst,0,n*sizeof(int16_t));
+		}
+		while( ((size_t)ptr&6)  != 0){
+			*ptr++ = val;
+			--n;
+		}
+		int n8 = n>>3;
+		__builtin_assume(n8>0);
+		val = Q6_R_combine_RlRl(val,val);
+		int64_t v64 = Q6_P_combine_RR( val, val);
+		for( int i  =0; i < n8; i++){
+			((uint64_t*)ptr)[0] = v64;
+			((uint64_t*)ptr)[1] = v64;
+			ptr += 8;
+		}
+		if(n&4){
+			((uint64_t*)ptr)[0] = v64;
+			ptr += 4;
+		}
+		n &=3;
+	}
+	for( int i = 0; i < n; i++){
+		*ptr++ = val;
+	}
+	return dst;
+}
+//
+// PAD 4-d flat tensor
+//
+//
+// using scalar ops, pad the tensor
+//  'inpv' (b_in,h_in,w_in,d_in)
+//  by the given 8 pad amounts, and store at 'outpv'.
+//
+// if 'padval' is 0, element_size can be any value >=1
+// Otherwise, element_size must be 1,2 or 4; and the lower
+//    8,16,32 bits of 'padval' are used accordingly.
+//    For element_size = 2 or 4, the input and output pointers
+//    must be a aligned to a multiple of that.
+//
+
+void do_pad(
+    void *outpv,
+    const void *inpv,
+    const int32_t b_in,
+    const int32_t h_in,
+    const int32_t w_in,
+    const int32_t d_in,
+    const int32_t pre_b,
+    const int32_t post_b,
+    const int32_t pre_h,
+    const int32_t post_h,
+    const int32_t pre_w,
+    const int32_t post_w,
+    const int32_t pre_d,
+    const int32_t post_d,
+    const int32_t element_size,
+    const int32_t padval)
+{
+	int filld = element_size; // multiplier for fills
+	void * (*memset_fp)( void*, int, size_t ) = memset;
+	if(padval !=0 ){
+		if( element_size == 2){
+			filld = 1;
+			memset_fp = memset_16;
+		}else if( element_size==4){
+			filld = 1;
+			memset_fp = memset_32;
+		}
+	}
+
+    const char *in = inpv;
+    char *out = outpv;
+    int h_out = h_in + pre_h + post_h;
+    int w_out = w_in + pre_w + post_w;
+    int d_out = d_in + pre_d + post_d;
+    int out_wd = w_out * d_out;
+    int out_hwd = h_out * out_wd;
+
+    int pre_h_fill = out_wd * pre_h;
+    int post_h_fill = out_wd * post_h;
+
+    int pre_w_fill = d_out * pre_w;
+    int post_w_fill = d_out * post_w;
+    int in_d_size = d_in * element_size;
+    int b, h, w;
+
+    if( pre_b ){
+        int pre_b_fill = out_hwd * pre_b;
+        (*memset_fp)(out, padval, pre_b_fill*filld);
+        out += pre_b_fill*element_size;
+    }
+    for (b = 0; b < b_in; b++)
+    {
+    	if( pre_h_fill){
+    		(*memset_fp)(out, padval, pre_h_fill*filld);
+    		out += pre_h_fill*element_size;
+    	}
+        for (h = 0; h < h_in; h++)
+        {
+        	if( pre_w_fill){
+        		(*memset_fp)(out, padval, pre_w_fill*filld);
+        		out += pre_w_fill*element_size;
+        	}
+            if( d_out == d_in ){
+            	memcpy(out, in, in_d_size*w_in);
+            	in += in_d_size*w_in;
+            	out += in_d_size*w_in;
+            }else{
+                for (w = 0; w < w_in; w++)
+                {
+                	if(pre_d){
+                		(*memset_fp)(out, padval, pre_d*filld);
+                		out += pre_d * element_size;
+                	}
+                    memcpy(out, in, in_d_size);
+                    in += in_d_size;
+                    out += in_d_size;
+                	if(post_d){
+                		(*memset_fp)(out, padval, post_d*filld);
+                		out += post_d * element_size;
+                	}
+                }
+            }
+        	if( post_w_fill){
+        		(*memset_fp)(out, padval, post_w_fill*filld);
+        		out += post_w_fill*element_size;
+        	}
+        }
+    	if( post_h_fill){
+    		(*memset_fp)(out, padval, post_h_fill*filld);
+    		out += post_h_fill*element_size;
+    	}
+    }
+    if( post_b ){
+        int post_b_fill = out_hwd * post_b;
+        (*memset_fp)(out, padval, post_b_fill*filld);
+        out += post_b_fill*element_size;
+    }
+}
+
+
+
 /////////////////////////////////////////////////////////////////////
 //
 // Checksumming
@@ -1489,7 +1672,7 @@ nn_report_node_outputs( struct nn_graph * nn, int level, struct nn_node const *n
 {
 	int n_out = np->n_outputs;
 	logmsg(nn,level, "Outputs for node 0x%x, type %s", np->node_id, op_type_to_string_alt(np->node_type,"??"));
-	if( np->outputs == NULL ) return;
+	if( np->outputs == NULL || nn->debug_level < level ) return;
 
 #ifdef DUMP_NODE_OUTPUTS
 	if( np->node_type == OP_Supernode_8x8p8to8_d32 || np->node_type == OP_InputSupernode_8x8p8to8_outd32
@@ -1499,31 +1682,42 @@ nn_report_node_outputs( struct nn_graph * nn, int level, struct nn_node const *n
 		dump_node_output( nn,np);
 	}
 #endif
+	// skip checksum on tensors > max_checksum (they can be very time consuming in sims)
+	uint32_t max_checksum = nn_option_get( nn, debug_max_show_checksum);
 
 	for( int i = 0; i < n_out; i++ ){
 		struct tensor const *ot = np->outputs[i];
+		// common prefix
+		char tmpbuf[128];
+		snprintf(tmpbuf, sizeof(tmpbuf), "  %2d : (%2d,%3d,%3d,%4d)",
+				i, (int)ot->shape.batches, (int)ot->shape.height, (int)ot->shape.width, (int)ot->shape.depth);
+
 		if( ot->data_size == 4){
-			logmsg(nn,level,"  %2d : (%2d,%3d,%3d,%4d) len=4   int = %d  float=%.8g",
-				i, (int)ot->shape.batches, (int)ot->shape.height, (int)ot->shape.width, (int)ot->shape.depth,
-				(int)tensor_get_int32( ot, 0), tensor_get_float(ot,0));
+			logmsg(nn,level,"%s len=4   int = %d  float=%.8g",
+				tmpbuf,(int)tensor_get_int32( ot, 0), tensor_get_float(ot,0));
 		}else{
 			uint64_t chk = 0;
-			unsigned elsize;
+			int do_checksum = 0;
+			unsigned elsize =0;
 			char const *strd32 = "      ";
 			if( ot->data_size > 0){
+				unsigned n = tensor_element_count(ot);
 				if( tensor_is_d32(ot)){
+					do_checksum = (n <= max_checksum);
 					strd32 = " (d32)";
-					chk = nn_checksum_tensor_d32(ot);
+					if( do_checksum) chk = nn_checksum_tensor_d32(ot);
 					elsize = 1;
 				}else{
-					unsigned n = tensor_element_count(ot);
+					do_checksum = (ot->data_size <= max_checksum);
 					elsize = ot->data_size/n;
-					chk = nn_checksum_tensor(ot);
+					if( do_checksum) chk = nn_checksum_tensor(ot);
 				}
 			}
-			logmsg(nn,level,"  %2d : (%2d,%3d,%3d,%4d) elsize=%u  %s Chk=0x%016llX",
-				i, (int)ot->shape.batches, (int)ot->shape.height, (int)ot->shape.width, (int)ot->shape.depth,
-				elsize, strd32, (unsigned long long) chk);
+			if(do_checksum){
+				logmsg(nn,level,"%s elsize=%u  %s Chk=0x%016llX", tmpbuf, elsize, strd32, (unsigned long long)chk );
+			}else{
+				logmsg(nn,level,"%s elsize=%u  %s", tmpbuf, elsize, strd32);
+			}
 		}
 	}
 }

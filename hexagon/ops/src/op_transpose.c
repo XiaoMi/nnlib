@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -47,12 +47,15 @@
 // when it's checked.
 // 
 struct transpose_info {
+	uint8_t elbytes;		// bytes per element (set in 'check')
+	uint8_t eltype;			// type of output element (e.g. NN_TYPE_FLOAT, set in 'check')
+	uint8_t isq;			// true if the type has min/max ports (set in 'check')
 	uint8_t strategy_valid;
 	struct shape inshape;
 	struct shape outshape;
 	int n_perm;			// # of dims in the 'tx' permutation
 	int32_t perm[4];	// the permutation
-	struct nn_transpose_desc  txdesc;
+	struct nn_transpose_desc  txdesc;	// the prepared 'transpose' op
 };
 
 static int transpose_execute(struct nn_node *self, struct nn_graph *nn)
@@ -61,23 +64,16 @@ static int transpose_execute(struct nn_node *self, struct nn_graph *nn)
 
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *dims_tensor = self->inputs[1];
-		
+
 	//const struct tensor *true_rank_tensor = self->inputs[2];
 	struct tensor *out_tensor = self->outputs[0];
 
-	int elbytes = 4;
-	int eltype = NN_TYPE_INT32;
-	int optype = self->node_type;
-	if( optype == OP_Transpose_f || optype == OP_Permute_f){
-		eltype = NN_TYPE_FLOAT;
-	}else if( optype == OP_Transpose_8 || optype == OP_QuantizedPermute_8){
-		eltype = NN_TYPE_QUINT8;
-		elbytes = 1;
+	logmsg(nn,2,"transpose execute. self=%p ",self);
+	if( info->isq){
 		tensor_copy( self->outputs[1], self->inputs[2]);
 		tensor_copy( self->outputs[2], self->inputs[3]);
 	}
 
-	logmsg(nn,2,"transpose execute. self=%p ",self);
 	logmsg(nn,3,"transpose input = %dx%dx%dx%d",
 		(int)in_tensor->shape.batches, (int)in_tensor->shape.height,
 		(int)in_tensor->shape.width,	(int)in_tensor->shape.depth);
@@ -107,7 +103,7 @@ static int transpose_execute(struct nn_node *self, struct nn_graph *nn)
 	}
 	int res;
 	// if not valid, build it
-	
+
 	if( !strategy_valid ){
 		info->inshape = in_tensor->shape;
 		info->n_perm = n_perm;
@@ -115,16 +111,24 @@ static int transpose_execute(struct nn_node *self, struct nn_graph *nn)
 			info->perm[i] = perm_p[i];
 		res = nn_transpose_check( perm_p, n_perm, &info->inshape, &info->outshape );
 		if( res ) return errlog(nn,"bad transpose control");
-		res = nn_transpose_analyze( &info->txdesc, elbytes, info->perm, n_perm, &info->inshape );
+		res = nn_transpose_analyze( &info->txdesc, info->elbytes, info->perm, n_perm, &info->inshape );
 		if( res ) return errlog( nn,"transpose error %d", res);
+		if( info->txdesc.buffer_needed > nn->scratch_size){
+			if( nn_scratch_grow(nn, info->txdesc.buffer_needed)!=0)
+				return errlog(nn,"couldn't grow scratch for transpose\n");
+		}
+		int eltype = info->eltype;
+		if( tensor_out_prepare_normal_fromshape( out_tensor, &info->outshape, eltype)!=0 ){
+			return errlog(nn,"out too small");
+		}
+		// Transpose_16 propagates QINT16 as QINT16
+		if(eltype == NN_TYPE_QUINT16 && in_tensor->format.type == NN_TYPE_QINT16){
+			out_tensor->format.type = NN_TYPE_QINT16;
+		}
 		info->strategy_valid = 1;
 	}
-	if( tensor_out_prepare_normal_fromshape( out_tensor, &info->outshape, eltype)!=0 ){
-		return errlog(nn,"out too small");
-	}
-	// @@ TODO: check if the transpose needs scratch memory.
-	
-	res = nn_transpose_execute(nn, &info->txdesc, NULL, out_tensor->data, in_tensor->data );
+
+	res = nn_transpose_execute(nn, &info->txdesc, nn->scratch, out_tensor->data, in_tensor->data );
 	if( res != 0) return errlog( nn, "transpose exec error %d", res);
 
 	logmsg(nn,2,"transpose %p done",self);
@@ -134,15 +138,44 @@ static int transpose_execute(struct nn_node *self, struct nn_graph *nn)
 static int transpose_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking transpose node %p",self);
-	int k =(self->node_type == OP_Transpose_8 || self->node_type == OP_QuantizedPermute_8)? 2 : 0;
 
-	if (self->n_inputs != k+2) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != k+1) return errlog(nn,"wrong # outputs");
-	
 	void * infop = nn_calloc( 1, sizeof(struct transpose_info) );
 	if( infop == NULL ) return errlog(nn,"alloc failed");
 	self->opaque = infop;
-	logmsg(nn,2,"range transpose %p check OK",self);
+
+	struct transpose_info * info = (struct transpose_info*)infop;
+	int elbytes, eltype, isq;
+	switch( self->node_type){
+		case OP_Transpose_int32:
+			elbytes = sizeof(int32_t);
+			eltype = NN_TYPE_INT32;
+			isq = 0;
+			break;
+		case OP_Permute_f:
+		case OP_Transpose_f:
+			elbytes = sizeof(float);
+			eltype = NN_TYPE_FLOAT;
+			isq = 0;
+			break;
+		case OP_QuantizedPermute_8:
+		case OP_Transpose_8:
+			elbytes = sizeof(uint8_t);
+			eltype = NN_TYPE_QUINT8;
+			isq = 1;
+			break;
+		case OP_Transpose_16:
+			elbytes = sizeof(uint16_t);
+			eltype = NN_TYPE_QUINT16;
+			isq = 1;
+			break;
+		default:
+			return errlog(nn,"unexpected node type %d", (int)self->node_type);
+	}
+	info->elbytes = elbytes;
+	info->eltype = eltype;
+	info->isq = isq;
+
+	logmsg(nn,2,"transpose %p check OK",self);
 	return 0;
 }
 
@@ -151,12 +184,16 @@ struct nn_node_ops nn_ops_for_Transpose_int32 = {
 	.check = transpose_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common_release_opaque,
+	.n_inputs = NN_IOCOUNT(2),
+	.n_outputs = NN_IOCOUNT(1),
 };
 struct nn_node_ops nn_ops_for_Transpose_f = {
 	.execute = transpose_execute,
 	.check = transpose_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common_release_opaque,
+	.n_inputs = NN_IOCOUNT(2),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 struct nn_node_ops nn_ops_for_Transpose_8 = {
@@ -164,6 +201,16 @@ struct nn_node_ops nn_ops_for_Transpose_8 = {
 	.check = transpose_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common_release_opaque,
+	.n_inputs = NN_IOCOUNT(4),
+	.n_outputs = NN_IOCOUNT(3),
+};
+struct nn_node_ops nn_ops_for_Transpose_16 = {
+	.execute = transpose_execute,
+	.check = transpose_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common_release_opaque,
+	.n_inputs = NN_IOCOUNT(4),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 // Permute is the same op ! (actually, a subset, since it requires the 'permute'
@@ -174,6 +221,8 @@ struct nn_node_ops nn_ops_for_Permute_f = {
     .check = transpose_check,
     .ctor = node_alloc_common,
     .dtor = node_free_common_release_opaque,
+    .n_inputs = NN_IOCOUNT(2),
+    .n_outputs = NN_IOCOUNT(1),
 };
 
 
@@ -182,4 +231,6 @@ struct nn_node_ops nn_ops_for_QuantizedPermute_8 = {
     .check = transpose_check,
     .ctor = node_alloc_common,
     .dtor = node_free_common_release_opaque,
+    .n_inputs = NN_IOCOUNT(4),
+    .n_outputs = NN_IOCOUNT(3),
 };

@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -147,42 +147,32 @@ static int qsplit_execute_8(struct nn_node *self, struct nn_graph *nn)
 	return split_impl(self,nn,NN_TYPE_QUINT8, 1, n_outputs-2);
 }
 
-static int split_check_f(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"checking split node %p",self);
-	if (self->n_inputs != 2) return errlog(nn,"num inputs");
-	if (self->n_outputs < 1) return errlog(nn,"num outputs");
-	return 0;
-}
-
-static int qsplit_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"checking split node %p",self);
-	if (self->n_inputs != 4) return errlog(nn,"num inputs");
-	if (self->n_outputs < 3) return errlog(nn,"num outputs");
-	return 0;
-}
-
 
 
 struct nn_node_ops nn_ops_for_Split_f = {
 	.execute = split_execute_f,
-	.check = split_check_f,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(2),
+	.n_outputs = NN_IOCOUNT_GE(1),
 };
 
 struct nn_node_ops nn_ops_for_Split_int32 = {
 	.execute = split_execute_f,
-	.check = split_check_f,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(2),
+	.n_outputs = NN_IOCOUNT_GE(1),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedSplit_8 = {
 	.execute = qsplit_execute_8,
-	.check = qsplit_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(4),
+	.n_outputs = NN_IOCOUNT_GE(3),
 };
 

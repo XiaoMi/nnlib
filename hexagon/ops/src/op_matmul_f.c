@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -149,21 +149,13 @@ static int matmul_execute_ref(struct nn_node *self, struct nn_graph *nn)
 }
 
 
-static int matmul_check_ref(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking matmul node %p",self);
-	if (self->n_inputs != 2) return errlog(nn,"matmul wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"matmul wrong # outputs");
-	if (self->inputs == NULL) return errlog(nn,"NULL inputs");
-	if (self->outputs == NULL) return errlog(nn,"NULL outputs");
-	logmsg(nn,2,"matmul node %p check OK",self);
-	return 0;
-}
 
 struct nn_node_ops nn_ops_for_MatMul_f = {
 	.execute = matmul_execute_ref,
-	.check = matmul_check_ref,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(2),
+	.n_outputs = NN_IOCOUNT(1),
 };
 

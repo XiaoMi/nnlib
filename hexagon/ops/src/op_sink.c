@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -48,10 +48,6 @@ static int sink_execute(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-static int sink_check(struct nn_node *self, struct nn_graph *nn)
-{
-	return 0;
-}
 
 static int sink_dtor(struct nn_node *self, struct nn_graph *nn)
 {
@@ -82,10 +78,12 @@ static int sink_earlywork_note_pred(struct nn_node *self, struct nn_graph *nn, s
 
 struct nn_node_ops nn_ops_for_Sink = {
 	.execute = sink_execute,
-	.check = sink_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = sink_dtor,
 	.earlywork_note_pred = sink_earlywork_note_pred,
 	.earlywork_register = sink_earlywork_register,
+	.n_inputs = NN_IOCOUNT_GE(0),		// # any # of inputs
+	.n_outputs = NN_IOCOUNT(0),			// no outputs
 };
 

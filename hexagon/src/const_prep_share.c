@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -34,6 +34,9 @@
  */
 
 #include "nn_const_prep_share.h"
+
+static nn_mutex_t nn_const_share_mutex = NN_MUTEX_INIT;
+
 struct nn_node* nn_cpshare_get_const_node( struct nn_graph *nn, struct nn_node* self, int input_no )
 {
 	struct nn_node * res = NULL;
@@ -48,18 +51,22 @@ struct nn_node* nn_cpshare_get_const_node( struct nn_graph *nn, struct nn_node* 
 struct nn_cpshare_base *nn_cpshare_get_existing( struct nn_graph * nn,
 	struct nn_cpshare_typedesc const*td, struct nn_node const * cnode )
 {
+	struct nn_cpshare_base *result = NULL;
 	if( cnode != NULL && cnode->node_type == OP_Const ){ 
+		nn_mutex_lock(&nn_const_share_mutex);
 		struct nn_cpshare_base *p = (struct nn_cpshare_base *) cnode->opaque;
 		if( p != NULL && p->typedesc == td ){
 			p->ref_count++;
-			return p;
+			result = p;
 		}
+		nn_mutex_unlock(&nn_const_share_mutex);
 	}
-	return NULL;
+	return result;
 }
 
 
-void nn_cpshare_call_dtor( struct nn_graph *nn, struct nn_cpshare_base * cpshare )
+static void
+nn_cpshare_call_dtor( struct nn_graph *nn, struct nn_cpshare_base * cpshare )
 {
 	nn_cpshare_dtor_fp dtor = cpshare->typedesc->dtor;
 	if( dtor != NULL){
@@ -70,4 +77,26 @@ void nn_cpshare_call_dtor( struct nn_graph *nn, struct nn_cpshare_base * cpshare
 		if( cpshare->ptr_w != NULL ) nn_free( cpshare->ptr_w);
 		nn_free( cpshare );
 	}
+}
+
+void
+nn_cpshare_attach( struct nn_graph *nn, struct nn_node* const_node, void * cpsharev )
+{
+	struct nn_cpshare_base * cpshare = (struct nn_cpshare_base *)cpsharev;
+	nn_mutex_lock( &nn_const_share_mutex);
+	if( const_node->opaque == NULL ){
+		const_node->opaque = cpshare;
+		cpshare->ref_count++;
+	}
+	nn_mutex_unlock( &nn_const_share_mutex);
+}
+void
+nn_cpshare_decref( struct nn_graph *nn, void * cpsharev )
+{
+	struct nn_cpshare_base * cpshare = (struct nn_cpshare_base *)cpsharev;
+	nn_mutex_lock( &nn_const_share_mutex);
+	if( cpshare->ref_count-- <= 0){
+		nn_cpshare_call_dtor( nn, cpshare);
+	}
+	nn_mutex_unlock( &nn_const_share_mutex);
 }

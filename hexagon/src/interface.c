@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -41,6 +41,7 @@
  */
 
 #include <hexagon_nn.h>
+#include <hexnn_graph_wrapper_interface.h>
 #include <nn_graph.h>
 #include <string.h>
 #include <stdio.h>
@@ -59,13 +60,15 @@
 #include "HAP_perf.h"
 #include "AEEStdErr.h"
 #include <qurt.h>
-#else
+#else // defined(USE_OS_QURT)
 #define AEE_EBADCLASS 10
 typedef void* remote_handle64;
 #endif
 
 #define UNUSED_PARAM(x) (void)(x)
-#define NN_VERSION 0x00020600
+#define NN_VERSION 0x00020C00
+
+#define ROUNDUP_8BYTES(X)   ((X+7)&(~7))
 
 // TODO - Move these from globals to a graph property
 extern int Num_Vector_Threads;
@@ -87,6 +90,117 @@ struct thread_count_t Arch_Thread_Counts[] = {
 };
 
 
+//////////// HASH TABLE for mapping graph id -> graph pointer.
+// The table is just NN_GRAPH_HASHN linked lists; a graph is stored
+// on table indicated by find_hash(graph_id).
+// We move a graph to the front of the list each time it's accessed.
+///////////////////////////
+// this is the size of the hash table; should be a power of 2
+#define NN_GRAPH_HASHN 32
+
+// each entry in the table is a linked-list
+struct graph_hashtable_entry {
+	struct nn_graph *graph_list;		// pointer to the first graph, or NULL
+};
+static struct graph_hashtable_entry graph_table[NN_GRAPH_HASHN];
+// single mutex for the whole table - will allow us to 'visit all graphs'
+// if we want to.
+// It also protects graph_table_count and graph_id_seqno.
+static nn_mutex_t graph_table_mutex = NN_MUTEX_INIT;
+static uint32_t graph_table_count;
+static uint32_t graph_id_seqno;
+
+static inline int find_hash( nn_id_t grid){
+	return grid % (unsigned)NN_GRAPH_HASHN;
+}
+//
+// 'inner' lookup function:
+//   - lock the mutex
+//   - find the graph with the given id;
+//   - move it to top of list, if it is not already;
+//   - provide (indirectly) pointer to the record (if entryp is not NULL)
+//   - does not unlock mutex if entryp is not NULL.
+//  - if not found, it always unlocks the mutex and returns NULL.
+//
+static
+struct nn_graph * find_graph_inner(nn_id_t grid, struct graph_hashtable_entry **entryp )
+{
+	if( grid == 0) return NULL;
+	struct graph_hashtable_entry * tabp = &graph_table[ find_hash(grid)];
+
+	nn_mutex_lock( &graph_table_mutex);
+
+	if( entryp != NULL)
+		*entryp = tabp;
+	struct nn_graph *grp = tabp->graph_list;
+	// fast path
+	if( grp == NULL || grp->id == grid){
+		if( grp == NULL || entryp ==NULL ){
+			nn_mutex_unlock(&graph_table_mutex);
+		}
+		return grp;
+	}
+	// look down the list. There will be at least one
+	// ahead of the one we find.
+	struct nn_graph **pos = &grp->next_graph;
+	while( grp = *pos, grp != NULL){
+		if( grp->id == grid){		// found it
+			// move to front
+			*pos = grp->next_graph;
+			grp->next_graph = tabp->graph_list;
+			tabp->graph_list = grp;
+			if( entryp != NULL) return grp;
+			break;	// unlock and return;
+		}
+		pos = & grp->next_graph;
+	}
+	nn_mutex_unlock(& graph_table_mutex);
+	return grp;
+}
+
+// given a new graph, assign an id to it, and add it to the hash table.
+// returns the new id.
+//
+static nn_id_t
+add_graph_to_hash( struct nn_graph *grp)
+{
+	uint32_t grid;
+	nn_mutex_lock( &graph_table_mutex);
+	do{
+		grid = ++graph_id_seqno & 0x7FFFFFFF;
+	}while( grid==0);
+
+	struct graph_hashtable_entry * tabp = &graph_table[ find_hash(grid)];
+
+	grp->next_graph = tabp->graph_list;
+	tabp->graph_list = grp;
+	grp->id = grid;
+	graph_table_count ++;
+	nn_mutex_unlock(&graph_table_mutex);
+	return grid;
+}
+// map an id to a graph *; returns null if invalid.
+// The graph will be moved to the front of its list, if not already
+// there.
+struct nn_graph *
+nn_id_to_graph(nn_id_t id) {
+	return find_graph_inner( id, NULL);
+}
+// map an id to a graph *, and remove from table; returns null if invalid.
+static struct nn_graph *
+nn_id_to_graph_and_remove(nn_id_t id) {
+	struct graph_hashtable_entry * entryp;
+	struct nn_graph * res = find_graph_inner( id, &entryp);
+	if( res != NULL ){
+		entryp->graph_list = res->next_graph;
+		res->next_graph = NULL;
+		graph_table_count--;
+		nn_mutex_unlock(&graph_table_mutex);
+	}
+	return res;
+}
+/////////////// END OF GRAPH HASH TABLE CODE /////////////////////////
+
 
 static inline void fast_strncpy(char *dst, const char *src, int len)
 {
@@ -96,13 +210,6 @@ static inline void fast_strncpy(char *dst, const char *src, int len)
 	memcpy(dst,src,real_len);
 }
 
-struct nn_graph *nn_id_to_graph(nn_id_t id) {
-	return (struct nn_graph *)(id);
-}
-
-static inline nn_id_t nn_graph_to_id(struct nn_graph *graph) {
-	return (nn_id_t)(graph);
-}
 
 
 // Each symbol on the right is from the library on the left of =.
@@ -115,7 +222,7 @@ int hexagon_nn_get_dsp_offset(uint32_t *libhexagon_addr, uint32_t *fastrpc_shell
 #if defined(USE_OS_QURT) // should be only for QURT
 	*fastrpc_shell_addr = (uint32_t)&qurt_sem_add;
 	*libhexagon_addr    = (uint32_t)&hexagon_nn_get_dsp_offset;
-#else
+#else // defined(USE_OS_QURT)
 	*fastrpc_shell_addr = 0;
 	*libhexagon_addr    = 0;
 #endif
@@ -135,13 +242,13 @@ int hexagon_nn_domains_get_dsp_offset(
 int hexagon_nn_init_with_info(hexagon_nn_nn_id* g, const struct initinfo* info) {
 	if (!g) return AEE_EBADCLASS;
 
-	/* allocate new ID */
 	*g = 0;
 	struct nn_graph *graph;
 	int ret;
 	if ((graph = nn_calloc(1,sizeof(*graph))) == NULL) {
 		return -1;
 	}
+	graph->graph_options = Default_graphoptions;
 
 	nn_os_vtcm_choose_size(graph);
 	graph->priority = info->priority;
@@ -166,7 +273,8 @@ int hexagon_nn_init_with_info(hexagon_nn_nn_id* g, const struct initinfo* info) 
 		nn_free(graph);
 		return -1;
 	}
-	*g = nn_graph_to_id(graph);
+	/* allocate new ID */
+	*g = add_graph_to_hash(graph);
 	return 0;
 }
 
@@ -238,14 +346,37 @@ int hexagon_nn_domains_set_debug_level(remote_handle64 h, nn_id_t id, int level)
 	return hexagon_nn_set_debug_level(id, level);
 }
 
+int hexagon_nn_set_graph_option(nn_id_t id, char const * optname, int value)
+{
+	struct nn_graph *graph;
+	if ((graph = nn_id_to_graph(id)) == NULL) return -1;
+	return nn_option_set_int( graph, optname, value);
+}
+
+int hexagon_nn_domains_set_graph_option(remote_handle64 h, nn_id_t id, char const * optname, int value) {
+	UNUSED_PARAM(h);
+	return hexagon_nn_set_graph_option(id, optname, value);
+}
 
 int hexagon_nn_prepare(nn_id_t id)
 {
 	struct nn_graph *graph;
+
+	uint64_t pcycle_start;
+	uint64_t pcycle_stop;
+
 	if ((graph = nn_id_to_graph(id)) == NULL) {
 		return errlog(NULL,"nn id %x not found",id);
 	}
-	return do_prepare(graph);
+	pcycle_start = nn_os_get_cycles(graph);
+
+	int retval = do_prepare(graph);
+
+	pcycle_stop = nn_os_get_cycles(graph);
+	graph->execution_total_cycles = pcycle_stop - pcycle_start;
+	graph->multi_execution_total_cycles += graph->execution_total_cycles;
+
+	return retval;
 }
 
 int hexagon_nn_domains_prepare(remote_handle64 h, nn_id_t id) {
@@ -542,6 +673,8 @@ int hexagon_nn_execute_new(
 		int elementsize = in->data_valid_len / (in->batches * in->height * in->width * in->depth);
 		if (elementsize == 4) {
 			t->format.type = NN_TYPE_FLOAT; // Just a best guess
+		} else if (elementsize == 2) {
+			t->format.type = NN_TYPE_QINT16; // Just a best guess
 		} else {
 			t->format.type = NN_TYPE_QUINT8; // Just a best guess
 		}
@@ -569,6 +702,7 @@ int hexagon_nn_execute_new(
 	}
 	pcycle_stop = nn_os_get_cycles(graph);
 	graph->execution_total_cycles = pcycle_stop - pcycle_start;
+	graph->multi_execution_total_cycles += graph->execution_total_cycles;
 	if (ret) return errlog(graph,"fail in execute_new()");
 	return ret;
 }
@@ -601,6 +735,7 @@ int hexagon_nn_execute(
 	uint32_t data_out_max,
 	uint32_t *data_out_size)
 {
+
 	hexagon_nn_tensordef in;
 	hexagon_nn_tensordef out = {0}; // klocwork
 	int ret;
@@ -650,7 +785,7 @@ int hexagon_nn_domains_execute(
 int hexagon_nn_teardown(nn_id_t id)
 {
 	struct nn_graph *graph;
-	if ((graph = nn_id_to_graph(id)) == NULL) {
+	if ((graph = nn_id_to_graph_and_remove(id)) == NULL) {
 		return errlog(NULL,"nn id %x not found",id);
 	}
 	return do_teardown(graph);
@@ -744,6 +879,29 @@ int hexagon_nn_domains_version(remote_handle64 h, int* ver)
 {
 	UNUSED_PARAM(h);
 	return hexagon_nn_version(ver);
+}
+
+int hexagon_nn_multi_execution_cycles(nn_id_t id, unsigned int *cycles_lo, unsigned int *cycles_hi)
+{
+	struct nn_graph *graph;
+	uint64_t total;
+	if ((graph = nn_id_to_graph(id)) == NULL) {
+		return errlog(NULL,"nn id %x not found",id);
+	}
+	total = graph->multi_execution_total_cycles;
+	*cycles_hi = total >> 32;
+	*cycles_lo = total;
+	return 0;
+}
+
+int hexagon_nn_domains_multi_execution_cycles(
+	remote_handle64 h,
+	nn_id_t id,
+	unsigned int *cycles_lo,
+	unsigned int *cycles_hi)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_multi_execution_cycles(id, cycles_lo, cycles_hi);
 }
 
 int hexagon_nn_last_execution_cycles(nn_id_t id, unsigned int *cycles_lo, unsigned int *cycles_hi)
@@ -978,6 +1136,15 @@ int hexagon_nn_disable_dcvs()
     return HAP_power_set(NULL, &request);
 }
 
+int hexagon_nn_get_power(int type)
+{
+	(void) type;
+	HAP_power_response_t response;
+	response.type = HAP_power_get_clk_Freq;
+	(void) HAP_power_get(NULL, &response);
+	return response.clkFreqHz;
+}
+
 #if (__HEXAGON_ARCH__ >= 62)
 static int hexagon_nn_vote(unsigned int level)
 {
@@ -1066,7 +1233,7 @@ int hexagon_nn_set_powersave_details(hexagon_nn_corner_type corner, hexagon_nn_d
             request.dcvs_v2.dcvs_params.max_corner = 10;
             request.dcvs_v2.latency = (latency == 0 ? LOW_LATENCY : latency);
         } else
-#endif
+#endif // (__HEXAGON_ARCH__ >= 66)
 	if (corner == NN_CORNER_TURBO){
             request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_TURBO;
             request.dcvs_v2.latency = (latency == 0 ? LOW_LATENCY : latency);
@@ -1222,6 +1389,7 @@ int hexagon_nn_graph_config(
 	uint32_t num_string_options
 	)
 {
+
 	struct nn_graph *graph;
 	if ((graph = nn_id_to_graph(id)) == NULL) {
 		return errlog(NULL,"nn id %x not found",id);
@@ -1242,6 +1410,14 @@ int hexagon_nn_graph_config(
 				return -1;
 			}
 			strcpy(graph->enable_graph_print_prefix, string_options[i].string_data);
+			break;
+		case NN_OPTION_ENABLE_CONST_PRINT:
+			graph->enable_const_print = 1;
+			string_length = strlen(string_options[i].string_data);
+			if ((graph->enable_const_print_prefix = nn_calloc(1,string_length+1)) == NULL) {
+				return -1;
+			}
+			strcpy(graph->enable_const_print_prefix, string_options[i].string_data);
 			break;
 		case NN_OPTION_ENABLE_TENSOR_PRINT:
 			if (graph->debug_level==0) {
@@ -1279,6 +1455,8 @@ int hexagon_nn_config_with_options(
 	uint32_t num_string_options
 	)
 {
+	// Always set this to some default, might get overriden by one
+	// of the options.
 #ifndef NN_GRAPH_ON_SIMULATOR // API not available on simulator
 	HAP_mem_set_grow_size(0x1000000, MAX_UINT64);
 #endif // NN_GRAPH_ON_SIMULATOR
@@ -1324,6 +1502,11 @@ int hexagon_nn_config_with_options(
 			case NN_OPTION_VTCM_REQ:
 				VTCM_User_Req = uint_options[i].uint_value;
 				break;
+			case NN_OPTION_HAP_MEM_GROW_SIZE:
+#ifndef NN_GRAPH_ON_SIMULATOR // API not available on simulator
+			    HAP_mem_set_grow_size(uint_options[i].uint_value, MAX_UINT64);
+#endif // NN_GRAPH_ON_SIMULATOR
+			    break;
 			default:
 				// UNSUPPORTED option.  Too bad we can't logmsg (TODO, FIXME)
 				return 1;
@@ -1347,6 +1530,7 @@ int hexagon_nn_config()
 int hexagon_nn_set_powersave_level(unsigned int level) { return 0; }
 int hexagon_nn_set_powersave_details(hexagon_nn_corner_type corner, hexagon_nn_dcvs_type dcvs, unsigned int latency) { return 0; }
 int hexagon_nn_disable_dcvs() { return 0; }
+int hexagon_nn_get_power(int type) { return 0; }
 
 int hexagon_nn_graph_config(
 	nn_id_t id,
@@ -1432,6 +1616,12 @@ int hexagon_nn_domains_disable_dcvs(remote_handle64 h)
 	return hexagon_nn_disable_dcvs();
 }
 
+
+int hexagon_nn_domains_get_power(remote_handle64 h, int a)
+{
+	return hexagon_nn_get_power(a);
+}
+
 int hexagon_nn_domains_set_powersave_details(remote_handle64 h,
 	hexagon_nn_corner_type corner, hexagon_nn_dcvs_type dcvs, unsigned int latency)
 {
@@ -1443,7 +1633,7 @@ int hexagon_nn_domains_set_powersave_details(remote_handle64 h,
 int hexagon_nn_domains_open (const char* uri, remote_handle64* handle)
 {
 	if(handle == NULL) {
-        FARF(ERROR, "Null domain handle");
+        errlog(NULL,"DEBUG:Null domain handle");
         return 0;
     }
     /* can be any value or ignored, rpc layer doesn't care
@@ -1458,4 +1648,125 @@ int hexagon_nn_domains_open (const char* uri, remote_handle64* handle)
 int hexagon_nn_domains_close(remote_handle64 h)
 {
 	return 0;
+}
+
+int hexagon_nn_populate_graph(nn_id_t id,
+        const unsigned char* graph_data, int graph_dataLen)
+{
+    int sts = 0;
+
+    flat_batch_ops_params *fbo_poi;
+
+    fbo_poi = (flat_batch_ops_params *)graph_data;
+
+	unsigned long size = 0;
+
+	while (size < graph_dataLen && sts == 0)
+    {
+		hexagon_nn_input *inputs;
+		unsigned long inputsLen;
+
+		hexagon_nn_output *outputs;
+		unsigned long outputsLen;
+
+		unsigned char *data;
+		unsigned long dataLen;
+
+		size += sizeof(flat_batch_ops_params)-sizeof(unsigned char);
+
+        switch (fbo_poi->op) {
+            case HEXNN_BATCH_OP_APPEND_NODE:
+				inputs = (hexagon_nn_input *)fbo_poi->c;
+				inputsLen = fbo_poi->U.an_params.inputsLen/sizeof(hexagon_nn_input);
+
+				outputs = (hexagon_nn_output *)(fbo_poi->c + ROUNDUP_8BYTES(fbo_poi->U.an_params.inputsLen));
+				outputsLen = fbo_poi->U.an_params.outputsLen/sizeof(hexagon_nn_output);
+
+                sts = hexagon_nn_append_node(id, fbo_poi->U.an_params.node_id,
+                        fbo_poi->U.an_params.operation, fbo_poi->U.an_params.padding,
+                        inputs, inputsLen,
+                        outputs, outputsLen);
+                if(sts !=0 ) {
+                    errlog(NULL,"DEBUG:batched op error at HEXNN_BATCH_OP_APPEND_NODE, node_id = %d, sts = %d", fbo_poi->U.an_params.node_id, sts);
+                }
+
+                size += (ROUNDUP_8BYTES(fbo_poi->U.an_params.inputsLen) + ROUNDUP_8BYTES(fbo_poi->U.an_params.outputsLen));
+
+                break;
+
+            case HEXNN_BATCH_OP_APPEND_CONST_NODE:
+				data = fbo_poi->c;
+				dataLen = fbo_poi->U.acn_params.dataLen/sizeof(unsigned char);
+
+                sts = hexagon_nn_append_const_node(id, fbo_poi->U.acn_params.node_id,
+                        fbo_poi->U.acn_params.batches, fbo_poi->U.acn_params.height,
+                        fbo_poi->U.acn_params.width, fbo_poi->U.acn_params.depth, 
+						data, dataLen);
+                if(sts !=0 ) {
+                    errlog(NULL,"DEBUG:batched op error at HEXNN_BATCH_OP_APPEND_CONST_NODE, node_id = %d, sts = %d", fbo_poi->U.acn_params.node_id, sts);
+
+                }
+
+				size += ROUNDUP_8BYTES(fbo_poi->U.acn_params.dataLen);
+
+                break;
+
+            case HEXNN_BATCH_OP_APPEND_EMPTY_CONST_NODE:
+                sts = hexagon_nn_append_empty_const_node(id, fbo_poi->U.aecn_params.node_id,
+                        fbo_poi->U.aecn_params.batches, fbo_poi->U.aecn_params.height,
+                        fbo_poi->U.aecn_params.width, fbo_poi->U.aecn_params.depth,
+                        fbo_poi->U.aecn_params.size);
+                if(sts !=0 ) {
+                    errlog(NULL,"DEBUG:batched op error at HEXNN_BATCH_OP_APPEND_EMPTY_CONST_NODE, node_id = %d, sts = %d", fbo_poi->U.aecn_params.node_id, sts);
+                }
+
+				size += ROUNDUP_8BYTES(8);
+
+                break;
+
+            case HEXNN_BATCH_OP_POPULATE_CONST_NODE:
+				data = fbo_poi->c;
+				dataLen = fbo_poi->U.pcn_params.dataLen/sizeof(unsigned char);
+
+                sts = hexagon_nn_populate_const_node(id, fbo_poi->U.pcn_params.node_id,
+                        data, dataLen,
+                        fbo_poi->U.pcn_params.target_offset);
+                if(sts !=0 ) {
+                    errlog(NULL,"DEBUG:batched op error at HEXNN_BATCH_OP_POPULATE_CONST_NODE, node_id = %d, sts = %d", fbo_poi->U.pcn_params.node_id, sts);
+                }
+
+				size += ROUNDUP_8BYTES(fbo_poi->U.pcn_params.dataLen);
+
+                break;
+
+            default:
+                // error, should not reach here
+                sts = -1;
+                break;
+        }
+
+        if(sts != 0){
+            break;
+        }
+        else
+		{
+			fbo_poi = (flat_batch_ops_params *)(graph_data+size);
+		}
+    }
+
+    if (sts == 0)
+    {
+        sts = hexagon_nn_prepare(id);
+        if(sts !=0 ) {
+            errlog(NULL,"DEBUG:batched op error at  hexagon_nn_prepare(), sts = %d", sts);
+        }
+    }
+
+    return sts;
+}
+
+int hexagon_nn_domains_populate_graph(remote_handle64 h, nn_id_t id,
+        const unsigned char* data, int dataLen)
+{
+    return hexagon_nn_populate_graph(id, data, dataLen);
 }

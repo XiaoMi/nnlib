@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -61,27 +61,9 @@ static int max_execute(struct nn_node *self, struct nn_graph *nn)
 	return nn_reduction_float(self, nn, fmaxf, -INFINITY);
 }
 
-static int minmax_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn, 2, "Checking min/max node %p", self);
-	if (self->inputs == NULL)
-		return errlog(nn, "NULL inputs");
-	if (self->outputs == NULL)
-		return errlog(nn, "NULL outputs");
-	if (self->inputs[0] == NULL)
-		return errlog(nn, "NULL input 0");
-	if (self->outputs[0] == NULL)
-		return errlog(nn, "NULL output 0");
-	if (self->n_inputs > 3)
-		return errlog(nn, "wrong # inputs");
-	if (self->n_outputs != 1)
-		return errlog(nn, "wrong # inputs");
-	logmsg(nn, 2, "min/max node %p check OK", self);
-	return 0;
-}
 
-BROADCAST_STRIDE_11_FUNC(minimum_f_stride_11, float, fminf)
-BROADCAST_STRIDE_10_FUNC(minimum_f_stride_10, float, fminf)
+BROADCAST_STRIDE_11_FUNC(minimum_f_stride_11, float, float, fminf)
+BROADCAST_STRIDE_10_FUNC(minimum_f_stride_10, float, float, fminf)
 
 static const struct elementwise_funcs Minimum_f_funcs = {
 	.op_stride_11 = minimum_f_stride_11,
@@ -93,10 +75,10 @@ static const struct elementwise_funcs Minimum_f_funcs = {
 
 static int minimum_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return nn_elementwise_with_broadcast(self, nn, &Minimum_f_funcs, NULL);
+	return nn_elementwise_with_broadcast(self, nn, &Minimum_f_funcs,NULL,NULL, NULL);
 }
-BROADCAST_STRIDE_11_FUNC(maximum_f_stride_11, float, fmaxf)
-BROADCAST_STRIDE_10_FUNC(maximum_f_stride_10, float, fmaxf)
+BROADCAST_STRIDE_11_FUNC(maximum_f_stride_11, float, float, fmaxf)
+BROADCAST_STRIDE_10_FUNC(maximum_f_stride_10, float, float, fmaxf)
 
 static const struct elementwise_funcs Maximum_f_funcs = {
 	.op_stride_11 = maximum_f_stride_11,
@@ -108,49 +90,61 @@ static const struct elementwise_funcs Maximum_f_funcs = {
 
 static int maximum_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return nn_elementwise_with_broadcast(self, nn, &Maximum_f_funcs, NULL);
+	return nn_elementwise_with_broadcast(self, nn, &Maximum_f_funcs,NULL,NULL, NULL);
 }
 
 struct nn_node_ops nn_ops_for_Min_f = {
 	.execute = min_execute,
-	.check = minmax_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(1,3),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 struct nn_node_ops nn_ops_for_Max_f = {
 	.execute = max_execute,
-	.check = minmax_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(1,3),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 struct nn_node_ops nn_ops_for_Min_f_ref = {
 	.execute = min_execute,
-	.check = minmax_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(1,3),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 struct nn_node_ops nn_ops_for_Max_f_ref = {
 	.execute = max_execute,
-	.check = minmax_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(1,3),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 struct nn_node_ops nn_ops_for_Minimum_f = {
 	.execute = minimum_execute,
-	.check = minmax_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(2),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 struct nn_node_ops nn_ops_for_Maximum_f = {
 	.execute = maximum_execute,
-	.check = minmax_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(2),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 #define CREATE_REF_OP_MIN_MAX(NAME, OPNAME, OPERATOR)                                      \
@@ -217,22 +211,13 @@ struct nn_node_ops nn_ops_for_Maximum_f = {
 		return retval;                                                                     \
 	}                                                                                      \
                                                                                            \
-	static int NAME##_q8_check(struct nn_node *self, struct nn_graph *nn)                  \
-	{                                                                                      \
-		logmsg(nn, 2, "##NAME node %p", self);                                             \
-		if (self->n_inputs != 6)                                                           \
-			return errlog(nn, "wrong # inputs");                                           \
-		if (self->n_outputs != 3)                                                          \
-			return errlog(nn, "wrong # outputs");                                          \
-		logmsg(nn, 2, "##NAME %p check OK", self);                                         \
-		return 0;                                                                          \
-	}                                                                                      \
-                                                                                           \
 	struct nn_node_ops nn_ops_for_Quantized##OPNAME##_8_ref = {                            \
 		.execute = NAME##_q8_execute_ref,                                                  \
-		.check = NAME##_q8_check,                                                          \
+		.check = NULL,                                                                     \
 		.ctor = node_alloc_common,                                                         \
 		.dtor = node_free_common,                                                          \
+		.n_inputs = NN_IOCOUNT(6),                                                         \
+		.n_outputs = NN_IOCOUNT(3),                                                        \
 	};
 
 CREATE_REF_OP_MIN_MAX(minimum, Minimum, min);

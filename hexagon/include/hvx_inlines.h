@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -485,8 +485,15 @@ void hvx_store_vec_x2_unaligned ( void * addr, HVX_Vector v0, HVX_Vector v1, int
 #define HVX_8_0_FAKEDEP_VM( vec, mem)
 #endif
 
-
-
+// Create a fake 'store' operation which will cause subsequent memory operation wait for its completion
+// Normally used to sync up vscatter operation store on VTCM, which are delayed through a routing network,
+// and there is no automatic coherence mechanism. The this fake operation to sync up is required.
+static HVX_INLINE_ALWAYS void q6op_scatter_release_A( volatile void * addr )
+{
+#if defined(__hexagon__)
+	__asm__ __volatile__( "vmem(%0+#0):scatter_release"::"r"(addr):"memory");
+#endif
+}
 
 /////////////////////////////////////////////////////////////////////////////////
 //

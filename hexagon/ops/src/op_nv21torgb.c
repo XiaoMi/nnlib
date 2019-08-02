@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (mulject to the limitations in the
@@ -203,39 +203,20 @@ static int nv21_to_rgb_execute(struct nn_node *self, struct nn_graph *nn) {
 }
 
 
-static int nv21_to_rgb_check(struct nn_node *self, struct nn_graph *nn) {
-    if (self->n_inputs != OP_NV21TORGB_NUM_OPS)
-        return errlog(nn, "OP_Nv21ToRgb_8 takes exactly %d inputs, %d provided", OP_NV21TORGB_NUM_OPS,
-                      self->n_inputs);
-    if (self->n_outputs != 3)
-        return errlog(nn, "OP_Nv21ToRgb_8 takes exactly 3 outputs (buffer), %d provided",
-                      self->n_outputs);
-    int i;
-    for (i = 0; i < self->n_inputs; i++) {
-        if (self->inputs[i] == NULL) {
-            return errlog(nn, "OP_Nv21ToRgb_8 NULL input %d", i);
-        }
-    }
-    for (i = 0; i < self->n_outputs; i++) {
-        if (self->outputs[i] == NULL) {
-            return errlog(nn, "OP_Nv21ToRgb_8 NULL output %d", i);
-        }
-    }
-    return 0;
-}
-
 struct nn_node_ops nn_ops_for_Nv21ToRgb_8 = {
         .execute = nv21_to_rgb_execute,
-        .check = nv21_to_rgb_check,
+        .check = NULL,
         .ctor = node_alloc_common,
         .dtor = node_free_common,
+        .n_inputs = NN_IOCOUNT(OP_NV21TORGB_NUM_OPS),
+        .n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_Nv21ToRgb_8_ref = {
         .execute = nv21_to_rgb_execute,
-        .check = nv21_to_rgb_check,
+        .check = NULL,
         .ctor = node_alloc_common,
         .dtor = node_free_common,
+        .n_inputs = NN_IOCOUNT(OP_NV21TORGB_NUM_OPS),
+        .n_outputs = NN_IOCOUNT(3),
 };
-
-

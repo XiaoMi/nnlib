@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -203,21 +203,13 @@ static int extract_glimpse_execute(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-static int extract_glimpse_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking extract_glimpse node %p",self);
-	if (self->n_inputs != 9) return errlog(nn,"extract_glimpse wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"extract_glimpse wrong # outputs");
-	if (self->inputs == NULL) return errlog(nn,"NULL inputs");
-	if (self->outputs == NULL) return errlog(nn,"NULL outputs");
-	logmsg(nn,2,"extract_glimpse node %p check OK",self);
-	return 0;
-}
 
 struct nn_node_ops nn_ops_for_QuantizedExtractGlimpse_8 = {
 	.execute = extract_glimpse_execute,
-	.check = extract_glimpse_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(9),
+	.n_outputs = NN_IOCOUNT(3),
 };
 

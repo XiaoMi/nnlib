@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -163,40 +163,43 @@ static int rgba_to_rgb_execute(struct nn_node *self, struct nn_graph *nn) {
 }
 
 
-static int rgba_to_rgb_check(struct nn_node *self, struct nn_graph *nn)
-{
-	char const *nm = op_type_to_string_alt(self->node_type, "unknown");
 
-	// must have OP_RGBATORGB_NUM_OPS inputs and 4 outputs
-	return node_check_inputs_outputs_n( self, nn, nm, OP_RGBATORGB_NUM_OPS, 3 );
-}
+// must have OP_RGBATORGB_NUM_OPS inputs and 3 outputs
 
 struct nn_node_ops nn_ops_for_RgbaToRgb_8 = {
         .execute = rgba_to_rgb_execute,
-        .check = rgba_to_rgb_check,
+        .check = NULL,
         .ctor = node_alloc_common,
         .dtor = node_free_common,
+        .n_inputs = NN_IOCOUNT(OP_RGBATORGB_NUM_OPS),
+        .n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_RgbaToRgb_8_ref = {
         .execute = rgba_to_rgb_execute,
-        .check = rgba_to_rgb_check,
+        .check = NULL,
         .ctor = node_alloc_common,
         .dtor = node_free_common,
+        .n_inputs = NN_IOCOUNT(OP_RGBATORGB_NUM_OPS),
+        .n_outputs = NN_IOCOUNT(3),
 };
 
 
 struct nn_node_ops nn_ops_for_Argb32ToRgb_8 = {
         .execute = rgba_to_rgb_execute,
-        .check = rgba_to_rgb_check,
+        .check = NULL,
         .ctor = node_alloc_common,
         .dtor = node_free_common,
+        .n_inputs = NN_IOCOUNT(OP_RGBATORGB_NUM_OPS),
+        .n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_Argb32ToRgb_8_ref = {
         .execute = rgba_to_rgb_execute,
-        .check = rgba_to_rgb_check,
+        .check = NULL,
         .ctor = node_alloc_common,
         .dtor = node_free_common,
+        .n_inputs = NN_IOCOUNT(OP_RGBATORGB_NUM_OPS),
+        .n_outputs = NN_IOCOUNT(3),
 };
 

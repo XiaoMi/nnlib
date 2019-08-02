@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -1426,19 +1426,7 @@ static int channelshuffle_check_d32(struct nn_node *self, struct nn_graph *nn)
 	int n_in = self->n_inputs;
 	if( n_in < 4 ||  (n_in-1)%3u != 0 )
 		return errlog(nn, "channelshuffle_d32: needs 3*n+1 inputs, with n >= 1");
-	if( self->n_outputs  < 3) return errlog(nn, "channelshuffle_d32: needs >= 3 outputs");
 	logmsg(nn,2,"channelshuffle_d32 node %p check OK",self);
-	return 0;
-}
-
-
-static int split_check_d32(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking split_d32 node %p",self);
-	if(self->n_inputs !=4)
-		return errlog(nn, "split_d32: needs 4 inputs");
-	if( self->n_outputs  < 4) return errlog(nn, "split_d32: needs >= 4 outputs");
-	logmsg(nn,2,"split_d32 node %p check OK",self);
 	return 0;
 }
 
@@ -1449,13 +1437,17 @@ struct nn_node_ops nn_ops_for_QuantizedChannelShuffle_8_d32 = {
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
 	.flags = NN_NODE_FLAG_CLS_CHANSHUFFLE | NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
+	.n_inputs = NN_IOCOUNT_GE(4),	// must be 3*k+1
+	.n_outputs = NN_IOCOUNT_GE(3),
 };
 
 
 struct nn_node_ops nn_ops_for_QuantizedSplit_8_d32 = {
 	.execute = split_d32_execute,
-	.check = split_check_d32,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
+	.n_inputs = NN_IOCOUNT(4),		// must be exactly 4 in
+	.n_outputs = NN_IOCOUNT_GE(4),	// at least 4 out
 };

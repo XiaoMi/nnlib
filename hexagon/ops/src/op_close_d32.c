@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -86,6 +86,8 @@ static int close_d32_execute(struct nn_node *self, struct nn_graph *nn)
 #ifdef TIMING_MODE
 	return 0;
 #endif
+	if( nn_option_get(nn,debug_skip_check))  return 0;
+
 	int i;
 	const struct tensor *tensor_in = self->inputs[0];
 	const struct tensor *tensor_in_min = self->inputs[1];
@@ -277,21 +279,13 @@ static int close_d32_execute(struct nn_node *self, struct nn_graph *nn)
 //
 //  No outputs
 
-static int close_d32_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking close_d32 node %p",self);
-	int k = node_check_inputs_range( self, nn, "close_d32", 4, -6);
-	if( k == 0 )k = node_check_outputs_n( self, nn, "close_d32", 0);
-	if( k!=0)
-		return k;
-	logmsg(nn,2,"close_d32 node %p check OK",self);
-	return 0;
-}
 
 struct nn_node_ops nn_ops_for_Close_d32 = {
 	.execute = close_d32_execute,
-	.check = close_d32_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(4,6),
+	.n_outputs = NN_IOCOUNT(0),
 	.flags = NN_NODE_FLAG_D32_INPUT,
 };

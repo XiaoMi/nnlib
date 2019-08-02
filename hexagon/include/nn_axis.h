@@ -44,14 +44,29 @@
 #define DIM_NUM 4   //number of dimensions
 
 //Convert the negative axis to be positive
-//return -1 if the axis is out of range
-static inline int32_t handle_negative_axis(const int32_t axis) {
+static inline int handle_negative_axes(struct nn_graph *nn, int32_t * axes, const int32_t num_axes) {
 
-    if (axis < DIM_NUM*(-1) || axis >= DIM_NUM)    return -1;
-    if (axis < 0) {
-        return axis + DIM_NUM;
+    for(int i = 0; i < num_axes; i++)
+    {
+        if (axes[i] < DIM_NUM*(-1) || axes[i] >= DIM_NUM)
+            return errlog(nn, "Axis value %ld is out of range. Must be in the range -4 < axis < 4\n", axes[i]);
+        if (axes[i] < 0)
+            axes[i] = axes[i] + DIM_NUM;
     }
-    return axis;
+    return 0;
+}
+
+//return -1 if the axes are invalid
+static inline int get_number_elements_between_axes(const struct shape in_shape, const int first_axis_inclusive, const int last_axis_exclusive) {
+
+    if(0 <= first_axis_inclusive && first_axis_inclusive <= last_axis_exclusive && last_axis_exclusive <= DIM_NUM) {
+        int count = 1;
+        for (int i = first_axis_inclusive; i < last_axis_exclusive; ++i ) {
+            count *= in_shape.dimension[i];
+        }
+        return count;
+    }
+    return -1;
 }
 
 #endif //HEXAGON_NN_NN_AXIS_H

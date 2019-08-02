@@ -9,6 +9,8 @@ Try the "calculator" or other examples in the SDK to make sure you can execute o
 
 2) Build the Hexagon NN dynamic library
 
+  Note: For Hexagon SDK 3.4.0 and 3.4.1, please use toolv82 instead of toolv83 in all build instructions below.
+
   For SD820: make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v60
   For SD660: make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v60
   For SD835: make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v60
@@ -27,9 +29,9 @@ Try the "calculator" or other examples in the SDK to make sure you can execute o
 4) adb root ; adb remount
 
 5) cp interface/ops.def /path_to_mace/third_party/nnlib/ops.h
-   cp android_Release/ship/libhexagon_controller.so /path_to_mace/third_party/nnlib/
+   cp android_Release/ship/libhexagon_controller.so /path_to_mace/third_party/nnlib/armeabi-v7a/
    or
-   cp android_Release_aarch64/ship/libhexagon_controller.so /path_to_mace/third_party/nnlib/
+   cp android_Release_aarch64/ship/libhexagon_controller.so /path_to_mace/third_party/nnlib/arm64-v8a/
 
 6) adb push hexagon_Release_dynamic_toolv83_v6x/ship/libhexagon_nn_skel.so /system/vendor/lib/rfsa/adsp/
 	 (Replace with the actual V= path that gets created from the appropriate option from above)

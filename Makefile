@@ -1,3 +1,8 @@
+_TEST_TARGETS:= lint_script 
+
+.PHONY: $(_TEST_TARGETS)
+
+
 # You can change GRAPHINIT to be another graph setup file
 
 
@@ -76,3 +81,12 @@ print-%  : ; @echo $* = $($*)
 
 
 endif #umask
+
+
+lint_script:
+	time /prj/qct/coredev/hexagon/sitelinks/arch/pkg/python3/x86_64/3.4.2/bin/pylint --extension-pkg-whitelist=numpy -E ./scripts/tensor_compare.py
+
+test: $(_TEST_TARGETS)
+	echo PASSED ALL TESTS!
+
+

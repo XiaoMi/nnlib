@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -50,6 +50,10 @@
 #include "nn_graph_ops.h"
 #include "nn_string_map.h"
 
+#ifdef __hexagon__
+#include "nn_graph_os.h"
+#endif
+
 //
 // map an op_type to a string (with no "OP_" prefix); return NULL 
 // if the value is out of range
@@ -71,17 +75,92 @@ op_type_to_string_alt( op_type op, char const * altstr )
 }
 
 #ifdef NO_PREBUILT_OPNAME_HASH
-// 
+
+
+#define HASHN 256
+
+#ifdef __hexagon__
+static nn_mutex_t Opname_hash_mutex = NN_MUTEX_INIT;
+#define HASH_MUTEX_LOCK() nn_mutex_lock(&Opname_hash_mutex)
+#define HASH_MUTEX_UNLOCK() nn_mutex_unlock(&Opname_hash_mutex)
+#else
+#define HASH_MUTEX_LOCK()
+#define HASH_MUTEX_UNLOCK()
+#endif
+
+// 'build-on-demand' hashing for op name->id; when a miss occurs,
+//  we do a linear lookup and add to the hash.
+// hash table entries are 0 for 'none'
+// or op_id+1 to indicate an op (0 <= op_id < NN_OPS_MAX).
+//
+//  first probe: index Opname_hash_table[ hash(name) ]
+//    If this is zero, hash bucket is empty; otherwise it
+//     is the opid+1 of one name which has that hash.
+//  If that's not the name you're looking for, try
+//      Opname_hash_links[opid], and repeat the process until
+//      you find a 0 or a match.
+// When a miss occurs, and the linear lookup succeeds, the id+1
+// is stored wherever the terminating 0 was found.
+//
+static uint16_t Opname_hash_table[HASHN];
+static uint16_t Opname_hash_links[NN_OPS_MAX];
+
+static int find_hash_of( char const *s)
+{
+	unsigned h = 0;
+	int c;
+	while ( (c=*s++)!= 0){
+		h = 97*h + c;
+	}
+	return h % HASHN;
+}
+
+//
 // map string to an op_type; return -1 if not found.
-// 
+//
 int op_type_from_string( char const * s )
 {
     if( s== NULL || s[0] == 0 ) return -1;
-    
-    for(int i = 0; i  < NN_OPS_MAX; i++ )
-        if( strcmp( hexagon_nn_op_names[i], s) == 0 ) return i;
-    return -1;
+    int hashval = find_hash_of(s);
+    uint16_t * ptr = &Opname_hash_table[hashval];
+    HASH_MUTEX_LOCK();
+    int probes = 0;
+    int result = -1;
+    while(1){
+    	int opid = *ptr-1;
+    	if( opid <0 ) break;	// end of chain
+    	if( opid >= NN_OPS_MAX						// should not happen
+    		  || probes > NN_OPS_MAX ){				// should not happen
+    		// throw it out and start again
+    		memset(Opname_hash_table, 0,sizeof(Opname_hash_table));
+    		memset(Opname_hash_links, 0,sizeof(Opname_hash_links));
+    		ptr  = &Opname_hash_table[hashval];
+    		break;
+    	}
+    	if( strcmp( hexagon_nn_op_names[opid],s)==0){
+            //printf("found %s[%d]=%d after %d probes\n",s,hashval,opid,probes+1);
+    		result = opid;
+    		break;
+    	}
+    	ptr = & Opname_hash_links[opid];
+    	probes++;
+    }
+    if( result < 0){
+        //printf("missed %s[%d] after %d probes\n",s,hashval,probes+1);
+        // was not found in hash - linear lookup
+        // and add at the point where the miss occurred.
+		for(int i = 0; i  < NN_OPS_MAX; i++ ){
+			if( strcmp( hexagon_nn_op_names[i], s) == 0 ){
+				*ptr = i+1;
+				result = i;
+				break;
+			}
+		}
+    }
+    HASH_MUTEX_UNLOCK();
+    return result;
 }
+
 #else
 #include "optab_hash.i"
 #endif

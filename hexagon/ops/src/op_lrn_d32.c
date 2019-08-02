@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -461,8 +461,8 @@ static int lrn_d32_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking lrn_d32 node %p",self);
 
-	int k = node_check_inputs_outputs_n( self, nn, "lrn_d32", 7, 3 );
-	if( k != 0 ) return k;
+	//int k = node_check_inputs_outputs_n( self, nn, "lrn_d32", 7, 3 );
+	//if( k != 0 ) return k;
 
 	const int32_t window_size = (int32_t) tensor_get_float(self->inputs[3], 0);
 	if (window_size < 1) {
@@ -496,5 +496,7 @@ struct nn_node_ops nn_ops_for_QuantizedLRN_8_d32 = {
 	.check = lrn_d32_check,
 	.ctor = node_alloc_common,
 	.dtor = lrn_d32_dtor,
+	.n_inputs = NN_IOCOUNT(7),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };

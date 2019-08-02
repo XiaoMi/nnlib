@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -45,6 +45,7 @@
 #include <nn_graph_builtin.h>
 #include <nn_graph_ops.h>
 #include <nn_graph_types.h>
+#include <nn_graph_options.h>
 #include <nn_graph_im2col.h>
 #include <nn_graph_if.h>
 #include <nn_asm_ops.h>
@@ -53,6 +54,8 @@
 #include <platform.h>
 #include <stdio.h>
 #include <nn_graph_earlywork.h>
+
+#include "nn_graph_looping.h"
 
 #define likely(cond)	(__builtin_expect(!!(cond), 1))
 #define unlikely(cond)	(__builtin_expect(!!(cond), 0))
@@ -187,7 +190,7 @@ struct nn_graph {
 	struct nn_node *tail;		// 'weak' tail pointer
 								// (may be null or not last; usually last though).
 	uint32_t node_count;		// may be inaccurate (use to e.g. estimate hash size)
-
+	nn_mutex_t scratch_mutex;
 	void *scratch;			// temporary storage
 	size_t scratch_size;		// size of scratch
 	int32_t scratch_nextalloc;	// next allocation offset
@@ -203,12 +206,15 @@ struct nn_graph {
 	unsigned long watermark_offset;	// most memory allocated
 	unsigned int perf_event;
 	char *logbuf;
+	struct nn_graph * next_graph;
 	nn_mutex_t log_mutex;
 	uint32_t logbuf_size;
 	uint32_t logbuf_pos;
+	struct nn_graph_graphopts graph_options;
 	nn_pipe_t *vec_work;
 	nn_pipe_t *nonvec_work;
 	uint64_t execution_total_cycles;
+	uint64_t multi_execution_total_cycles;
 	void *os_opaque;		// data for the OS layer
 	uint32_t internal_node_id;	// Internal Node ID
 	struct nn_prepare_state *pstate;
@@ -223,11 +229,15 @@ struct nn_graph {
 	uint32_t op_class_set;
 	int32_t priority;
 	struct nn_graph_batchseqstate batchseq;
+	struct nn_loopstack loopstack;
+	uint32_t expanded_outputs[NN_MAX_OUTPUTS];
 
 	// Commandline options
 	int enable_graph_print;
+	int enable_const_print;
 	int enable_tensor_print;
 	char *enable_graph_print_prefix;
+	char *enable_const_print_prefix;
 	char *enable_tensor_print_prefix;
 	char *tensor_print_filter;
 };
@@ -434,12 +444,42 @@ void print_graph_checksum(struct nn_graph *nn);
 #define NN_NODE_FLAG_CLS_SUPPORTS_ALIAS (1<<25)	 // Supports output 0 stored at same address as input 0 (e.g. reshape)
 #define NN_NODE_FLAG_CLS_TRANSPOSECONV  (1<<24)  //TransposeConv
 #define NN_NODE_FLAG_CLS_GROUPEDCONV    (1<<23)  //QuantizedGroupedConv2d_8x8p32to8
+#define NN_NODE_FLAG_CLS_DILATEDCONV	(1<<22)  //DilatedConv
+#define NN_NODE_FLAG_CLS_IMAGETRANSFORM	(1<<21)  //ImageTransform_f
+#define NN_NODE_FLAG_CLS_LOOP_CONTROL_NODE	(1<<20)  //Any loop control node
+#define NN_NODE_FLAG_CLS_DYNAMIC_TENSOR	(1<<19)  //Any nodes with dynamically sized output tensors
+#define NN_NODE_FLAG_CLS_PRELU          (1<<18) //Prelu_v2_d32
 
 // set of all 'classes' flags
 #define NN_NODE_FLAGS_SET\
     (NN_NODE_FLAG_CLS_QUANTIZE|NN_NODE_FLAG_CLS_REQUANTRANGE|NN_NODE_FLAG_CLS_QUANTMUL8TO32\
     |NN_NODE_FLAG_CLS_DWCONVF|NN_NODE_FLAG_CLS_CHANSHUFFLE|NN_NODE_FLAG_CLS_OEMNODE|NN_NODE_FLAG_CLS_SUPPORTS_ALIAS\
-    |NN_NODE_FLAG_CLS_TRANSPOSECONV|NN_NODE_FLAG_CLS_GROUPEDCONV)
+    |NN_NODE_FLAG_CLS_TRANSPOSECONV|NN_NODE_FLAG_CLS_GROUPEDCONV|NN_NODE_FLAG_CLS_DILATEDCONV\
+    |NN_NODE_FLAG_CLS_IMAGETRANSFORM\
+    |NN_NODE_FLAG_CLS_LOOP_CONTROL_NODE\
+	|NN_NODE_FLAG_CLS_DYNAMIC_TENSOR\
+    |NN_NODE_FLAG_CLS_PRELU)
+
+// this defines the allowed range of input or output ports
+// (sub-struct of nn_node_ops)
+struct nn_node_io_range {
+	uint8_t min_ports;		// min # of ports
+	uint8_t max1_ports;	// max+1 of ports; 0 =inf
+	// if min_ports = max1_ports = 0, no information
+};
+// these are macros for initializing nn_node_io_range in nn_node_ops
+// values must be in range 0 .. 254
+#define NN_IOCOUNT(N) { (N), (N)+1}                         // must = N
+#define NN_IOCOUNT_RANGE(NMIN,NMAX) { (NMIN), (NMAX)+1}     // >= MMIN, <= NMAX
+#define NN_IOCOUNT_GE(NMIN) { (NMIN), 0}                    // >= NMIN
+//
+//  e.g. .n_inputs = NN_ICOUNT_GE(4)			// needs at least 4 inputs
+//       .n_outputs = NN_ICOUNT(3)				// needs exactly 3 outputs
+// A node will not construct if the I/O counts don't meet the requirements
+// in the nn_node_ops. If there is a more complex constraint (e.g #inputs must be
+// 3*k+1; or outputs = inputs) then this must be enforced in the 'check' function,
+// or in a ctor "subclass". The 'default' is equivalent to NN_IOCOUNT_GE(0)
+//
 
 struct nn_node_ops {
 	int (*execute)(struct nn_node *self, struct nn_graph *nn);
@@ -458,6 +498,8 @@ struct nn_node_ops {
 	unsigned int flags;
 	int (*earlywork_note_pred)(struct nn_node *self, struct nn_graph *nn, struct nn_node *predecessor);
 	int (*earlywork_register)(struct nn_node *self, struct nn_graph *nn, struct nn_early_work *work);
+	struct nn_node_io_range n_inputs;		// this defines allowed range of # inputs
+	struct nn_node_io_range n_outputs;		// this defines allowed range of # outputs
 };
 extern struct nn_node_ops *optab[];
 
@@ -562,196 +604,7 @@ struct nn_node *alloc_node(
 	uint32_t node_id,
 	op_type operation,
 	padding_type padding);
-struct nn_node* find_last_consumer(
-	struct nn_graph *nn,
-	struct nn_node *producer,
-	int out_idx);
 void set_last_consumers(struct nn_graph *nn);
-struct nn_node* find_first_producer(
-	struct nn_graph *nn,
-	struct nn_node *producer);
-struct nn_node* find_first_consumer(
-	struct nn_graph *nn,
-	struct nn_node *producer,
-	int out_idx);
-enum { CONSUMER_NOINCHECK=1 };
-struct nn_node* find_unique_consumer(
-	struct nn_graph *nn,
-	struct nn_node *producer,
-    int req_node_type,
-    const int *node_types,
-	int options);
-
-static inline
-struct nn_node* find_unique_consumer_mustbe(
-	struct nn_graph *nn,
-	struct nn_node *producer,
-    int req_node_type,      // must be this type
-	int options)
-{ return find_unique_consumer( nn, producer, req_node_type, NULL, options );
-}
-static inline
-struct nn_node* find_unique_consumer_anytype(
-	struct nn_graph *nn,
-	struct nn_node *producer,
-	int options)
-{ return find_unique_consumer( nn, producer, -1, NULL, options );
-}
-
-//
-// These functions create a new 'const' node with the given int or float value.
-// They are intended to be used during the 'prepare' phase; they use a caching
-// mechanism to avoid repeated nodes of the same value.
-//
-uint32_t create_const_int32_op(struct nn_graph *nn, int32_t const_float);
-uint32_t create_const_float_op(struct nn_graph *nn, float const_float);
-
-// This is used in 'prepare' phase; make a new const node and place it
-// at the *top* of the list.
-//
-int do_prepend_const_node(struct nn_graph *nn,
-		uint32_t node_id,
-		uint32_t batches, uint32_t height, uint32_t width, 	uint32_t depth,
-		const uint8_t *data, uint32_t data_len);
-
-//
-// returns 0 iff
-//  - 'consumer' has at least one input connected to an output of producer
-//  - no other node has inputs connected to connected to producer
-// returns -1 otherwise
-//
-int check_single_consumer_all(
-	struct nn_graph *nn,
-	struct nn_node *producer,
-	struct nn_node *consumer);
-
-//
-// this is given a list of one or more node items
-//    rmnodes[0..n_remove-1]
-//  which must exist in the list in the order given, possibly
-//  with intervening items. 'anchor' is an upstream anchor for these
-//   (i.e. *anchor = rmnodes[0]; or (*anchor)->next = rmnodes[0], etc)
-//
-// All of those are removed from the list, and the first one rmnodes[0] is replaced by new_node.
-// it will return -1 if it can't find the removed nodes; this should not
-// occur if the assumptions are met. If a non-zero return occurs, it may
-// be that some of the items were not deleted. If the first item could not be found,
-// the new item is not inserted.
-// 'dtor' is called on all removed nodes.
-//
-// if anchor is NULL, &nn->head is used.
-// if new_node is NULL, only the removal of nodes in rmnodes is done.
-// if any of the rmnodes[1..n_remove-1] is NULL, it is ignored
-//  terminator (but rnodes[0] must not be NULL)
-//
-
-int replace_node_sequence (
-		struct nn_graph *nn,
-		struct nn_node ** anchor,	// list anchor, at items[0] or upstream
-		struct nn_node * new_node,	// node to replace (may be null)
-    	struct nn_node * const * rmnodes,
-        int n_remove);
-// 'varargs' version of replace_node_sequence: the '...' parms become the rmnodes array.
-// Evaluates to return value of replace_node_sequence.
-//
-#define replace_nodes(NN,ANCHOR,NEWNODE,...)\
- ({ struct nn_node *replace_node_list[] = { __VA_ARGS__}; \
-   replace_node_sequence(NN,ANCHOR,NEWNODE, replace_node_list, sizeof(replace_node_list)/sizeof(replace_node_list[0]));})
-
-
-//
-// replace a single node 'delnode' with a sequence of 0 or more nodes
-//    addnodes[0..n_add-1].
-// -  'inspos' is where we start looking for delnode (default &nn->head, if NULL)
-// -  if delnode is NULL, we don't remove anything and we just insert all the nodes
-//     after *inspos.
-// - It is ok for some (or all) of the addnodes to be NULL, these are just ignored.
-//   The remainder are inserted in sequence.
-//
-// returns -1 if delnode !=NULL and was not found; otherwise returns # inserted nodes.
-// 'dtor' is called on delnode, if not NULL.
-//
-int
-replace_node_with_sequence(
-		struct nn_graph *nn,
-		struct nn_node ** inspos,
-		struct nn_node * delnode,
-    	struct nn_node * const * addnodes,
-        int n_add);
-// 'varargs' version of replace_node_with_sequence: the '...' parms become the addnodes array.
-// Evaluates to return value of replace_node_with_sequence.
-//
-
-#define replace_node_with(NN,ANCHOR,DELNODE,...)\
- ({ struct nn_node *add_node_list[] = { __VA_ARGS__}; \
-   replace_node_with_sequence(NN,ANCHOR, DELNODE, add_node_list, sizeof(add_node_list)/sizeof(add_node_list[0]));})
-
-// insert_nodes(nn, posn, node1, node2...) just inserts them all at 'posn'.
-
-#define insert_nodes(NN,ANCHOR,...)\
- ({ struct nn_node *add_node_list[] = { __VA_ARGS__}; \
-   replace_node_with_sequence(NN,ANCHOR, NULL, add_node_list, sizeof(add_node_list)/sizeof(add_node_list[0]));})
-
-//
-// change refs to outputs of nodeid 'old_nodeid' to refs to 'new_nodeid'.
-// 'pattern' is a mapping table encoded in nybbles, when a reference to 'old_node_id' output 'k'
-// is found, we look at nybble k (indexed starting from lsb), and
-//   nybble = 0:			=> error, there should be no reference to this output of old_node_id
-//   nybble = 0xF:			=> leave this one as is
-//   nybble = n = 1..0xE:	=> change the reference to be to 'new_nodeid' output n-1
-// an output index >= 16 is considered an error (we don't have that many nybbles in pattern)
-//
-// returns:
-//  -1 if error (all 'ok' replacements are done anyway)
-//  otherwise, number of replacements done, >= 0.
-//
-// Example:
-//   pattern = 0x321  -> remap refs to outputs (0,1,2), to new_nodeid outputs (0,1,2); inputs >=3 will be error
-//   pattern = 0xFFF3 -> remap refs to output 0 to output 2 of new_nodeid; leave refs to 1,2,3 unchanged; >= 4 will be error.
-//
-int
-change_output_refs( struct nn_graph * nn,
-		struct nn_node * begin,			// can specify the 'old_nodeid' node to speed things up; or NULL.
-		uint32_t old_nodeid,
-		uint32_t new_nodeid,
-		uint64_t pattern );
-
-//
-// this is for rewiring the consumers of a 'Split' or 'ChannelShuffle' to point at the
-// Convert_from_d32 nodes which have been attached to its outputs.
-// 'newnodes' is an array of pointers to those conversion nodes.
-//
-// Operation is:
-//
-//   -- look for all node input refs of the form { old_nodeid, idx }
-//          where idx is in range 0 .. n_outputs-1
-//   -- change these to { newnodes[idx]->node_id, 0 }
-// in cases where newnodes[idx] is NULL, the references are not changed.
-//
-int
-change_multi_output_refs( struct nn_graph * nn,
-		struct nn_node * begin,			// can specify the 'old_nodeid' node to speed things up; or NULL.
-		uint32_t old_nodeid,
-		int n_outputs,					// number of outputs to rewire
-		struct nn_node const * newnodes[] );  // array of new nodes to point to [0..n_outputs-1]
-
-//
-// this is for rewiring when a single node has been arbitrarily replaced
-// by several nodes which supply the signals previously generated by 'old_nodeid'.
-//
-// Operation is:
-//
-//   -- look for all node input refs of the form { old_nodeid, idx }
-//          where idx is in range 0 .. n_outputs-1
-//   -- change these to new_inpref[idx],
-// in cases where newnodes[idx].src_id is 0, the references are not changed.
-
-int
-change_multi_output_refs_table( struct nn_graph * nn,
-		struct nn_node * begin,			// can specify the 'old_nodeid' node to speed things up; or NULL.
-		uint32_t old_nodeid,
-		int n_outputs,					// number of outputs to rewire
-		struct input const new_inpref[] );  // array of new
 
 static inline uint32_t nn_align_up(uint32_t align_amt, uint32_t val)
 {
@@ -814,6 +667,7 @@ int node_check_outputs_n(  struct nn_node *self, struct nn_graph *nn, char const
 // check if #inputs = n_in, and outputs = n_out; and check non-null.
 // if not, log error and return non-zero. "name" is the node name for error messages.
 int node_check_inputs_outputs_n(  struct nn_node *self, struct nn_graph *nn, char const *name, int32_t n_in, int32_t n_out);
+struct nn_node *find_node_must_be_Const_from_ref(struct nn_graph *nn, struct input const *iref);
 
 enum {
 	GRAPHCHECK_DEADNODES =1,	// report nodes which have outputs but no reference

@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -37,6 +37,7 @@
 
 #include <nn_graph.h>
 #include <quantize.h>
+#include "hvx_inlines.h"
 //
 // This adjusts a min .. max range
 // (by decreasing min, or increasing max) until
@@ -118,27 +119,97 @@ int adjust_minmax_for_zero_16b(float *min_p, float *max_p)
 	float dif = mx - mn;
 	if (!(dif >= 1e-6f)) return -1;	// check valid min,max_p
 	if (mn == 0.0f) return 0;		// common case
-	float z = (-65535.0f)*mn / dif;		// current 'zero point'
+	float z = (-65536.0f)*mn / dif;		// current 'zero point'
 	float zi = floorf(z);
 	float zf = z - zi;
 	// if within 2^-6 of an integer, call it close enough
-	if (zf <= 0.015625f || zf >= 0.984375f)
+	// (don't accept z outside 0.. 65535 though)
+	if ((zf <= 0.015625f || zf >= 0.984375f ) && z >=-0.02f && z <= 65535.02f)
 		return 0;
 	// choose which end to move
-	// if zi <= 0  or >= 65534, the decision is based on that only (to
+	// if zi <= 0  or >= 65535, the decision is based on that only (to
 	// avoid divide by 0) otherwise choose based on zf.
 	//
-	if (zi > 0.0f && (zi > 65533.0f || (zf - 1.0f)*mn >= zf * mx)) {
-		// move max, change z to zi
-		*max_p = mn - 65535.0f*mn / zi;
+	if (zi > 0.0f && (zi > 65534.0f || (zf - 1.0f)*mn >= zf * mx)) {
+		// move max, change z to zi	(and zi->65535 if greater)
+		zi = fminf( zi, 65535.0f);
+		*max_p = mn - 65536.0f*mn / zi;
 		return 2;
 	}
 	else {
 		// move min; change z to zi+1
-		*min_p = mx * (zi + 1.0f) / (zi - 65534.0f);
+		zi = fmaxf(zi+1.0,1.0f);
+		*min_p = mx * zi / (zi - 65536.0f);
 		return 1;
 	}
 }
+
+int adjust_minmax_for_zero_with_constraints_16b( float *min_p, float *max_p , int constraint )
+{
+        float mn = *min_p;
+        float mx = *max_p;
+        float dif = mx-mn;
+        if( !(dif >= 1e-6f)) return -1; // check valid min,max_p
+        if( mn == 0.0f) return 0;               // common case
+        float z = (-65536.f)*mn / dif;          // current 'zero point'
+        float zi = floorf(z);
+        float zf = z - zi;
+        // if within 2^-6 of an integer, call it close enough
+        // (don't accept z outside 0.. 65535 though)
+        if ((zf <= 0.015625f || zf >= 0.984375f ) && z >=-0.02f && z <= 65535.02f)
+                return 0;
+        // choose which end to move
+        // Avoid divide by 0.
+        //
+
+        float mnk = (zf-1.0f) * mn;
+        float mxk =  zf *mx;
+        float zirnd = (zf >=0.5f)? (zi+1.0f): zi;
+
+        switch( constraint &3 ){
+         default:
+         case 0:
+                // move whichever requires least change.
+                if( zi >= 1.0f && ( zi >= 65535.0f || mnk >= mxk ))
+                        goto move_max_out;
+                goto move_min_out;
+         case 1:                // min is fixed; max is free
+                // skew decision to 'move max out'
+                if( zi >= 1.0f && (z >= 49152.25f ||  mnk * 8.0f > mxk) )
+                        goto move_max_out;
+                goto move_min_nearest;
+         case 2:
+                // skew decision to 'move min out'
+                if( z >= 16383.75f && ( zi >= 65535.0f || mnk > mxk * 8.0f ))
+                        goto move_max_nearest;
+                goto move_min_out;
+         case 3:
+                // move single endpoint if range is skewed at least 3:1; otherwise both.
+                if( z <= 16383.75f ) goto move_min_nearest;
+                if( z >= 49152.25f) goto move_max_nearest;
+                // shift zero to zirnd, by moving both ends.
+                float adj = (z-zirnd)*dif * (float)(1./65536.);
+                *min_p = mn + adj;
+                *max_p = mx + adj;
+                return 3;
+        }
+        /* NOTREACHED*/
+
+   move_max_nearest:   // move max, change z to nearest
+     zi = zirnd;
+   move_max_out:                // move max, change z to zi
+        *max_p = mn - 65536.0f*mn/zi;
+        return 2;
+
+   move_min_out:   // move min; change z to zi+1
+         zirnd = zi+1.0f;
+   move_min_nearest:    // move min, change z to nearest
+        *min_p = mx*zirnd/(zirnd-65536.0f);
+         printf(" djusted min max = %f %f \n",*min_p, *max_p);
+        return 1;
+}
+
+
 
 //
 // This is like adjust_minmax_for_zero except that it accepts a 'constraint'
@@ -173,7 +244,7 @@ int adjust_minmax_for_zero_with_constraints( float *min_p, float *max_p , int co
 	float mn = *min_p;
 	float mx = *max_p;
 	float dif = mx-mn;
-	if( !(dif >= 1e-6f)) return -1;	// check valid min,max_p
+	if(!(dif > 0.0f)) return -1;
 	if( mn == 0.0f) return 0;		// common case
 	float z = (-255.0f)*mn / dif;		// current 'zero point'
 	float zi = floorf(z);
@@ -240,15 +311,19 @@ int quantize_adjust_range_and_check( float *out_min, float *out_max, float *out_
 }
 
 ///////////////////////////////////////
-static void scalar_requantize_i32_to_qu8(int32_t const * inp, int offseti, int gaini, uint8_t *outp, int n);
+static void scalar_requantize_i32_to_qu8(int32_t const * inp, int offseto, int gaini, uint8_t *outp, int n);
 static void fallback_requantize_i32_to_qu8(int32_t const * inp, float offset, float gain, uint8_t *outp, int n);
 
 //
 // requantize n 32-bit numbers to u8; equiv to
 //     outp[i] =  quantize_uint8( in_level_size* (float)inp[i],out_min,out_max);
 //
-// This uses quantize_asm for larger n, and so it must be called from a vector thread.
-// If n <= 128, or if either pointer is not aligned, it will use a scalar operation which is equivalent.
+// This uses HVX for larger n, and so it must be called from a vector thread.
+// if n < 128, or if the gain is very small, or output unaligned, it uses hvx_scale_32_to_8 instead.
+// Note: if n is not a multiple of 128, it may fill output to a vector boundary. FIXME
+//    (this occurs when quantize_asm is called).
+//
+// if input pointer is not aligned, or if gain >= 1.0,  it will use scalar operations which are equivalent.
 //
 void
 nn_requantize_i32_to_qu8_hvx( uint8_t *outp, int32_t const * inp, int n, float in_level_size, float out_min, float out_max)
@@ -258,20 +333,29 @@ nn_requantize_i32_to_qu8_hvx( uint8_t *outp, int32_t const * inp, int n, float i
 	//  = (  x - offs) * alpha
 	//  where alpha = in_level_size * 255/(out_max-out_min)
 	//       offs = out_min/in_level_size
-	float gain = in_level_size * 255.0f / (out_max-out_min);
-	float offset_f = out_min / in_level_size;
+	float out_scale = 255.0f / (out_max-out_min);
+	float gain = in_level_size * out_scale;
+	float offset_f = 0.5f - out_min*out_scale;
 
-	if( gain > 1.0f){
+	if( gain >= 1.0f){
 		fallback_requantize_i32_to_qu8(inp, offset_f, gain, outp,  n);
 		return;
 	}
 	int gaini  = roundf_i32( gain* (float)(1u<<31) );
-	int offseti = roundf_i32(offset_f);
-	//
-	if( n < 128 || (((size_t)outp | (size_t)inp)&127)!= 0){		// use scalar loop
-		scalar_requantize_i32_to_qu8(inp, offseti, gaini, outp, n);
+
+	if( (((size_t)inp)&127)!= 0){
+		// input not aligned!
+		int offseto = (int)offset_f;
+		scalar_requantize_i32_to_qu8(inp, offseto, gaini, outp, n);
 	}else{
-		quantize_asm(inp, offseti, gaini, outp, n);
+		if( n>=128 && gaini >= 1024 && ((size_t)outp&127)==0){			// ok to use quantize_asm
+			float offset_f = out_min / in_level_size;
+			int offseti = roundf_i32(offset_f);
+			quantize_asm(inp, offseti, gaini, outp, n);
+		}else{
+			int offseto = (int)offset_f;
+			hvx_quantize_32_to_8(inp, offseto, gaini,outp,n);
+		}
 	}
 }
 
@@ -280,34 +364,100 @@ nn_requantize_i32_to_qu8_hvx( uint8_t *outp, int32_t const * inp, int n, float i
 void
 nn_requantize_i32_to_qu8( uint8_t *outp, int32_t const * inp, int n, float in_level_size, float out_min, float out_max)
 {
+	float out_scale = 255.0f / (out_max-out_min);
+	float gain = in_level_size * out_scale;
+	float offset_f = 0.5f - out_min*out_scale;
 
-	float gain = in_level_size * 255.0f  / (out_max-out_min);
-	float offset_f = out_min / in_level_size;
-
-	if( gain >1.0f){
+	if( gain >= 1.0f){
 		fallback_requantize_i32_to_qu8(inp, offset_f, gain, outp,  n);
 		return;
 	}
 	int gaini  = roundf_i32( gain * (float)(1u<<31) );
-	int offseti = roundf_i32(offset_f);
-	scalar_requantize_i32_to_qu8( inp, offseti, gaini, outp, n);
+	int offseto = (int)offset_f;
+	scalar_requantize_i32_to_qu8( inp, offseto, gaini, outp, n);
 }
 static void
-scalar_requantize_i32_to_qu8(int32_t const * inp, int offseti, int gaini, uint8_t *outp, int n)
+scalar_requantize_i32_to_qu8(int32_t const * inp, int offseto, int gaini, uint8_t *outp, int n)
 {
 	for( int i =0; i < n; i++){
-		int delt = inp[i]-offseti;
-		int64_t p =(int64_t)delt*gaini;
-		p = Q6_P_asrrnd_PI(p,31);
-		outp[i] = saturate_u8( (int32_t)p);
+		int64_t p =(int64_t)inp[i]*gaini;
+		int32_t scaled = Q6_P_asrrnd_PI(p,31);
+		scaled = Q6_R_add_RR_sat(scaled,offseto);
+		outp[i] = saturate_u8(scaled);
 	}
 }
 // when the i32->u8 conversion requires a gain > 1.0, this is used.
+// Note that 'offset' is presumed to contain a +0.5 rounding bias.
 //
 static void fallback_requantize_i32_to_qu8(int32_t const * inp, float offset, float gain, uint8_t *outp, int n)
 {
 	for( int i= 0; i < n; i++){
-		float x = ((float)inp[i]- offset) * gain;
-		outp[i] = saturate_u8( roundf_i32(x));
+		float x = inp[i] * gain + offset;
+		outp[i] = saturate_u8( (int)x);
 	}
 }
+
+
+
+//
+// This is like quantize_asm but with a different order of operations; the offset
+// is added after, instead of being subtracted before, so we can avoid overflow problems
+// for small gain.
+// The output pointer can have any alignment, and only 'n' bytes are  stored.
+//
+// The operation is:
+//    out[i] = saturate_u8(
+//           add32_sat(  offset,
+//                 (in[i] * gain)/(2^31)
+//           )
+//    )
+//
+void
+hvx_quantize_32_to_8(
+		int32_t const * inp,		// input [n], vector aligned
+		int32_t offset,				// offset to add
+		int32_t scale,				// scale with 31 fractional bits
+		uint8_t * outp,				// output [n], no alignment constraint
+		int n )						// # elements
+{
+	int nloop = n/128u;				// # of full output vectors
+
+	HVX_Vector vscale = Q6_V_vsplat_R(scale);
+	HVX_Vector voffs = q6op_Vh_vsplat_R(saturate_i16(offset));
+
+	HVX_Vector const * vinp = (HVX_Vector const*)inp;
+
+	for( int i = 0; i < nloop; i++ ){
+		HVX_Vector x0 = q6op_Vw_vmpy_VwVw_s1_rnd_sat( vinp[0], vscale);
+		HVX_Vector x1 = q6op_Vw_vmpy_VwVw_s1_rnd_sat( vinp[1], vscale);
+		HVX_Vector x2 = q6op_Vw_vmpy_VwVw_s1_rnd_sat( vinp[2], vscale);
+		HVX_Vector x3 = q6op_Vw_vmpy_VwVw_s1_rnd_sat( vinp[3], vscale);
+		HVX_Vector p01 = Q6_Vh_vadd_VhVh_sat( Q6_Vh_vpack_VwVw_sat( x1,x0), voffs );
+		HVX_Vector p23 = Q6_Vh_vadd_VhVh_sat( Q6_Vh_vpack_VwVw_sat( x3,x2), voffs );
+		q6op_vstu_AV( (HVX_Vector*)outp,  Q6_Vub_vpack_VhVh_sat(p23,p01));
+		vinp += 4;
+		outp += 128;
+	}
+	unsigned nextra = n&127;
+	if( nextra >0 ){
+		unsigned nv = (nextra+31)/32u;	// 1..4
+		HVX_Vector p01,p23;
+		if( nv >= 3){		// get first 2
+			HVX_Vector x0 = q6op_Vw_vmpy_VwVw_s1_rnd_sat( vinp[0], vscale);
+			HVX_Vector x1 = q6op_Vw_vmpy_VwVw_s1_rnd_sat( vinp[1], vscale);
+			p01 = Q6_Vh_vadd_VhVh_sat( Q6_Vh_vpack_VwVw_sat( x1,x0), voffs );
+			vinp += 2;
+		}
+		HVX_Vector x2  = q6op_Vw_vmpy_VwVw_s1_rnd_sat( vinp[0], vscale);
+		HVX_Vector x3 = Q6_V_vzero();
+		if( (nv&1)== 0 )
+			x3  = q6op_Vw_vmpy_VwVw_s1_rnd_sat( vinp[1], vscale);
+		p23 = Q6_Vh_vadd_VhVh_sat( Q6_Vh_vpack_VwVw_sat( x3,x2), voffs );
+		if( nv < 3) p01 = p23;
+		HVX_Vector result = Q6_Vub_vpack_VhVh_sat(p23,p01);
+
+		q6op_vstu_variable_ARV( outp, nextra, result );
+	}
+}
+
+

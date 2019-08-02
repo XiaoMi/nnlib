@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -41,8 +41,8 @@
 #include <nn_broadcast.h>
 
 #define OPERATOR_MUL(X,Y) ((X)*(Y))
-BROADCAST_STRIDE_11_FUNC( mul_f_stride_11, float, OPERATOR_MUL)
-BROADCAST_STRIDE_10_FUNC( mul_f_stride_10, float, OPERATOR_MUL )
+BROADCAST_STRIDE_11_FUNC( mul_f_stride_11, float, float, OPERATOR_MUL)
+BROADCAST_STRIDE_10_FUNC( mul_f_stride_10, float, float, OPERATOR_MUL )
 
 
 static const struct elementwise_funcs Mul_f_funcs = {
@@ -56,23 +56,15 @@ static const struct elementwise_funcs Mul_f_funcs = {
 
 static int mul_f_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return nn_elementwise_with_broadcast( self, nn, &Mul_f_funcs, NULL );
-}
-static int mul_f_check(struct nn_node *self, struct nn_graph *nn)
-{
-	int k;
-	logmsg(nn,2,"mul_f node %p",self);
-
-	k = node_check_inputs_outputs_n( self,nn, "mul_f", 2, 1);
-	if( k!= 0) return k;
-	logmsg(nn,2,"mul_f %p check OK",self);
-	return 0;
+	return nn_elementwise_with_broadcast( self, nn, &Mul_f_funcs,NULL, NULL, NULL );
 }
 
 struct nn_node_ops nn_ops_for_Mul_f = {
 	.execute = mul_f_execute,
-	.check = mul_f_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(2),
+	.n_outputs = NN_IOCOUNT(1),
 };
 

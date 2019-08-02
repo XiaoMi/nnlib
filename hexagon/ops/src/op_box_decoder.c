@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -106,14 +106,11 @@ static int box_decoder_execute_f(struct nn_node *self, struct nn_graph *nn) {
 
 }
 
-static int box_decoder_check_f(struct nn_node *self, struct nn_graph *nn) {
-    logmsg(nn,2,"Checking boxdecoder node %p",self);
-    return node_check_inputs_outputs_n(self, nn, "boxdecoder", 3, 1);
-}
-
 struct nn_node_ops nn_ops_for_Box_Decoder_f = {
         .execute = box_decoder_execute_f,
-        .check = box_decoder_check_f,
+        .check = NULL,
         .ctor = node_alloc_common,
         .dtor = node_free_common,
+        .n_inputs = NN_IOCOUNT(3),
+        .n_outputs = NN_IOCOUNT(1),
 };

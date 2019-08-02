@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -51,6 +51,9 @@ static int check_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	const struct tensor *dut = self->inputs[0];
 	const struct tensor *ref = self->inputs[1];
+
+	if( nn_option_get(nn,debug_skip_check))  return 0;
+
 	logmsg(nn,2,"check execute. self=%p ",self);
 	/* Copy input tensor to output */
 	CHECK(shape.batches);
@@ -58,26 +61,20 @@ static int check_execute(struct nn_node *self, struct nn_graph *nn)
 	CHECK(shape.width);
 	CHECK(shape.depth);
 	CHECK(data_size);
-	if (memcmp(dut->data,ref->data,ref->data_size) != 0) {
+	if (memcmp(dut->data,ref->data,dut->data_size) != 0) {
 		return errlog(nn,"data mismatch");
 	}
 	logmsg(nn,2,"check node %p OK",self);
 	return 0;
 }
 
-static int check_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking check node %p",self);
-	if (self->n_inputs != 2) return errlog(nn,"check: wrong # inputs");
-	if (self->n_outputs != 0) return errlog(nn,"check: wrong # outputs");
-	logmsg(nn,2,"check node %p check OK",self);
-	return 0;
-}
 
 struct nn_node_ops nn_ops_for_Check = {
 	.execute = check_execute,
-	.check = check_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(2),
+	.n_outputs = NN_IOCOUNT(0),
 };
 

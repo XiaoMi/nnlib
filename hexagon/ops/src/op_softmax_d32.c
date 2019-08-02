@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -1376,7 +1376,7 @@ softmax_operate_hvx_flat_notx4_function(
 
 		// 64 elements per loop, from each row.
 		HVX_Vector vin01;		// input vector (row 0 in even, row 1 in odd bytes)
-		HVX_Vector vin01_next;
+		HVX_Vector vin01_next = Q6_V_vzero();
 		HVX_Vector msum_0 = Q6_V_vzero();		// 32 bit sums
 		HVX_Vector msum_1 = Q6_V_vzero();
 		struct pow2func_result p2res;
@@ -2392,18 +2392,6 @@ test_recip_function()
 }
 #endif
 
-static int softmax_d32_check(struct nn_node *self, struct nn_graph *nn)
-{
-	int k;
-	logmsg(nn,2,"Checking softmax node %p",self);
-
-	k = node_check_inputs_range( self,nn, "softmax_d32", 3,4);
-	if( k==0) k = node_check_outputs_n( self,nn, "softmax_d32", 3);
-	if( k!= 0) return k;
-
-	logmsg(nn,2,"softmax node %p check OK",self);
-	return 0;
-}
 
 static int softmax_d32_free(struct nn_node *self, struct nn_graph *nn)
 {
@@ -2417,26 +2405,32 @@ static int softmax_d32_free(struct nn_node *self, struct nn_graph *nn)
 
 struct nn_node_ops nn_ops_for_QuantizedSoftmax_8_d32 = {
 	.execute =  softmax_d32_execute,
-	.check =  softmax_d32_check,
+	.check =  NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(3,4),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
 };
 
 struct nn_node_ops nn_ops_for_QuantizedSoftmax_8_d32_ref = {
 	.execute = softmax_d32_execute,
-	.check =  softmax_d32_check,
+	.check =  NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(3,4),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
 };
 
 
 struct nn_node_ops nn_ops_for_QuantizedSoftmax_8 = {
 	.execute =  softmax_flat_execute,
-	.check =  softmax_d32_check,
+	.check =  NULL,
 	.ctor = node_alloc_common,
 	.dtor = softmax_d32_free,
+	.n_inputs = NN_IOCOUNT_RANGE(3,4),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = 0
 };
 

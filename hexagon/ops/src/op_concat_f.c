@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -177,36 +177,31 @@ static int concatv2_int_execute(struct nn_node *self, struct nn_graph *nn)
 	return concat_do_execute(self,nn,dim_tensor,input_tensors,n_input_tensors,sizeof(int32_t));
 }
 
-static int concat_check(struct nn_node *self, struct nn_graph *nn)
-{
-	int k;
-	logmsg(nn,2,"Checking concat node %p",self);
-	k = node_check_inputs_range( self,nn, "concat", 1, 32);
-	if( k == 0) k = node_check_outputs_n( self,nn, "concat", 1);
-	if( k != 0) return k;
-
-	logmsg(nn,2,"concat node %p check OK",self);
-	return 0;
-}
 
 struct nn_node_ops nn_ops_for_Concat_f = {
 	.execute = concat_execute,
-	.check = concat_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_GE(1),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 struct nn_node_ops nn_ops_for_ConcatV2_f = {
 	.execute = concatv2_execute,
-	.check = concat_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_GE(1),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 struct nn_node_ops nn_ops_for_ConcatV2_int32 = {
 	.execute = concatv2_int_execute,
-	.check = concat_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_GE(1),
+	.n_outputs = NN_IOCOUNT(1),
 };
 

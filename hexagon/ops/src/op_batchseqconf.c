@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -145,13 +145,6 @@ setup_dimsel_array( struct nn_graph *nn, struct tensor const * tens, int is_outp
 
 static int batchseqconf_check(struct nn_node *self, struct nn_graph *nn)
 {
-	// First check:
-	//  - must have 3 inputs and no outputs
-
-	int n_in = self->n_inputs;
-
-	if( n_in != 3 ) return errlog(nn, "batchseqconf: bad # inputs (must be 3)");
-	if( self->n_outputs != 0) return errlog(nn, "batchseqconf: bad # outputs (must be 0)");
 
 	if( nn->batchseq.have_batchseqconf_yet) return errlog(nn,"may only have one BatchSeqConf");
 
@@ -185,6 +178,8 @@ struct nn_node_ops nn_ops_for_BatchSeqConfig = {
 	.check = batchseqconf_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(0),
 };
 
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -238,7 +238,7 @@ struct lstminput_runstate {
 };
 
 
-struct lsmtoutput_runstate {
+struct lstmoutput_runstate {
 	struct lstminput_info const * info;
 	int total_depths;			// b*w*h;
 	int out_depth;
@@ -755,7 +755,7 @@ lstmoutput_setup_info( struct nn_node *self, struct nn_graph * nn)
 	info->any_run_yet = 1;
 	return 0;
 }
-static void lstmoutput_process_ref(struct nn_graph * nn , struct lsmtoutput_runstate * rstp);
+static void lstmoutput_process_ref(struct nn_graph * nn , struct lstmoutput_runstate * rstp);
 static void lstmoutput_process_hvx( struct nn_graph * nn , void * rstpv);
 
 static int
@@ -772,7 +772,7 @@ lstmoutput_execute( struct nn_node *self, struct nn_graph * nn )
 	struct tensor const * input2_tensor = self->inputs[2];
 	struct tensor *out_tensor = self->outputs[0];
 
-	struct lsmtoutput_runstate runstate;
+	struct lstmoutput_runstate runstate;
 	runstate.info = info;
 	runstate.total_depths = info->total_depths;
 	runstate.n_jobs = (runstate.total_depths  + (LSTM_BATCH_SLICE-1))/(unsigned)LSTM_BATCH_SLICE;
@@ -818,7 +818,7 @@ lstmoutput_execute( struct nn_node *self, struct nn_graph * nn )
 }
 
 static void
-lstmoutput_process_ref( struct nn_graph * nn , struct lsmtoutput_runstate * rstp)
+lstmoutput_process_ref( struct nn_graph * nn , struct lstmoutput_runstate * rstp)
 {
 	struct lstminput_info const * info = rstp->info;
 
@@ -1313,7 +1313,7 @@ static void
 lstmoutput_process_hvx( struct nn_graph * nn , void * rstpv)
 {
 
-	struct lsmtoutput_runstate * rstp = (struct lsmtoutput_runstate *)rstpv;
+	struct lstmoutput_runstate * rstp = (struct lstmoutput_runstate *)rstpv;
 	struct lstminput_info const *info = rstp->info;
 
 	uint8_t *split_buffer = rstp->split_buffers;
@@ -1411,8 +1411,6 @@ lstmoutput_process_hvx( struct nn_graph * nn , void * rstpv)
 static int lstminput_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking lstm_input node %p",self);
-	if (self->n_inputs != 7) return errlog(nn,"lstm_input wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"lstm_input wrong # outs");
 	void * info = nn_calloc( 1, sizeof(struct lstminput_info));
 	if( info == 0 ){
 		return errlog(nn,"alloc failed");
@@ -1425,8 +1423,6 @@ static int lstminput_check(struct nn_node *self, struct nn_graph *nn)
 static int lstmoutput_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking lstm_output node %p",self);
-	if (self->n_inputs != 7) return errlog(nn,"lstm_output wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"lstm_output wrong # outs");
 	void * info = nn_calloc( 1, sizeof(struct lstminput_info));
 	if( info == 0 ){
 		return errlog(nn,"alloc failed");
@@ -1452,6 +1448,8 @@ struct nn_node_ops nn_ops_for_QuantizedLstmInput_16x16to16 = {
 	.check = lstminput_check,
 	.ctor = node_alloc_common,
 	.dtor = lstm_free,
+	.n_inputs = NN_IOCOUNT(7),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedLstmOutput_16x16to8 = {
@@ -1459,5 +1457,7 @@ struct nn_node_ops nn_ops_for_QuantizedLstmOutput_16x16to8 = {
 	.check = lstmoutput_check,
 	.ctor = node_alloc_common,
 	.dtor = lstm_free,
+	.n_inputs = NN_IOCOUNT(7),
+	.n_outputs = NN_IOCOUNT(3),
 };
 

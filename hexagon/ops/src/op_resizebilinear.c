@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -937,6 +937,7 @@ static int resizebilinear_f_execute(struct nn_node *self, struct nn_graph *nn)
 	if (self->n_inputs == 3)
 		align_corners = *(int32_t *)(self->inputs[2]->data);
 	if (align_corners) {
+		if (w_out <= 1 || h_out <= 1) return errlog(nn, "aligned_corners flag is no good with out width/height of 1 or less");
 		xscale = (float)(w_in-1) / (w_out-1);
 		yscale = (float)(h_in-1) / (h_out-1);
 	}
@@ -1178,46 +1179,22 @@ static int resizebilinear_qu8_execute(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-//==================================================================================
-static int resizebilinear_f_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"resizebilinear node %p",self);
-	if (self->n_inputs < 2 || self->n_inputs > 3) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"resizebilinear %p check OK",self);
-	return 0;
-}
-
-static int resizebilinear_qu8_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"resizebilinear node %p",self);
-	if (self->n_inputs < 4 || self->n_inputs > 5) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"resizebilinear %p check OK",self);
-	self->opaque = NULL;
-	return 0;
-}
-
-static int resizebilinear_qu8_dtor(struct nn_node *self, struct nn_graph *nn)
-{
-	if (self->opaque != NULL) {
-		nn_free(self->opaque);
-		self->opaque = NULL;
-	}
-	return node_free_common(self, nn);
-}
 
 //==================================================================================
 struct nn_node_ops nn_ops_for_ResizeBilinear_f = {
 	.execute = resizebilinear_f_execute,
-	.check = resizebilinear_f_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(2,3),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedResizeBilinear_8 = {
 	.execute = resizebilinear_qu8_execute,
-	.check = resizebilinear_qu8_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
-	.dtor = resizebilinear_qu8_dtor,
+	.dtor = node_free_common_release_opaque,
+	.n_inputs = NN_IOCOUNT_RANGE(4,5),
+	.n_outputs = NN_IOCOUNT(3),
 };

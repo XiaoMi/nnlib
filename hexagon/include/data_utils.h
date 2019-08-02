@@ -44,47 +44,11 @@
  */
 
 #include <stdint.h>
+#include <nn_graph.h>
 
-static inline int split_data(uint8_t *data, uint8_t *splits, uint32_t height,
-        uint32_t width, uint32_t depth, uint32_t numOut, uint32_t axis)
-{
-    uint32_t in_dims[3] = { height, width, depth };
-    uint32_t out_dims[3] = { height, width, depth };
-    if (out_dims[axis] % numOut != 0)
-        return -1;
-    out_dims[axis] /= numOut;
+void free_splits(uint8_t **ptr, int len);
 
-    uint32_t copy_stride = 1;
-    uint32_t in_start_stride = 1;
-    uint32_t in_copy_stride = 1;
-    uint32_t out_start_stride = 1;
-    uint32_t out_copy_stride = 1;
-
-    uint32_t i;
-    for (i = 0; i < 3; i++) {
-        if (i < axis) {
-            copy_stride *= in_dims[i];
-        } else {
-            in_start_stride *= out_dims[i];
-            in_copy_stride *= in_dims[i];
-            out_copy_stride *= out_dims[i];
-        }
-        out_start_stride *= out_dims[i];
-    }
-
-    uint8_t *in, *out;
-    uint32_t j;
-    for (i = 0; i < numOut; i++) {
-        in = data + i * in_start_stride;
-        out = splits + i * out_start_stride;
-        for (j = 0; j < copy_stride; j++) {
-            memcpy((void*)out, in, out_copy_stride);
-            out += out_copy_stride;
-            in += in_copy_stride;
-        }
-    }
-
-    return 0;
-}
+int nn_split_data_hvx_aligned(struct nn_graph *nn, uint8_t *data, uint8_t **splits, uint32_t elsize, uint32_t split_buffer_size, uint32_t height,
+        uint32_t width, uint32_t depth, uint32_t numOut, uint32_t axis);
 
 #endif

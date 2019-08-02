@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -104,6 +104,11 @@ struct nn_node *hexagon_nn_empty_const_ctor(
 	outdefs[0].max_sizes[2] = width;
 	outdefs[0].max_sizes[3] = depth;
 	outdefs[0].elementsize = data_len/allsize;
+	switch (outdefs[0].elementsize) {
+	case 1: const_tensor->format.type = NN_TYPE_QUINT8; break;
+	case 2: const_tensor->format.type = NN_TYPE_QUINT16; break;
+	default: const_tensor->format.type = NN_TYPE_VOID; break;  // Void has size=4
+	}
 	self->n_inputs = 0;
 	self->noderefhash = 0;
 	self->n_outputs = 1;
@@ -188,6 +193,10 @@ struct nn_node_ops nn_ops_for_Const = {
 	.check = const_check,
 	.ctor = const_ctor,
 	.dtor = const_dtor,
+	// these won't be used, since we don't use the node ctor.
+	// but, for completeness...
+	.n_inputs = NN_IOCOUNT(0),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 

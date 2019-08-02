@@ -37,11 +37,14 @@ HEXAGON_NN_ASM_SRCS += hexagon/asm_src/gvconv2dbbb_circ_d64_v65_h.S \
 	hexagon/asm_src/repstream2_h.S \
 	hexagon/asm_src/gvconv2dbbb_circ6_d32_v65_h.S \
 	hexagon/asm_src/gvconv2dbbb_circ6_d64_v65_h.S \
-	hexagon/asm_src/repstreamN_h.S
+	hexagon/asm_src/repstreamN_h.S \
+	hexagon/asm_src/gvconv2db2b2b2_d32_h_v65.S \
+	hexagon/asm_src/gvconv2db2b2b2u_d32_h_v65.S
 endif
 
 ifeq ($(V66), 1)
 CC_FLAGS += -DV66=1 -DHEXAGON_V66=1 -mv66
+ASM_FLAGS += -DFAST_16B_CONV
 HEXAGON_NN_ASM_SRCS += hexagon/asm_src/gvconv2dbbbs1x4_d32_h_v66.S \
 	hexagon/asm_src/gvconv2dbbb_d32_s1f_h_v66.S \
 	hexagon/asm_src/gvconv2dbbb_d16_s1f_h_v66.S \

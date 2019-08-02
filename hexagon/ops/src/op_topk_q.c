@@ -58,7 +58,7 @@ static int topk_8_execute(struct nn_node *self, struct nn_graph *nn){
     struct tensor *output_min_tensor = self->outputs[2];
     struct tensor *output_max_tensor = self->outputs[3];
 
-    uint8_t * in_val = input_val_tensor->data;
+    const uint8_t * in_val = input_val_tensor->data;
     uint8_t * out_val = out_val_tensor->data;
     int32_t * out_idxs = out_idx_tensor->data;
     int32_t given_k = tensor_get_int32(k_tensor,0);
@@ -92,14 +92,18 @@ static int topk_8_execute(struct nn_node *self, struct nn_graph *nn){
         return errlog(nn,"scratch too small");
     }
     int32_t* byte_index_map = nn->scratch;
+    for (int b=0; b<batch_size; b++, in_val+=row_size){
+        //start from the end of the row
+        const uint8_t * in_val_row = in_val+row_size-1;
 
-    for (int b=0; b<batch_size; b++){
         //zero out the memory before traversing the row again
         memset(byte_index_map,0,map_size);
         memset(byte_count_histogram,0,sizeof(byte_count_histogram));
-        for (int r =0; r < row_size; r++){
+
+        //read row front to back, to make larger indices appear first
+        for (int r = row_size -1; r >=0; r--, in_val_row--){
             cur_depth_idx = r;
-            uint8_t histogram_byte_key = *in_val;
+            uint8_t histogram_byte_key = *in_val_row;
             int32_t* byte_count_ptr = byte_count_histogram+histogram_byte_key;
             int32_t byte_count = *byte_count_ptr;
 
@@ -108,10 +112,9 @@ static int topk_8_execute(struct nn_node *self, struct nn_graph *nn){
                 *idx_in_map_ptr=cur_depth_idx;
                 *byte_count_ptr=byte_count+1;
             }else if(histogram_byte_key == MAX_BYTE_VALUE){// shortcutting if k 255s found
-                in_val += (row_size-r);//advance pointer to the start of next depth
                 break;
             }
-            in_val++;
+            
         }
 
         if(*byte_count_histogram_last_ptr==k) {//if shortcutted above
@@ -150,16 +153,13 @@ static int topk_8_execute(struct nn_node *self, struct nn_graph *nn){
     return 0;
 }
 
-static int topk_8_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking topkq node %p",self);
-	return node_check_inputs_outputs_n(self, nn, "topkq", 4, 4);
-}
 
 struct nn_node_ops nn_ops_for_TopK_8 = {
 	.execute = topk_8_execute,
-	.check = topk_8_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(4),
+	.n_outputs = NN_IOCOUNT(4),
 };
 

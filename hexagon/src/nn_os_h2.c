@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -46,6 +46,8 @@
 #include <h2_vmtraps.h>
 #include <h2_common_linear.h>
 #include <h2_common_pmap.h>
+#include <h2_config.h>
+#include <assert.h>
 #define H2K_GUEST_START 0x00000000
 
 h2_vecaccess_state_t vecstate;
@@ -106,14 +108,35 @@ uint64_t nn_os_get_perfcount(struct nn_graph *nn)
 #else
 #define VTCM_ADDRESS 0xD8200000LL
 #endif
-
-void *nn_os_get_vtcm(struct nn_graph *nn, uint32_t *size)
+H2K_linear_fmt_t pmap[] = {
+  MEMORY_MAP((((H2K_GUEST_START >> 24) + 0) << 12), URWX, L1WB_L2C, SIZE_16M, (((H2K_GUEST_START >> 24) + 0) << 12)) 
+  MEMORY_MAP((((H2K_GUEST_START >> 24) + 1) << 12), URWX, L1WB_L2C, SIZE_16M, (((H2K_GUEST_START >> 24) + 1) << 12)) 
+  MEMORY_MAP((((H2K_GUEST_START >> 24) + 2) << 12), URWX, L1WB_L2C, SIZE_16M, (((H2K_GUEST_START >> 24) + 2) << 12)) 
+  MEMORY_MAP((((H2K_GUEST_START >> 24) + 3) << 12), URWX, L1WB_L2C, SIZE_16M, (((H2K_GUEST_START >> 24) + 3) << 12))
+  MEMORY_MAP((((H2K_GUEST_START >> 24) + 4) << 12), URWX, L1WB_L2C, SIZE_16M, (((H2K_GUEST_START >> 24) + 4) << 12))
+// 256KB Page
+	MEMORY_MAP((((0 >> 18) + 0) << 6), URWX, L1WB_L2C, SIZE_4M, (((0 >> 18) + 0) << 6))
+	{ .raw = 0 },
+};
+unsigned int vtcm_base;
+void *nn_os_get_vtcm(struct nn_graph *nn)
 {
 	//pthread_once_t memsetup_once = PTHREAD_ONCE_INIT;
 	//pthread_once(&memsetup_once,h2_mem_setup);
-	return (void *)VTCM_ADDRESS;
-}
+	vtcm_base = h2_info(INFO_VTCM_BASE);
+#if 0        
+	assert(vtcm_base != -1); // error
+	assert(vtcm_base != 0);  // no vtcm
 
+	pmap[5].ppn = vtcm_base >> 12;  // 4K page number
+	pmap[5].vpn = vtcm_base >> 12;
+
+	assert(h2_vmtrap_newmap(&pmap, H2K_ASID_TRANS_TYPE_LINEAR, 1) != -1);
+
+	printf("vtcm_base 0x%08x\n", vtcm_base);
+#endif        
+        return (void *)vtcm_base;
+}
 extern int VTCM_User_Req;
 
 int nn_os_vtcm_choose_size(struct nn_graph *nn)
@@ -137,8 +160,30 @@ int nn_os_vtcm_choose_size(struct nn_graph *nn)
 	return 0;
 }
 
+int nn_os_vtcm_query_page_count(struct nn_graph *nn)
+{
+	unsigned int arch_page_count;
+	arch_page_count = 0;
+
+#if defined(HEXAGON_V66) || defined(HEXAGON_V65)
+	arch_page_count = 1;
+#endif
+	return arch_page_count;
+}
+
 int nn_os_vtcm_acquire(struct nn_graph *nn) {
-	nn->vtcm_ptr = (void *)VTCM_ADDRESS;
+#if 0  
+	logmsg(nn,0,"vtcm_base 0x%p\n",nn_os_get_vtcm(nn) );
+        nn->vtcm_ptr = (void *)VTCM_ADDRESS;
+#else
+        nn->vtcm_ptr = (void *)nn_os_get_vtcm(nn);
+	logmsg(nn,1,"vtcm_base 0x%p", nn->vtcm_ptr);
+#endif
+#if __HEXAGON_ARCH__ == 68
+	nn->vtcm_size = 4096*1024;
+#else
+	nn->vtcm_size = 256*1024;
+#endif
 	return 0;
 }
 

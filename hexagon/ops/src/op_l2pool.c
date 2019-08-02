@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -157,37 +157,22 @@ static int l2pool_execute_ref(struct nn_node *self, struct nn_graph *nn)
     return 0;
 }
 
-static int l2pool_check(struct nn_node *self, struct nn_graph *nn)
-{
-    int i;
-    logmsg(nn,2,"Checking l2pool node %p",self);
-    if (self->n_inputs  != 5) return errlog(nn,"l2pool wrong # inputs");
-    if (self->n_outputs != 3) return errlog(nn,"l2pool wrong # outs");
-    for (i = 0; i < self->n_inputs; i++) {
-        if (self->inputs[i] == NULL) {
-            return errlog(nn,"l2pool NULL input %d",i);
-        }
-    }
-    for (i = 0; i < self->n_outputs; i++) {
-        if (self->outputs[i] == NULL) {
-            return errlog(nn,"l2pool NULL output %d",i);
-        }
-    }
-    logmsg(nn,2,"l2pool node %p check OK",self);
-    return 0;
-}
 
 struct nn_node_ops nn_ops_for_QuantizedL2Pool_8_ref = {
     .execute = l2pool_execute_ref,
-    .check = l2pool_check,
+    .check = NULL,
     .ctor = node_alloc_common,
     .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT(5),
+    .n_outputs = NN_IOCOUNT(3),
 };
 
 
 struct nn_node_ops nn_ops_for_QuantizedL2Pool_8 = {
     .execute = l2pool_execute_ref,
-    .check = l2pool_check,
+    .check = NULL,
     .ctor = node_alloc_common,
     .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT(5),
+    .n_outputs = NN_IOCOUNT(3),
 };

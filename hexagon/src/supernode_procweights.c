@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -38,6 +38,7 @@
 #include "hvx_inlines.h"
 #include "op_supernode_procweights.h"
 #include "quantize.h"
+
 // this enables 'full-scaling' e.g. if the coeffs
 // zero point is 100, they will be scaled by 210/256 and offset so that
 //   0->  -82,    100 ->0,  255 -> +127
@@ -167,7 +168,7 @@ struct repack_filter_parms {
   nn_sem_t done_sem;
 };
 */
-#if defined(V66)
+#if defined(V66) || defined(V65)
 // This operates on a packed slice of 32 batches; contained in filterslice_len/128 vectors
 // at srcp. Each vector contains 32 groups of 4 unsigned weights, which belong to 32 filter batches
 // It finds the min and max values within each of the 32 batches
@@ -395,8 +396,6 @@ do_perlane_weight_scaling(  uint8_t  * weights,
 		}
 	} //for slices
 }
-
-
 #endif
 static void repack_filter_for_d32_REF( struct nn_graph *nn, void *vrpfp );
 
@@ -658,8 +657,9 @@ repack_filter_for_d32( struct nn_graph *nn, void *vrpfp )
 		// pick the largest scale that won't overflow the calculation
 		// (note that the overall scale calc is compensated for whatever scaleK
 		// that we actually use here).
-#if defined(V66)
+#if defined(V66) || defined(V65)
                 int need_scale= 1;
+#if 1
                 if( zval < 127 ){       /// max = 255-zval = 
                         scaleK = (256*127+127)/(255-zval);
                 }else if( zval > 129){
@@ -673,9 +673,11 @@ repack_filter_for_d32( struct nn_graph *nn, void *vrpfp )
                         //
                         rpfp->coeffscale = (float)scaleK * (float)(1./256);
                 }
+#endif
 #if 1	// fully vectorized per-lane-scaling
                 do_perlane_weight_scaling( outptr, filt_batches_padded/32u, filt_hw*filt_depth_padded * 32,
                 		zval, rpfp->scalefac_vec,  gemsumb );
+
 #else
                // w groups of 4 scaleK
                uint32_t  * scaleK_vec = nn_memalign(128, 4*sizeof(uint8_t)  * filt_batches_padded);
@@ -781,8 +783,15 @@ repack_filter_for_d32( struct nn_graph *nn, void *vrpfp )
                 nn_free(scaleK_vec);
                 nn_free(offset_vec);
 #endif
+               int32_t gm = 0x7fffffff;
+               for(int i=0; i < filt_batches_padded; i++)
+               {
+                    logmsg(nn, 2, "%d) %08lx", i, rpfp->scalefac_vec[i]);
+                    if(rpfp->scalefac_vec[i] < gm) gm = rpfp->scalefac_vec[i];
+               }
+               rpfp->coeffscale = (float)gm / (float)(0x7fffffff);
     }
-#else   //V65
+#else   //V65 - effectively dead code with per channel model
 		int scaling_offs=0;
 		int need_scale= 1;
 		if( zval < 127 ){	///

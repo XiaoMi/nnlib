@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -144,6 +144,25 @@ struct mul_scaling_parms {
 	float all_in_scale;		// product of input scales
 	float all_in_scale_recip;		// recip of all_in_scale
 };
+
+// each of these describes a vertical slice in a particular batch:
+// contains pointers, # of rows to do, and how much to prefetch
+//
+struct elementwise_chunk_descriptor {
+	uint8_t const * data_A;		// a-side source pointer
+	uint8_t const * data_B;		// b-side source pointer
+	uint8_t * data_out;			// output pointer
+	unsigned rows;				// # of of rows
+	union {
+		uint32_t pf_b_a_ht;
+		struct{
+			// # of 'rows' to prefetch for A and B. The pfb_ht can be 0, meaning don't prefetch.
+			uint16_t pfa_ht;			// a-side prefetch height (width= pf_wid_a, stride= tinA.d32_stride)
+			uint16_t pfb_ht;			// b_side prefetch height (wid = pf_wid_b, stride = tinB.d32_stride)
+		};
+	};
+};
+
 //
 // This contains the overall 'plan' and includes the scaling, decisions of what special
 // case to use, and addressing of the inputs and outputs.
@@ -182,6 +201,10 @@ struct elementwise_d32_info {
 	int16_t swapXY;				// if true, a is x, b is x;  else a is x,b is y.
 	int16_t min_max_precalc;	// bit 0-> min; bit 1-> max; did we get a non-inf input here.
 	int16_t has_run_before;		// true if out_min, out_max are based on previous run
+
+	struct elementwise_chunk_descriptor * chunkdescs;	// NULL until allocated
+	uint32_t chunkdesc_count;							// number of chunk descriptors
+	uint32_t chunkdesc_alloc;							// number we have allocated for.
 
 	// funcs which depend on the operator class
 	setup_scaling_fp setup_scaling_funcp;					// set up scaling
@@ -279,6 +302,7 @@ struct elementwise_d32_runstate {
 	struct elementwise_d32_info *info;
 	volatile int scratch_idx;	// used to pick up scratch buffer(s)
 	volatile int jobno;			// sequences of jobs
+	int nthreads;				// number of threads in use
 	nn_sem_t done_sem;
 	int find_range;				// do we need to find range
 };
@@ -306,6 +330,7 @@ static void core_mul_d32_B11D_hvx( struct elementwise_hvx_thrinfo const * thrp,
 static void core_mul_d32_mixed_hvx( struct elementwise_hvx_thrinfo const * thrp,
 		uint8_t *pout, uint8_t const * ptrA, uint8_t const *ptrB, int height );
 
+static int make_chunk_descriptors(  struct nn_graph *nn, struct elementwise_d32_info* info );
 // build the 'address' and 'broadcast' portions of the strategy for the current inputs,
 // operator is op_add or op_subtract.
 //
@@ -477,7 +502,8 @@ setup_elementwise_strategy( struct nn_graph *nn, struct nn_node *self, int opera
 		// (by 'clean' strides; height_stride= nd32*d32_stride).
 		if( run_nd32 >1 && ((run_depth&31)==0 || info->min_max_precalc==3)){
 			int can_flatten = 0;
-			if( run_height ==1 ){
+			// TODO: backing this off until an issue is solved: (1,1,14,128)+(1,1,1,128) doesn't work
+			if( 0 && run_height ==1 ){
 				can_flatten = 1;
 			}else if( info->tinA.height_stride == info->tinA.d32_stride*run_nd32){
 				struct shape const *bshape = swapXY? &info->x_shape : &info->y_shape;
@@ -507,7 +533,7 @@ setup_elementwise_strategy( struct nn_graph *nn, struct nn_node *self, int opera
 		unsigned batches = info->out_shape.batches;
 		// how many rows per work unit?
 		unsigned rowsize = info->tout.height_stride;
-		unsigned chunk_good_size = (1<<17);
+		unsigned chunk_good_size = (32*1024);
 		unsigned chunk_rows = (rowsize*2>chunk_good_size)?1
 				: (rowsize * run_height <= chunk_good_size)? run_height
 				: chunk_good_size/rowsize;
@@ -531,6 +557,9 @@ setup_elementwise_strategy( struct nn_graph *nn, struct nn_node *self, int opera
 		info->num_work_units = batches * height_chunks;
 		logmsg(nn,2,"%d batches of %d rows each; do each in %d chunks of %d rows * nd32=%d",
 				batches, run_height,height_chunks, chunk_rows, run_nd32);
+
+		int res = make_chunk_descriptors( nn, info );
+		if( res != 0) return res;
 	}
 	nn_scratch_reset(nn);
 	info->minmax_bufs = nn_scratch_alloc(nn, sizeof(HVX_Vector)*OP_ADD_D32_MAX_THREADS);
@@ -539,6 +568,117 @@ setup_elementwise_strategy( struct nn_graph *nn, struct nn_node *self, int opera
 	info->strategy_valid = -1;	// still needs scaling info.
 	return 0;
 }
+
+// make the array of chunk descriptors
+// each contains input & output pointers, and a row count.
+// Using this array, each 'job' can consist of processing one job, while performing
+// a prefetch for a later job.
+static int
+make_chunk_descriptors(  struct nn_graph *nn, struct elementwise_d32_info* info )
+{
+	int height_chunks = info->height_chunks;
+	int batches = info->out_shape.batches;
+	int compat_flags = info->compat_flags;
+
+
+	unsigned alloc_descs = (height_chunks* batches + 15u)&~15u;	// alloc for this many
+
+	struct elementwise_chunk_descriptor *chunkdescs = info->chunkdescs;
+
+	if( info->chunkdesc_alloc < alloc_descs ){	// make it bigger
+		void * new_arr = nn_realloc(info->chunkdescs, sizeof( struct elementwise_chunk_descriptor) * alloc_descs);
+		if( new_arr == NULL) return errlog(nn, "alloc fail: chunkdescs");
+		info->chunkdescs = chunkdescs = (struct elementwise_chunk_descriptor*)new_arr;
+		info->chunkdesc_alloc = alloc_descs;
+	}
+	// fill out the first batch of these
+
+	uint8_t const * inpA0 = info->tinA.data;
+	int inA_height_stride = info->tinA.height_stride;
+
+	uint8_t const * inpB0 = info->tinB.data;
+	int inB_height_stride = info->tinB.height_stride;
+
+	uint8_t * outp0 = info->tout.data;
+	int out_height_stride = info->tout.height_stride;
+
+
+	int chunk_rows = info->chunk_rows;
+	int run_height = info->run_height;
+
+	//printf("%d rows in %d chunks of %d; %d batches (allocated %d)\n", run_height, height_chunks, chunk_rows, batches, alloc_descs );
+
+	// some sanity checks
+	if( batches < 1 || chunk_rows < 1 || height_chunks < 1 || run_height > height_chunks*chunk_rows
+			|| run_height <= height_chunks*(chunk_rows-1) ){
+		return errlog(nn,"bad chunk divs: b=%d, h=%d as %d of %d", batches, run_height, height_chunks, chunk_rows);
+	}
+	// instead of doing 'chunk_rows' at a time all the way down, change from chunk_rows to chunk_rows-1
+	// when it becomes adequate to do so.
+	// e.g. 480 sliced in 70 of 7, would be 60 of 7, followed by 10 of 6.
+	int curr_chunkrows = chunk_rows;
+	int smaller_chunkrows = chunk_rows-1;
+	int hpos = 0;
+	int hposx = run_height-height_chunks*(chunk_rows-1); // used to determine when to switch
+	int nd32 = info->run_nd32;
+	int b_nd32 = nd32;
+	int b_pfadd = 0;
+	if( compat_flags & compat_broadcast_H){		// broadcasting from height
+		b_nd32 = 0;							// no running prefetch of B.
+	}else if( compat_flags & compat_broadcast_D){
+		b_nd32 = 0;							// only one 'depth' needs prefetching on B,
+		b_pfadd = 1;
+	}
+	for( int i =0; i < height_chunks; i++){
+		chunkdescs[i].data_A = inpA0 + inA_height_stride*hpos;
+		chunkdescs[i].data_B = inpB0 + inB_height_stride*hpos;
+		chunkdescs[i].data_out = outp0 + out_height_stride*hpos;
+		chunkdescs[i].rows = curr_chunkrows;
+		chunkdescs[i].pfa_ht = curr_chunkrows * nd32;	// # of 'rows' to prefetch, a
+		chunkdescs[i].pfb_ht = curr_chunkrows * b_nd32 +b_pfadd;	// # of 'rows' to prefetch, b
+		hpos += curr_chunkrows;
+		hposx += smaller_chunkrows;
+		if( hposx == hpos) curr_chunkrows = smaller_chunkrows;
+	}
+	if( hpos != run_height) return errlog(nn, "h division failed!");
+
+	// if height_broadcasting, we filled in pfb_ht as zero on all entries; go fill in the first
+	// one properly now. It's one d-slice (if broadcasting on D as well) or nd32 slices if not.
+	if(compat_flags & compat_broadcast_H){
+		int pf_b_ht  = (compat_flags & compat_broadcast_D) ? 1: nd32;
+		chunkdescs[0].pfb_ht = pf_b_ht;
+	}
+
+	info->chunkdesc_count = height_chunks * batches;
+	// do the batches by just adding the offsets to the previous...
+	if( batches > 1){
+		int inA_batch_stride = info->tinA.batch_stride;
+		int inB_batch_stride = info->tinB.batch_stride;
+		int out_batch_stride = info->tout.batch_stride;
+		struct elementwise_chunk_descriptor const *rdp = &chunkdescs[0];
+		struct elementwise_chunk_descriptor *wrp = &chunkdescs[height_chunks];
+		for(int  i = 0; i < (batches-1)*height_chunks; i++ ){
+			unsigned rows = rdp->rows;
+			uint32_t pf = rdp->pf_b_a_ht;
+			wrp->data_A = rdp->data_A + inA_batch_stride;
+			wrp->data_B = rdp->data_B + inB_batch_stride;
+			wrp->data_out = rdp->data_out + out_batch_stride;
+			wrp->rows = rows;
+			wrp->pf_b_a_ht = pf;
+			rdp ++;
+			wrp ++;
+		}
+	}
+	/*
+	for( int i =0; i < info->chunkdesc_count; i++){
+		printf(" %2d: %2d  %3d %p %p %p\n",
+				i/height_chunks, i% height_chunks,
+				chunkdescs[i].rows,chunkdescs[i].data_A,chunkdescs[i].data_B,chunkdescs[i].data_out);
+	}*/
+
+	return 0;
+}
+
 
 ///////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////.///// For Add/Sub //////////////////////////////////////////
@@ -1375,14 +1515,16 @@ static int addsub_d32_execute_common(struct nn_node *self, struct nn_graph *nn)
 	int ran_again = 0;
 	while(1){  // maybe once, maybe twice
 
+		int nthreads = min_i32(OP_ADD_D32_MAX_THREADS, info->num_work_units );
+
 		struct elementwise_d32_runstate runstate;
 		runstate.info = info;
 		runstate.scratch_idx = 0;
 		runstate.jobno = 0;
+		runstate.nthreads = nthreads;
 		runstate.find_range = need_ranging;
 		nn_sem_init( &runstate.done_sem, 0 );
 
-		int nthreads = min_i32(OP_ADD_D32_MAX_THREADS, info->num_work_units );
 		for( int i =0; i < nthreads; i++){
 			nn_os_work_for_vector(nn,elementwise_d32_worker_func,&runstate);
 		}
@@ -1440,6 +1582,8 @@ elementwise_d32_worker_func( struct nn_graph *nn, void * rstpv)
 	struct elementwise_d32_runstate *rstp = (struct elementwise_d32_runstate*)rstpv;
 	struct elementwise_d32_info *info = rstp->info;
 	// trhrix is our thread index, 0..nthreads-1.
+	int nthreads =rstp->nthreads;
+
 	int thridx = __sync_fetch_and_add( & rstp->scratch_idx,1);
 
 	struct elementwise_hvx_thrinfo thrinfo;
@@ -1449,31 +1593,15 @@ elementwise_d32_worker_func( struct nn_graph *nn, void * rstpv)
 	*(HVX_Vector *)thrinfo.minmax_buf = q6op_Vh_vsplat_R(0x8000);
 
 	int jobidx;
-	int njobs = info->num_work_units;
+	int njobs = info->chunkdesc_count;
 
-	int ibatch,ihtchunk;
-	int chunk_rows = info->chunk_rows;
-	int nrows_all = info->run_height;
-	// hoist all the things
-	uint8_t const * inpA0 = info->tinA.data;
-	int inA_height_stride = info->tinA.height_stride;
-	int inA_batch_stride = info->tinA.batch_stride;
-
-	uint8_t const * inpB0 = info->tinB.data;
-	int inB_height_stride = info->tinB.height_stride;
-	int inB_batch_stride = info->tinB.batch_stride;
-
-	uint8_t * outp0 = info->tout.data;
-	int out_height_stride = info->tout.height_stride;
-	int out_batch_stride = info->tout.batch_stride;
-
-	thrinfo.inA_height_stride = inA_height_stride;
+	// hoist all the things we need
 	thrinfo.inA_d32_stride = info->tinA.d32_stride;
-	thrinfo.inB_height_stride = inB_height_stride;
+	thrinfo.inA_height_stride = info->tinA.height_stride;
 	thrinfo.inB_d32_stride = info->tinB.d32_stride;
-
-	thrinfo.out_height_stride = out_height_stride;
-	thrinfo.out_d32_stride = info->tout.d32_stride;;
+	thrinfo.inB_height_stride = info->tinB.height_stride;
+	thrinfo.out_d32_stride = info->tout.d32_stride;
+	thrinfo.out_height_stride = info->tout.height_stride;
 
 	thrinfo.width = info->out_shape.width;
 	thrinfo.depth = info->run_depth;
@@ -1484,42 +1612,68 @@ elementwise_d32_worker_func( struct nn_graph *nn, void * rstpv)
 	if( info->oper_code <=op_LASTADDSUB && info->addsub_scaling.underrange)
 		funcp = core_add_d32_underrange_hvx;
 
-	batchslice_decode bsdecode;
-	batchslice_decode_init( &bsdecode, info->height_chunks);
+	unsigned pfa_wid = info->pf_wid_a;
+	unsigned pfa_stride = info->tinA.d32_stride;
+	unsigned pfb_wid = info->pf_wid_b;
+	unsigned pfb_stride = info->tinA.d32_stride;
+	struct elementwise_chunk_descriptor const * chunks = info->chunkdescs;
+	struct elementwise_chunk_descriptor const * last_chunk = &chunks[njobs-1];
+	struct elementwise_chunk_descriptor const * pending_chunk = NULL;
 
-	unsigned pfb_wid = 0;
-	unsigned pfb_ht = 0;
-	unsigned pfb_stride = 0;
-	if( info->broadcast_mode == mode_broadcast_B11D){	// let's prefetch B side in here.
-		pfb_wid = info->pf_wid_b;
-		pfb_ht = info->tinB.nd32;
-		pfb_stride = (pfb_ht > 1)? info->tinB.d32_stride : 128;
-	}
+	// The logic in the loop here is:
+	//   (1) get a chunk from the pool using sync_fetch_and_add; get a pointer
+	//     to its desc (this_chunk)
+	//   (2) wait for any prefetch to finish
+	//   (3) issue l2 prefetch for that chunk
+	//   (4) if there's a valid *previous* job( pending_chunk), then do that one.
+	//   (5) The pointer obtained in (1) becomes the new 'pending_chunk'
+	//  At the end, if there's a pending_chunk, we need to do that.
+
 
 	while( jobidx = __sync_fetch_and_add(&rstp->jobno,1),  jobidx < njobs){
-		// decode jobidx to ibatch, ihtchunk
-		ihtchunk = batchslice_decode_update( &bsdecode, jobidx);
-		ibatch = bsdecode.ibatch;
-			// find height range for this job
-		int h0 = ihtchunk * chunk_rows;
-		int nrows = min_i32( chunk_rows,nrows_all-h0);
-		if( nrows <=0 ) continue;
+		struct elementwise_chunk_descriptor const * this_chunk = &chunks[jobidx];
+		struct elementwise_chunk_descriptor const * next_chunk_maybe = this_chunk + nthreads;
+
+		if(pending_chunk != NULL) Q6_dcfetch_A(pending_chunk);
+
+		wait_for_l2fetch();
+
 #if defined(__hexagon__)
 		asm volatile("hintjr(%0)"::"r"(funcp));
 #endif
 
-		// find the input pointers
-		uint8_t const  *inpA = inpA0 + inA_height_stride*h0 + inA_batch_stride * ibatch;
-		uint8_t const  *inpB = inpB0 + inB_height_stride*h0 + inB_batch_stride * ibatch;
+		// find the input pointers; prefetch the 'new' job
+		uint8_t const  *inpA = this_chunk->data_A;
+		uint8_t const  *inpB = this_chunk->data_B;
+		uint32_t pf_b_a_ht = this_chunk->pf_b_a_ht;
+		unsigned pf_b_rows = pf_b_a_ht >>16;
+		if( pf_b_rows != 0){
+			l2fetch( align_uint8_k_ptr(inpB), pfb_stride, pfb_wid, pf_b_rows);
+			if(0)printf("thrd %d .... l2fetch(%p,%d,%d,%d)\n",
+					thridx, align_uint8_k_ptr(inpB), pfb_stride, pfb_wid, pf_b_rows);
+		}
+		l2fetch( align_uint8_k_ptr(inpA), pfa_stride, pfa_wid, (uint16_t)pf_b_a_ht);
+		if(0)printf("thrd %d l2fetch(%p,%d,%d,%d)\n",
+				thridx, align_uint8_k_ptr(inpA), pfa_stride, pfa_wid, (uint16_t)pf_b_a_ht);
+		if(pending_chunk!=NULL){
+			// output pointer
+			uint8_t  *outp = pending_chunk->data_out;
+			uint8_t const  *inpA = pending_chunk->data_A;
+			uint8_t const  *inpB = pending_chunk->data_B;
+			if(0)printf("thrd %d : %d rows %p + %p\n", thridx,  pending_chunk->rows, inpA, inpB);
+			(*funcp)( &thrinfo, outp, inpA, inpB, pending_chunk->rows);
+		}
+		pending_chunk = this_chunk;
+		// try to avoid cache miss on next descriptor in L1
+		if( next_chunk_maybe <= last_chunk) Q6_dcfetch_A(next_chunk_maybe);
+	} // end of work units
+	// usually one pending...
+	if( pending_chunk != NULL){
+		if(0)printf("thrd %d :: %d rows %p + %p\n", thridx,  pending_chunk->rows, pending_chunk->data_A, pending_chunk->data_B);
 
-		if( pfb_wid) l2fetch( align_uint8_k_ptr(inpB), pfb_stride, pfb_wid, pfb_ht);
+		(*funcp)( &thrinfo, pending_chunk->data_out, pending_chunk->data_A, pending_chunk->data_B, pending_chunk->rows);
+	}
 
-
-		// output pointer
-		uint8_t  *outp = outp0 + out_height_stride*h0 + out_batch_stride * ibatch;
-		(*funcp)( &thrinfo, outp, inpA, inpB, nrows);
-
-	} // end of work unit
 
 	// lateral reduce on minmax.. contains 32 of { ~min, max }
 	if( rstp->find_range){
@@ -1791,7 +1945,6 @@ core_add_d32_hvx_inline( struct elementwise_hvx_thrinfo const * thrp,
 	int a_scale = info->addsub_scaling.a_scale;
 	int b_scale =info->addsub_scaling.b_scale;
 	int offset = info->addsub_scaling.offset;
-	unsigned pfa_vecs = info->pf_wid_a >> 7;
 
 	scales_hi = Q6_R_combine_RlRl( scales_hi, scales_hi);
 	scales_lo = Q6_R_combine_RlRl( scales_lo, scales_lo);
@@ -1826,8 +1979,6 @@ core_add_d32_hvx_inline( struct elementwise_hvx_thrinfo const * thrp,
 			vlalign_val = wpad_bytes - wpad_bytes_B;		// for aligning b input to A
 			if( vlalign_val < 0) vinpB_0 ++;				// point to first in-loop load of B.
 		}
-	}else{
-		wait_for_l2fetch();		// wait for B side fetch done by caller.
 	}
 
 	// we have two loops for with or without 'find_range'.
@@ -1837,17 +1988,12 @@ core_add_d32_hvx_inline( struct elementwise_hvx_thrinfo const * thrp,
 	// when find_range = 0.
 	//
 	int find_range = thrp->find_range;
-	// do not prefetch if A >= this...
-	HVX_Vector const *vinpA_limit = vecptrk_add_bytes(vinpA_0 ,row_stride_A*height);
 
 	if(broadcast_mode == mode_broadcast_general && find_range == 0 ){		// fast version (no min/max calc needed)
 		for(int id32 = 0; id32 < nd32; id32++){
 			HVX_Vector const *vinpA_d = vinpA_0;
 			HVX_Vector const *vinpB_d = vinpB_0;
 			HVX_Vector *voutp_d = voutp_0;
-
-			// prefetch first 'A' row
-			l2fetch( vinpA_d, 128, 128,pfa_vecs);
 
 			if( is_B11D){
 				// get the (only) B side value (just 32 bytes needed) and splat to all.
@@ -1861,11 +2007,6 @@ core_add_d32_hvx_inline( struct elementwise_hvx_thrinfo const * thrp,
 				HVX_Vector *voutp = voutp_d;
 				HVX_Vector vb_prev = Q6_V_vzero();
 
-				// prefetch next A row...
-				{
-					HVX_Vector const * vinpA_d_next = vecptrk_add_bytes(vinpA_d,row_stride_A);
-					if ( vinpA_d_next < vinpA_limit) l2fetch(vinpA_d_next,128,128,pfa_vecs);
-				}
 				//
 				// start up..
 				//
@@ -1947,9 +2088,6 @@ core_add_d32_hvx_inline( struct elementwise_hvx_thrinfo const * thrp,
 			HVX_Vector const *vinpB_d = vinpB_0;
 			HVX_Vector *voutp_d = voutp_0;
 
-			// prefetch first 'A' row
-			l2fetch( vinpA_d, 128, 128,pfa_vecs);
-
 			if( is_B11D){
 				// get the (only) B side value (just 32 bytes needed) and splat to all.
 				HVX_Vector vbin = Q6_V_vror_VR( *vinpB_d,wpad_bytes_B);
@@ -1962,11 +2100,6 @@ core_add_d32_hvx_inline( struct elementwise_hvx_thrinfo const * thrp,
 				HVX_Vector *voutp = voutp_d;
 
 				HVX_Vector vb_prev = Q6_V_vzero();
-				// prefetch next A row...
-				{
-					HVX_Vector const * vinpA_d_next = vecptrk_add_bytes(vinpA_d,row_stride_A);
-					if ( vinpA_d_next < vinpA_limit) l2fetch(vinpA_d_next,128,128,pfa_vecs);
-				}
 				//
 				// start up..
 				//
@@ -2161,7 +2294,6 @@ core_add_d32_underrange_hvx( struct elementwise_hvx_thrinfo const * thrp,
 	int a_scale = info->addsub_scaling.a_scale;
 	int b_scale =info->addsub_scaling.b_scale;
 	int offset = info->addsub_scaling.offset;
-	unsigned pfa_vecs = info->pf_wid_a >> 7;
 
 	a_scale = Q6_R_combine_RlRl( a_scale,a_scale);
 	b_scale = Q6_R_combine_RlRl( b_scale,b_scale);
@@ -2197,28 +2329,16 @@ core_add_d32_underrange_hvx( struct elementwise_hvx_thrinfo const * thrp,
 		if( vlalign_val < 0) vinpB_0 ++;				// point to first in-loop load of B.
 	}
 
-	// do not prefetch if A >= this...
-	HVX_Vector const *vinpA_limit = vecptrk_add_bytes(vinpA_0 ,row_stride_A*height);
-
 	for(int id32 = 0; id32 < nd32; id32++){
 		HVX_Vector const *vinpA_d = vinpA_0;
 		HVX_Vector const *vinpB_d = vinpB_0;
 		HVX_Vector *voutp_d = voutp_0;
-
-		// prefetch first 'A' row
-		l2fetch( vinpA_d, 128, 128,pfa_vecs);
 
 		for(iht = 0; iht < height; iht ++){
 			HVX_Vector const *vinpA = vinpA_d;
 			HVX_Vector const *vinpB = vinpB_d;
 			HVX_Vector *voutp = voutp_d;
 			HVX_Vector vb_prev = Q6_V_vzero();
-
-			// prefetch next A row...
-			{
-				HVX_Vector const * vinpA_d_next = vecptrk_add_bytes(vinpA_d,row_stride_A);
-				if ( vinpA_d_next < vinpA_limit) l2fetch(vinpA_d_next,128,128,pfa_vecs);
-			}
 			//
 			// start up..
 			//
@@ -2411,7 +2531,6 @@ core_mul_d32_hvx_inline( struct elementwise_hvx_thrinfo const * thrp,
 
 
 	int iht,iwd;
-	unsigned pfa_vecs = info->pf_wid_a >> 7;
 	int za = info->ab_zero[0];
 	int zb = info->ab_zero[1];
 	int range_bias = info->mul_scaling.range_bias;
@@ -2459,8 +2578,6 @@ core_mul_d32_hvx_inline( struct elementwise_hvx_thrinfo const * thrp,
 			vlalign_val = wpad_bytes - wpad_bytes_B;		// for aligning b input to A
 			if( vlalign_val < 0) vinpB_0 ++;				// point to first in-loop load of B.
 		}
-	}else{
-		wait_for_l2fetch();		// wait for B side fetch done by caller.
 	}
 
 	// we have two loops for with or without 'find_range'.
@@ -2470,17 +2587,12 @@ core_mul_d32_hvx_inline( struct elementwise_hvx_thrinfo const * thrp,
 	// when find_range = 0.
 	//
 	int find_range = thrp->find_range;
-	// do not prefetch if A >= this...
-	HVX_Vector const *vinpA_limit = vecptrk_add_bytes(vinpA_0 ,row_stride_A*height);
 
 	if(broadcast_mode == mode_broadcast_general && find_range == 0 ){		// fast version (no min/max calc needed)
 		for(int id32 = 0; id32 < nd32; id32++){
 			HVX_Vector const *vinpA_d = vinpA_0;
 			HVX_Vector const *vinpB_d = vinpB_0;
 			HVX_Vector *voutp_d = voutp_0;
-
-			// prefetch first 'A' row
-			l2fetch( vinpA_d, 128, 128,pfa_vecs);
 
 			if( is_B11D){
 				// get the (only) B side value (just 32 bytes needed) and splat to all.
@@ -2493,11 +2605,6 @@ core_mul_d32_hvx_inline( struct elementwise_hvx_thrinfo const * thrp,
 				HVX_Vector *voutp = voutp_d;
 				HVX_Vector vb_prev = Q6_V_vzero();
 
-				// prefetch next A row...
-				{
-					HVX_Vector const * vinpA_d_next = vecptrk_add_bytes(vinpA_d,row_stride_A);
-					if ( vinpA_d_next < vinpA_limit) l2fetch(vinpA_d_next,128,128,pfa_vecs);
-				}
 				//
 				// start up..
 				//
@@ -2578,9 +2685,6 @@ core_mul_d32_hvx_inline( struct elementwise_hvx_thrinfo const * thrp,
 			HVX_Vector const *vinpB_d = vinpB_0;
 			HVX_Vector *voutp_d = voutp_0;
 
-			// prefetch first 'A' row
-			l2fetch( vinpA_d, 128, 128,pfa_vecs);
-
 			if( is_B11D){
 				// get the (only) B side value (just 32 bytes needed) and splat to all.
 				HVX_Vector vbin = Q6_V_vror_VR( *vinpB_d,wpad_bytes_B);
@@ -2592,11 +2696,6 @@ core_mul_d32_hvx_inline( struct elementwise_hvx_thrinfo const * thrp,
 				HVX_Vector *voutp = voutp_d;
 
 				HVX_Vector vb_prev = Q6_V_vzero();
-				// prefetch next A row...
-				{
-					HVX_Vector const * vinpA_d_next = vecptrk_add_bytes(vinpA_d,row_stride_A);
-					if ( vinpA_d_next < vinpA_limit) l2fetch(vinpA_d_next,128,128,pfa_vecs);
-				}
 				//
 				// start up..
 				//
@@ -2705,29 +2804,29 @@ core_mul_d32_mixed_hvx( struct elementwise_hvx_thrinfo const * thrp,
 ///////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////
 
+static void __attribute__((cold))
+addsub_d32_dealloc_info (struct nn_node *self)
+{
+	struct elementwise_d32_info * info = (struct elementwise_d32_info*)self->opaque;
+	if( info != NULL){
+		if( info->chunkdescs !=NULL) nn_free(info->chunkdescs);
+		nn_free(info);
+		self->opaque = NULL;
+	}
+}
 
 static int addsub_d32_check(struct nn_node *self, struct nn_graph *nn)
 {
-	int k;
 	int node_type = self->node_type;
 	char const * nname = hexagon_nn_op_names[node_type];
 
 	logmsg(nn,2,"Checking %s node 0x%X",nname,self->node_id);
-	int max_inps = -8;
-	// Mul doesn't (currently) have the two option out_min, out_max inputs.
-
-	if( node_type == OP_QuantizedMul_8x8to8_d32 ||  node_type == OP_QuantizedMul_8x8to8_d32_ref )
-		max_inps = 6;
-
-	k = node_check_inputs_range( self,nn, nname, 6, max_inps);	// 6, + 2 optional
-	if( k==0) k = node_check_outputs_n( self,nn, nname, 3);
-	if( k!= 0) return k;
-
+	// Mul doesn't (currently) have the two optional out_min, out_max inputs.
+	// (these ranges are enforced in the ctor now)(
 	////////////////
 	struct elementwise_d32_info *info;
 	if( self->opaque !=NULL){
-		nn_free(self->opaque);
-		self->opaque = NULL;
+		addsub_d32_dealloc_info(self);
 	}
 
 	if ((info = nn_calloc(1,sizeof(struct elementwise_d32_info))) == NULL) {
@@ -2774,7 +2873,12 @@ static int addsub_d32_check(struct nn_node *self, struct nn_graph *nn)
 	logmsg(nn,2,"%s node 0x%X check OK",nname,self->node_id);
 	return 0;
 }
-
+static int __attribute__((cold))
+addsub_d32_dtor(struct nn_node *self, struct nn_graph *nn)
+{
+	 addsub_d32_dealloc_info(self);
+	 return node_free_common(self,nn);
+}
 /////////////////////////////////////////////////////////////////////////////////////////
 // Code for QuantizedNeg_8_d32
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -2808,30 +2912,26 @@ static int neg_d32_execute(struct nn_node *self, struct nn_graph *nn)
 	return k;
 }
 
-static int neg_d32_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking neg_d32 node 0x%X",self->node_id);
-	if( node_check_inputs_outputs_n( self,nn,"neg_d32",3,3)!= 0) return -1;
-	logmsg(nn,2,"Done Checking neg_d32 node 0x%X",self->node_id);
-	return 0;
-}
-
 
 ////////////// ADD ///////////////////
 struct nn_node_ops nn_ops_for_QuantizedAdd_8p8to8_d32 = {
 	.execute = addsub_d32_execute_common,
 	.check = addsub_d32_check,
 	.ctor = node_alloc_common,
-	.dtor = node_free_common_release_opaque,
-	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
+	.dtor = addsub_d32_dtor,
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
+	.n_inputs = NN_IOCOUNT_RANGE(6,8),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedAdd_8p8to8_d32_ref = {
 	.execute = addsub_d32_execute_common,
 	.check = addsub_d32_check,
 	.ctor = node_alloc_common,
-	.dtor = node_free_common_release_opaque,
-	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
+	.dtor = addsub_d32_dtor,
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
+	.n_inputs = NN_IOCOUNT_RANGE(6,8),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 ////////////// SUB ///////////////////
@@ -2840,8 +2940,10 @@ struct nn_node_ops nn_ops_for_QuantizedSub_8p8to8_d32 = {
 	.execute = addsub_d32_execute_common,
 	.check = addsub_d32_check,
 	.ctor = node_alloc_common,
-	.dtor = node_free_common_release_opaque,
-	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
+	.dtor = addsub_d32_dtor,
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
+	.n_inputs = NN_IOCOUNT_RANGE(6,8),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 
@@ -2849,8 +2951,10 @@ struct nn_node_ops nn_ops_for_QuantizedSub_8p8to8_d32_ref = {
 	.execute = addsub_d32_execute_common,
 	.check = addsub_d32_check,
 	.ctor = node_alloc_common,
-	.dtor = node_free_common_release_opaque,
-	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
+	.dtor = addsub_d32_dtor,
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
+	.n_inputs = NN_IOCOUNT_RANGE(6,8),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 ////////////// MUL ///////////////////
@@ -2859,22 +2963,28 @@ struct nn_node_ops nn_ops_for_QuantizedMul_8x8to8_d32 = {
 	.execute = addsub_d32_execute_common,
 	.check = addsub_d32_check,
 	.ctor = node_alloc_common,
-	.dtor = node_free_common_release_opaque,
-	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
+	.dtor = addsub_d32_dtor,
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
+	.n_inputs = NN_IOCOUNT(6),
+	.n_outputs = NN_IOCOUNT(3),
 };
 struct nn_node_ops nn_ops_for_QuantizedMul_8x8to8_d32_ref = {
 	.execute = addsub_d32_execute_common,
 	.check = addsub_d32_check,
 	.ctor = node_alloc_common,
-	.dtor = node_free_common_release_opaque,
-	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
+	.dtor = addsub_d32_dtor,
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
+	.n_inputs = NN_IOCOUNT(6),
+	.n_outputs = NN_IOCOUNT(3),
 };
 //////////// NEG ///////////////////
 
 struct nn_node_ops nn_ops_for_QuantizedNeg_8_d32 = {
 	.execute = neg_d32_execute,
-	.check = neg_d32_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
-	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
 };

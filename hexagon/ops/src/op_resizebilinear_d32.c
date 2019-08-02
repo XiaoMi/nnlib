@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -687,32 +687,12 @@ do_bilin_interp_general_all_HVX( struct nn_graph *nn, void *rstpv )
 
 
 
-
-static int resize_bilinear_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking resize_bilinear_d32 node %p",self);
-
-	int k = node_check_inputs_range(self, nn, "resize_bilinear_d32", 4, 5);
-	if (k == 0) k = node_check_outputs_range(self, nn, "resize_bilinear_d32", 3, 3);
-	if( k != 0 ) return k;
-	logmsg(nn,2,"resize_bilinear_d32 %p check OK",self);
-	self->opaque = NULL;
-	return 0;
-}
-static int resize_bilinear_dtor(struct nn_node *self, struct nn_graph *nn)
-{
-	if( self->opaque != NULL){
-		nn_free( self->opaque);
-		self->opaque= NULL;
-	}
-	return node_free_common(self,nn);
-}
-
-
 struct nn_node_ops nn_ops_for_QuantizedResizeBilinear_8_d32 = {
 	.execute = resize_bilinear_d32_execute,
-	.check = resize_bilinear_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
-	.dtor = resize_bilinear_dtor,
+	.dtor = node_free_common_release_opaque,
+	.n_inputs = NN_IOCOUNT_RANGE(4,5),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };

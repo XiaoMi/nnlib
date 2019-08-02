@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -456,28 +456,24 @@ static __attribute__((unused)) int deconv_execute_hvx(struct nn_node *self, stru
 }
 #endif
 
-static int deconv_check_ref(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking deconv node %p",self);
-	if (self->n_inputs != 7) return errlog(nn,"deconv id %x wrong # inputs",self->node_id);
-	if (self->n_outputs != 3) return errlog(nn,"deconv wrong # outputs");
-	logmsg(nn,2,"deconv node %p check OK",self);
-	return 0;
-}
 
 struct nn_node_ops nn_ops_for_QuantizedDeconv_8x8to32 = {
 //	.execute = deconv_execute_hvx,
 	.execute = deconv_execute_ref,
-	.check = deconv_check_ref,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(7),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedDeconv_8x8to32_ref = {
 	.execute = deconv_execute_ref,
-	.check = deconv_check_ref,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(7),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -118,8 +118,10 @@ static int batchspace_s2b_execute(struct nn_node *self, struct nn_graph *nn, int
 		int32_t perm_arr[5] = { 1, 3, 0, 2, 4 };
 		int res = nn_transpose_analyze_direct( &txdesc,elementsize, perm_arr, 5, dims,5 );
 		if(res ==0){
-			if( txdesc.buffer_needed > nn->scratch_size) res = errlog(nn,"scratch too small");
-			else res = nn_transpose_execute( nn, &txdesc, nn->scratch, (uint8_t*) out,(uint8_t const*)in_base);
+			if( txdesc.buffer_needed > nn->scratch_size)
+				res = nn_scratch_grow(nn, txdesc.buffer_needed);
+			if( res == 0)
+				res = nn_transpose_execute( nn, &txdesc, nn->scratch, (uint8_t*) out,(uint8_t const*)in_base);
 		}
 		if( res != 0)return errlog(nn,"transpose failed");
 		return 0;
@@ -221,8 +223,10 @@ static int batchspace_b2s_execute(struct nn_node *self, struct nn_graph *nn, int
 		int res = nn_transpose_analyze_direct( &txdesc,elementsize,
                 perm_arr, 5, dims,5 );
 		if(res ==0){
-			if( txdesc.buffer_needed > nn->scratch_size) res = errlog(nn,"scratch too small");
-			else res = nn_transpose_execute( nn, &txdesc, nn->scratch, (uint8_t*) out_base,(uint8_t const*)in_base);
+			if( txdesc.buffer_needed > nn->scratch_size)
+				res = nn_scratch_grow(nn, txdesc.buffer_needed);
+			if( res == 0)
+				res = nn_transpose_execute( nn, &txdesc, nn->scratch, (uint8_t*) out_base,(uint8_t const*)in_base);
 		}
 		if( res != 0)return errlog(nn,"transpose failed");
 		return 0;
@@ -280,51 +284,41 @@ static int batchspace_s2b_execute_8(struct nn_node *self, struct nn_graph *nn)
 }
 
 
-static int batchspace_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking batchspace node %p",self);
-	if (self->n_inputs != 3) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 1) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"batchspace %p check OK",self);
-	return 0;
-}
-
-static int batchspace_check_q(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"Checking batchspace node %p",self);
-	if (self->n_inputs != 5) return errlog(nn,"wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"wrong # outputs");
-	logmsg(nn,2,"batchspace %p check OK",self);
-	return 0;
-}
-
 struct nn_node_ops nn_ops_for_BatchToSpaceND_f = {
 	.execute = batchspace_b2s_execute_f,
-	.check = batchspace_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 struct nn_node_ops nn_ops_for_SpaceToBatchND_f = {
 	.execute = batchspace_s2b_execute_f,
-	.check = batchspace_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 struct nn_node_ops nn_ops_for_BatchToSpaceND_8 = {
 	.execute = batchspace_b2s_execute_8,
-	.check = batchspace_check_q,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_OUTPUT_USES_INPUT_RANGE,
 };
 
 struct nn_node_ops nn_ops_for_SpaceToBatchND_8 = {
 	.execute = batchspace_s2b_execute_8,
-	.check = batchspace_check_q,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_OUTPUT_USES_INPUT_RANGE,
 };
 

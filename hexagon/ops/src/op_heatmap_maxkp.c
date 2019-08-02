@@ -42,10 +42,10 @@
 #include <math.h>
 #if defined(__hexagon__)
 #include "hexagon_types.h"
+#endif
 #include "hvx_inlines.h"
 #include "hvx_mathops.h"
 #include "hvx_funnel_reduce.h"
-#endif
 
 
 /* HeatmapMaxKP_f operator */
@@ -117,7 +117,7 @@
 // x has been clipped (it leads to slightly lower fpeak in the clipped case, but
 // clipping is unusual)
 //
-#define USE_SIMPLER_PEAK_EST 1	// must be 0 or 1
+#define USE_SIMPLER_PEAK_EST 0	// must be 0 or 1
 
 
 struct heatmap_fltpeak {
@@ -331,8 +331,8 @@ check_heatmap_maxpk_strategy( struct nn_graph *nn, struct nn_node *self, int is_
 		// each occupies 4-byte slot over 3 vectors. Total # of vectors is thus
 		// heatmaps/32 (rounded up) times 3.
 		// (each group of 3 vectors in the array contains 32 3x3 windows).
-		//
-		int winbuf_size = ((heatmaps+31)/32u)*3*128;  // this many bytes per row
+		// Make a full group of 12 vecs for each 128 heat maps
+		int winbuf_size = ((heatmaps+127)/128u)*3*4*128;  // this many bytes per row
 		tmp = nn_scratch_alloc(nn, winbuf_size);
 		if( tmp == NULL) return errlog(nn,"scratch alloc");
 		info->winbuf_ptr = tmp;
@@ -1350,13 +1350,6 @@ run_pkfind_hvx_test_cases( struct nn_graph *nn, void *parm)
 static int
 heatmap_maxpk_check( struct nn_node *self, struct nn_graph *nn)
 {
-	int n_extra = 0;
-	if(self->node_type == OP_QuantizedHeatmapMaxKP_8 ){
-		n_extra = 2;
-	}
-	logmsg(nn,2,"heatmap_maxp node 0x%08X",(unsigned)self->node_id);
-	int k = node_check_inputs_outputs_n( self,nn, "heatmap_maxp", 3+n_extra, 2+n_extra);
-	if( k!= 0) return k;
 	logmsg(nn,2,"heatmap_maxp 0x%08X check OK",(unsigned)self->node_id);
 	if( self->opaque != NULL){
 		nn_free(self->opaque);
@@ -1372,6 +1365,8 @@ struct nn_node_ops nn_ops_for_HeatmapMaxKP_f = {
 	.check = heatmap_maxpk_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common_release_opaque,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(2),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedHeatmapMaxKP_8 = {
@@ -1379,6 +1374,8 @@ struct nn_node_ops nn_ops_for_QuantizedHeatmapMaxKP_8 = {
 	.check = heatmap_maxpk_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common_release_opaque,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(4),
 };
 
 

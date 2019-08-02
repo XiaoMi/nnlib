@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -642,7 +642,6 @@ static int concat_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 }
 static int concat_check(struct nn_node *self, struct nn_graph *nn)
 {
-	int k;
 	logmsg(nn,2,"Checking concat_d32 node %p",self);
 
 	// must be 3*n+1 inputs, where n >= 1
@@ -650,11 +649,6 @@ static int concat_check(struct nn_node *self, struct nn_graph *nn)
 	int n_in = (self->n_inputs - 1) /3;	// actual # of inputs
 	if (n_in < 1 || (self->n_inputs - 1) % 3 !=0 )
 		return errlog(nn,"concat_d32: inputs must be 3*n+1, n>=1");
-
-	// must be 3 outputs.
-	k = node_check_inputs_outputs_n( self,nn, "concat_d32", self->n_inputs, 3);
-
-	if( k!=0) return k;
 
 	struct concat_input_descriptor *indescs = nn_calloc(n_in, sizeof(*indescs));
 	if (indescs == NULL) return errlog( nn, "can't allocate input descs");
@@ -688,11 +682,15 @@ static int concat_earlywork_register(struct nn_node *self, struct nn_graph *nn, 
 	return 0;
 }
 
+// inputs must be 3*k + 1,   k>=1
+// IOCOUNT verifies >= 4.
 struct nn_node_ops nn_ops_for_QuantizedConcat_8_d32 = {
 	.execute = concat_execute_hvx,
 	.check = concat_check,
 	.ctor = node_alloc_common,
 	.dtor = concat_dtor,
+	.n_inputs = NN_IOCOUNT_GE(4),
+	.n_outputs = NN_IOCOUNT(3),
 	.earlywork_register = concat_earlywork_register,
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };
@@ -703,6 +701,8 @@ struct nn_node_ops nn_ops_for_QuantizedConcat_8_d32_ref = {
 	.check = concat_check,
 	.ctor = node_alloc_common,
 	.dtor = concat_dtor,
+	.n_inputs = NN_IOCOUNT_GE(4),
+	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };
 

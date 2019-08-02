@@ -63,7 +63,6 @@ q6op_Vuw_vrmpyacc_VuwVubVubPub( HVX_Vector vx, HVX_Vector vu1, HVX_Vector vu0, i
 #define PTR_OFFSET(P,TYP,BYTES)  (TYP)( (char *)(P) + (BYTES))
 
 
-
 void HVX_INTRINSIC_REFFUNC(gvconv2dbbb_v60_asm)(
 		const uint8_t *input,
 		const uint8_t *weights,
@@ -80,9 +79,9 @@ void HVX_INTRINSIC_REFFUNC(gvconv2dbbb_v60_asm)(
 		const int32_t *suma,
 		int32_t next_suma,
 		int32_t *minmax_buf,
-		uint32_t recip_val,
-		int32_t out_align,
-	    int32_t skip_col)			// 'truncate' in asm
+		int32_t const * recip_vals,		// points to 32 scales.
+		int32_t zshift)
+
 {
 	int out_width_stride_depth = out_next_row;
 
@@ -103,15 +102,15 @@ void HVX_INTRINSIC_REFFUNC(gvconv2dbbb_v60_asm)(
 
 	int in_width_stride_depth = in_width * in_depth * stride_h;
 
-	HVX_Vector recipvec = Q6_V_vsplat_R( recip_val );
-
-	HVX_Vector min_val = Q6_V_vsplat_R( 0x7FFFFFFF);
-	HVX_Vector max_val = Q6_Vw_vsub_VwVw(  Q6_V_vzero(), min_val);
-
+	// get scales
+	HVX_Vector recipvec = ((HVX_Vector const *)recip_vals)[0];
+	// init min/max
+	// (OK to init both to zero)
+	HVX_Vector min_val = Q6_V_vsplat_R(0x7fffffff);
+	HVX_Vector max_val = Q6_V_vsplat_R(-0x7fffffff);
 	HVX_Vector wsum = *(HVX_Vector const *)biasbuf;
 
 	HVX_Vector s0,s1,s2,s3;
-	HVX_Vector y0123_prev,yout;
 
 	int64_t x07x04_x03x00, x17x14_x13x10, x27x24_x23x20, x37x34_x33x30;
 
@@ -119,8 +118,6 @@ void HVX_INTRINSIC_REFFUNC(gvconv2dbbb_v60_asm)(
 		HVX_Vector * ptr_z = (HVX_Vector *) ( output + irow * out_width_stride_depth );
 		const uint64_t * ptr_x0 =  (const uint64_t *) ( input + irow * in_width_stride_depth );
 		int32_t const * sumabuf = PTR_OFFSET( suma , int32_t const *  , irow * next_suma );
-
-		int store_en = (out_align == 0);
 
 		for(int cols_remain = out_width; cols_remain > 0; cols_remain -=4 ){
 
@@ -214,9 +211,15 @@ void HVX_INTRINSIC_REFFUNC(gvconv2dbbb_v60_asm)(
 				}
 			}
 
-			HVX_Vector y0,y1,y2,y3, y0123;
-
 			// scale and reduce to 128 bytes
+			HVX_Vector y0,y1,y2,y3, y0123;
+			if(zshift>0){
+				s0 = Q6_Vw_vasl_VwR( s0, zshift);
+				s1 = Q6_Vw_vasl_VwR( s1, zshift);
+				s2 = Q6_Vw_vasl_VwR( s2, zshift);
+				s3 = Q6_Vw_vasl_VwR( s3, zshift);
+			}
+
 
 			y0 = q6op_Vw_vmpy_VwVw_s1_rnd_sat( s0, recipvec);
 			y1 = q6op_Vw_vmpy_VwVw_s1_rnd_sat( s1, recipvec);
@@ -228,28 +231,26 @@ void HVX_INTRINSIC_REFFUNC(gvconv2dbbb_v60_asm)(
 			y0123 = Q6_Vub_vpack_VhVh_sat( y3, y1);	// sat to u8
 
 			/// store result
-			ptr_z ++;
-			yout = Q6_V_vlalign_VVR( y0123, y0123_prev, out_align);
-			if(store_en) ptr_z[-1]  = yout;
-			y0123_prev = y0123;
-			store_en = 1;
+			*ptr_z ++  = y0123;
 
 		} // for cols_remain
-		yout = Q6_V_vlalign_VVR( y0123_prev, y0123_prev, out_align);
-		if(skip_col!=0) ptr_z[0]  = yout;
+
 
 	}// for irow
 
-	// h. reduce the min/max values
-	//
-	int r = 4;
-	for( int i = 0; i < 5; i++){
-		HVX_VectorPair shuf = Q6_W_vshuff_VVR( min_val, min_val, r);
-		min_val = Q6_Vw_vmin_VwVw( Q6_V_hi_W(shuf), Q6_V_lo_W(shuf));
-		shuf =  Q6_W_vshuff_VVR( max_val, max_val, r);
-		max_val = Q6_Vw_vmax_VwVw( Q6_V_hi_W(shuf), Q6_V_lo_W(shuf));
-		r <<= 1;
-	}
+	// scale the min/max according to scales
+	min_val = Q6_Vw_vasl_VwR( min_val, zshift);
+	max_val = Q6_Vw_vasl_VwR( max_val, zshift);
+	min_val = q6op_Vw_vmpy_VwVw_s1_rnd_sat( min_val, recipvec);
+	max_val = q6op_Vw_vmpy_VwVw_s1_rnd_sat( max_val, recipvec);
+	// to accomodate -ve scales:
+	HVX_Vector vmin = Q6_Vw_vmin_VwVw( min_val, max_val);
+	HVX_Vector vmax = Q6_Vw_vmax_VwVw( min_val, max_val);
+	// combine with previous min/max
+	min_val = Q6_Vw_vmin_VwVw(vmin, ((HVX_Vector *)minmax_buf)[1]);
+	max_val = Q6_Vw_vmax_VwVw(vmax, ((HVX_Vector *)minmax_buf)[0]);
+
+
 	((HVX_Vector *)minmax_buf)[0] = max_val;
 	((HVX_Vector *)minmax_buf)[1] = min_val;
 

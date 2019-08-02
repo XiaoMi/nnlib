@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -44,6 +44,20 @@
 #include <nn_graph.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include "nn_string_map.h"
+
+const char *TypeStrings[] = {
+        "void",
+        "qint8",
+        "quint8",
+        "int8",
+        "uint8",
+        "qint16",
+        "quint16",
+        "int32",
+        "float32"
+};
+
 
 struct nn_node *alloc_node(uint32_t node_id,
 	op_type operation, padding_type padding)
@@ -266,6 +280,24 @@ struct nn_node *node_alloc_common(
 	if ((newnode = alloc_node(node_id,operation,padding)) == NULL) {
 		errlog(nn,"common alloc id %x malloc fail",node_id);
 		return NULL;
+	}
+	// check input & output counts.
+	//  must be >= min_ports
+	//  must be < max1_ports (or max1_ports =0)
+	{
+		struct nn_node_ops const * ops = newnode->ops;
+		if( num_inputs < ops->n_inputs.min_ports ||
+				(ops->n_inputs.max1_ports!=0 && num_inputs >= ops->n_inputs.max1_ports)){
+			errlog(nn,"node %X (%s): bad input count %d",
+					(unsigned)node_id, op_type_to_string_alt(operation,"??"), (int)num_inputs);
+			goto err_free_node;
+		}
+		if( num_outputs < ops->n_outputs.min_ports ||
+				(ops->n_outputs.max1_ports!=0 && num_outputs >= ops->n_outputs.max1_ports)){
+			errlog(nn,"node %X (%s): bad output count %d",
+					(unsigned)node_id, op_type_to_string_alt(operation,"??"), (int)num_outputs);
+			goto err_free_node;
+		}
 	}
 	if (alloc_inputs(nn, newnode, num_inputs, inputs) != 0) {
 		errlog(nn,"input alloc failed");
@@ -668,48 +700,89 @@ void print_graph_to_file(struct nn_graph *nn)
 		logmsg(nn,1,"INFO: Writing '%s'", charbuf);
 	}
 
-	fputs("---\nnodes\n", outfile);
+	fputs("---\nnodes:\n", outfile);
 
 	struct nn_node *node = nn->head;
 	while (node) {
 		uint32_t id = node->node_id;
 		const char *node_type_name = hexagon_nn_op_names[node->node_type];
 
-		snprintf(charbuf,512, "  %x:\n    optype: %s\n", (unsigned) id, node_type_name);
+		snprintf(charbuf,512, "  0x%x:\n    optype: %s\n", (unsigned) id, node_type_name);
 		fputs(charbuf, outfile);
 
 		if (node->n_inputs>0) {
 			fputs("    inputs:\n", outfile);
 			for (i=0; i<node->n_inputs; i++) {
-				snprintf(charbuf,512, "      - %x_%u\n", (unsigned) node->input_refs[i].src_id, (unsigned) node->input_refs[i].output_idx);
+				snprintf(charbuf,512, "      - [0x%x,%u]\n", (unsigned) node->input_refs[i].src_id, (unsigned) node->input_refs[i].output_idx);
 				fputs(charbuf, outfile);
 			}
 		}
 
 		if (node->n_outputs>0) {
+                        // Hack to heuristically convert all "8,1111x32,1111x32" triples into quantized triples
+                        int use_hack_for_quants = 0;
+                        char *hack_for_quant_strings[] = { "quint8", "float32", "float32" };
+                        if ( (node->n_outputs == 3)
+                             && (node->output_defs[0].elementsize == 1)
+                             && (node->output_defs[1].elementsize == 4)
+                             && (node->output_defs[2].elementsize == 4)
+                             && (node->outputs[1]->shape.dimension[0] == 1)
+                             && (node->outputs[1]->shape.dimension[1] == 1)
+                             && (node->outputs[1]->shape.dimension[2] == 1)
+                             && (node->outputs[1]->shape.dimension[3] == 1)
+                             && (node->outputs[2]->shape.dimension[0] == 1)
+                             && (node->outputs[2]->shape.dimension[1] == 1)
+                             && (node->outputs[2]->shape.dimension[2] == 1)
+                             && (node->outputs[2]->shape.dimension[3] == 1) ) {
+                                use_hack_for_quants = 1;
+                        }
+
 			fputs("    outputs:\n", outfile);
 			for (i=0; i<node->n_outputs; i++) {
 				// Calculate the rank-string, e.g.  "1,1,1,1000"
 				j=0;
-				struct output out = node->output_defs[i];
-				for (k=0; k<out.rank; k++) {
-					j += snprintf(minibuf+j, 256-j, "%u,", (unsigned) out.max_sizes[k]);
+				struct output out_def = node->output_defs[i];
+				struct tensor *out = node->outputs[i];
+				for (k=0; k<out_def.rank; k++) {
+					j += snprintf(minibuf+j, 256-j, "%u, ", (unsigned) out->shape.dimension[k]);
 				}
 				if (j) {
-					minibuf[j-1] = 0;  // Remove trailing comma, terminate string
+					minibuf[j-2] = 0;  // Remove trailing comma, terminate string
 				} else {
 					minibuf[j] = 0;
 				}
 
-				snprintf(charbuf,512, "      - size: [%s]\n        elsize: %d\n        file: %s_%x_%u.dat\n",
+                                int eltype = out->format.type;
+                                int elsize = out_def.elementsize;
+                                const char *elstring = "unk";
+                                if (eltype == 0) {
+                                        if (elsize == 1) {
+                                                elstring = "unk8";
+                                        } else if (elsize == 2) {
+                                                elstring = "unk16";
+                                        } else if (elsize == 4) {
+                                                elstring = "unk32";
+                                        }
+                                } else {
+                                        elstring = TypeStrings[eltype];
+                                }
+
+                                if (use_hack_for_quants) {
+                                        elstring = hack_for_quant_strings[i];
+                                }
+
+				snprintf(charbuf,512, "      - size: [%s]\n        eltype: %s\n        file: %s_%x_%u.dat\n",
 					 minibuf,
-					 (unsigned) out.elementsize,
+                                         elstring,
 					 nn->enable_tensor_print_prefix,
 					 (unsigned) id,
 					 i
 					);
 				fputs(charbuf, outfile);
 			}
+                        if (use_hack_for_quants) {
+                                fputs("    quantized_outputs: [0,1,2]\n", outfile);
+                        }
 		}
 
                 node = node->next;

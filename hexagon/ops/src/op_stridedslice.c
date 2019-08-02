@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -44,6 +44,7 @@
 #include <nn_graph.h>
 #include <string.h>
 #include "nn_gentranspose.h"
+#include "quantize.h"
 
 #define MASK_UPDATE_RANGE(BIT, DIM) \
 { \
@@ -55,6 +56,13 @@
 		if (BIT & end_mask) DIM##_stop = (DIM##_step < 0) ? -1 : DIM##_in; \
 	}\
 }
+
+#define HANDLE_NEGATIVE_INDEX(DIM) \
+{ \
+    if(DIM##_start < 0) DIM##_start = max_i32(0, DIM##_start + DIM##_in); \
+    if(DIM##_stop < 0) DIM##_stop = max_i32(-1, DIM##_stop + DIM##_in); \
+}
+
 // find the output size. It will be 0 (invalid) if stop-start is 0 or
 // has the opposite sign as 'step'.
 //
@@ -131,6 +139,12 @@ static int strided_slice_impl(
 	int end_mask = 0;
 	int shrink_mask = 0;
 
+    //convert negative slice indices
+    HANDLE_NEGATIVE_INDEX(b);
+    HANDLE_NEGATIVE_INDEX(h);
+    HANDLE_NEGATIVE_INDEX(w);
+    HANDLE_NEGATIVE_INDEX(d);
+
 	if (self->n_inputs > 6) {
 		begin_mask = tensor_get_int32(self->inputs[4], 0);
 		end_mask = tensor_get_int32(self->inputs[5], 0);
@@ -155,7 +169,6 @@ static int strided_slice_impl(
 	out_shape.height = get_out_size(h_start, h_stop, h_step);
 	out_shape.width = get_out_size(w_start, w_stop, w_step);
 	out_shape.depth = get_out_size(d_start, d_stop, d_step);
-
 
 	int out_elements = shape_element_count( & out_shape);
 	if (0 == out_elements) return errlog(nn,"no output");
@@ -273,20 +286,12 @@ static int sslice_execute_q8(struct nn_node *self, struct nn_graph *nn)
 	return strided_slice_impl(self,nn,1, NN_TYPE_QUINT8);
 }
 
+// # inputs must be  4 or 7;
+// IOCOUNT allows 4...7, this function excludes 5 and 6
 static int sslice_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"checking slice node %p",self);
 	if (self->n_inputs != 4 && self->n_inputs != 7) return errlog(nn,"num inputs");
-	if (self->n_outputs != 1) return errlog(nn,"num outputs");
-	return 0;
-}
-
-
-static int sslice_check_q8(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"checking slice node %p",self);
-	if (self->n_inputs != 9) return errlog(nn,"num inputs");
-	if (self->n_outputs != 3) return errlog(nn,"num outputs");
 	return 0;
 }
 
@@ -296,6 +301,8 @@ struct nn_node_ops nn_ops_for_StridedSlice_f = {
 	.check = sslice_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(4,7),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 struct nn_node_ops nn_ops_for_StridedSlice_int32 = {
@@ -303,6 +310,8 @@ struct nn_node_ops nn_ops_for_StridedSlice_int32 = {
 	.check = sslice_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(4,7),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 struct nn_node_ops nn_ops_for_StridedSlice_uint8 = {
@@ -310,11 +319,15 @@ struct nn_node_ops nn_ops_for_StridedSlice_uint8 = {
 	.check = sslice_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(4,7),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 struct nn_node_ops nn_ops_for_QuantizedStridedSlice_8 = {
 	.execute = sslice_execute_q8,
-	.check = sslice_check_q8,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(9),
+	.n_outputs = NN_IOCOUNT(3),
 };

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -43,11 +43,11 @@
 
 // subtract vector from vector
 #define OPERATOR_SUB(X,Y) ((X)-(Y))
-BROADCAST_STRIDE_11_FUNC(sub_f_stride_11, float, OPERATOR_SUB)
+BROADCAST_STRIDE_11_FUNC(sub_f_stride_11, float, float, OPERATOR_SUB)
 // subtract scalar from vector
-BROADCAST_STRIDE_10_FUNC(sub_f_stride_10, float, OPERATOR_SUB)
+BROADCAST_STRIDE_10_FUNC(sub_f_stride_10, float, float, OPERATOR_SUB)
 // subtract vector from scalar
-BROADCAST_REV_STRIDE_01_FUNC(sub_f_rev_stride_01, float, OPERATOR_SUB)
+BROADCAST_REV_STRIDE_01_FUNC(sub_f_rev_stride_01, float, float, OPERATOR_SUB)
 
 
 static const struct elementwise_funcs Sub_f_funcs = {
@@ -61,25 +61,16 @@ static const struct elementwise_funcs Sub_f_funcs = {
 
 static int sub_f_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return nn_elementwise_with_broadcast( self, nn, &Sub_f_funcs, NULL );
-}
-
-static int sub_check(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"sub node %p",self);
-	int k = node_check_inputs_outputs_n( self,nn, "sub_f", 2, 1);
-	if( k!= 0) return k;
-	logmsg(nn,2,"sub %p check OK",self);
-	return 0;
+	return nn_elementwise_with_broadcast( self, nn, &Sub_f_funcs,NULL,NULL, NULL );
 }
 
 
 
-BROADCAST_STRIDE_11_FUNC(sub_int32_stride_11, int32_t, OPERATOR_SUB)
+BROADCAST_STRIDE_11_FUNC(sub_int32_stride_11, int32_t, int32_t, OPERATOR_SUB)
 // subtract scalar from vector
-BROADCAST_STRIDE_10_FUNC(sub_int32_stride_10, int32_t, OPERATOR_SUB)
+BROADCAST_STRIDE_10_FUNC(sub_int32_stride_10, int32_t, int32_t, OPERATOR_SUB)
 // subtract vector from scalar
-BROADCAST_REV_STRIDE_01_FUNC(sub_int32_rev_stride_01, int32_t, OPERATOR_SUB)
+BROADCAST_REV_STRIDE_01_FUNC(sub_int32_rev_stride_01, int32_t, int32_t, OPERATOR_SUB)
 
 static const struct elementwise_funcs Sub_int32_funcs = {
 	.op_stride_11 = sub_int32_stride_11,
@@ -92,21 +83,25 @@ static const struct elementwise_funcs Sub_int32_funcs = {
 
 static int sub_int32_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return nn_elementwise_with_broadcast( self, nn, &Sub_int32_funcs, NULL );
+	return nn_elementwise_with_broadcast( self, nn, &Sub_int32_funcs,NULL,NULL, NULL );
 }
 
 
 struct nn_node_ops nn_ops_for_Sub_f = {
 	.execute = sub_f_execute,
-	.check = sub_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(2),
+	.n_outputs = NN_IOCOUNT(1),
 };
 
 
 struct nn_node_ops nn_ops_for_Sub_int32 = {
 	.execute = sub_int32_execute,
-	.check = sub_check,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(2),
+	.n_outputs = NN_IOCOUNT(1),
 };

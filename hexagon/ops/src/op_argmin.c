@@ -55,18 +55,8 @@
 
 #define INPUT_DATA_IDX 0
 #define INPUT_AXIS_IDX 1
-#define INPUT_DATA_MIN 3
-#define INPUT_DATA_MAX 4
 
 #define OUTPUT_DATA_IDX 0
-
-int get_number_elements(const struct shape in_shape, const int first_axis_inclusive, const int last_axis_exclusive) {
-    int count = 1;
-    for (int i = first_axis_inclusive; i < last_axis_exclusive; ++i ) {
-        count *= in_shape.dimension[i];
-    }
-    return count;
-}
 
 struct argmin_runstate {
     struct argmin_info * info;
@@ -94,6 +84,7 @@ static void find_argmin(struct nn_graph *nn,  void * rstpv) {
 
     if( 1 == data_stride ) {
         hvx_argmin_or_max_in_rows(in_data, outer_size, dim_value, dim_value, out_data, 0);
+
     }else {
 
         for(int32_t i = 0; i < outer_size; ++i) {
@@ -116,11 +107,13 @@ static int argmin_execute_8(struct nn_node *self, struct nn_graph *nn) {
 
     const uint8_t *in_data = in_data_tensor->data;
     int32_t *out_data = out_data_tensor->data;
-    int32_t in_axis = tensor_get_int32(in_axis_tensor,0);
     const struct shape in_shape = in_data_tensor->shape;
 
-    in_axis = handle_negative_axis(in_axis);
-    if (-1 == in_axis) return errlog(nn, "ArgMin_8: axis is out of range \n");
+    int32_t in_axis0 = tensor_get_int32(in_axis_tensor,0);
+    int res = handle_negative_axes(nn, &in_axis0, 1);
+    if (res)
+         return errlog(nn, "ArgMin_8: axis is out of range \n");
+    int32_t in_axis = in_axis0;
 
     struct shape outshape = in_shape;
     outshape.dimension[in_axis] = 1;
@@ -132,7 +125,8 @@ static int argmin_execute_8(struct nn_node *self, struct nn_graph *nn) {
         stride *= in_shape.dimension[i];
     }
 
-    int outer_size = get_number_elements (in_shape, 0, in_axis);
+    int outer_size = get_number_elements_between_axes (in_shape, 0, in_axis);
+    if(-1 == outer_size) return errlog(nn, "ArgMin_8: axes are invalid \n");
     int dim_value = in_shape.dimension[in_axis];
 
     struct argmin_info info;
@@ -152,19 +146,12 @@ static int argmin_execute_8(struct nn_node *self, struct nn_graph *nn) {
     return 0;
 }
 
-static int argmin_check_8(struct nn_node *self, struct nn_graph *nn)  {
-
-    logmsg(nn,2,"Checking ArgMin_8 node %p",self);
-    if (self->n_inputs != OP_ARGMIN_INPUT_NUM) return errlog(nn,"ArgMin_8 check: wrong # inputs");
-    if (self->n_outputs != OP_ARGMIN_OUTPUT_NUM) return errlog(nn,"ArgMin_8 check: wrong # outputs");
-    logmsg(nn,2,"ArgMin_8 node %p check OK",self);
-    return 0;
-}
-
 struct nn_node_ops nn_ops_for_ArgMin_8 = {
     .execute = argmin_execute_8,
-    .check = argmin_check_8,
+    .check = NULL,
     .ctor = node_alloc_common,
     .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT(OP_ARGMIN_INPUT_NUM),
+    .n_outputs = NN_IOCOUNT(OP_ARGMIN_OUTPUT_NUM),
 };
 

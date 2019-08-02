@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -433,77 +433,55 @@ static int prepare_work_q16(struct nn_node *self, struct nn_graph *nn, struct nn
 	return slice_prepare(self,nn,sizeof(int16_t), NN_TYPE_QINT16);
 }
 
-static int slice_check_f(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"checking slice node %p",self);
-	if (self->n_inputs != 3) return errlog(nn,"num inputs");
-	if (self->n_outputs != 1) return errlog(nn,"num outputs");
-	return 0;
-}
-
-static int slice_check_8(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"checking slice node %p",self);
-	if (self->n_inputs != 3) return errlog(nn,"num inputs");
-	if (self->n_outputs != 1) return errlog(nn,"num outputs");
-	return 0;
-}
-
-static int slice_check_int32(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"checking slice node %p",self);
-	if (self->n_inputs != 3) return errlog(nn,"num inputs");
-	if (self->n_outputs != 1) return errlog(nn,"num outputs");
-	return 0;
-}
-
-static int slice_check_q8(struct nn_node *self, struct nn_graph *nn)
-{
-	logmsg(nn,2,"checking slice node %p",self);
-	if (self->n_inputs != 5) return errlog(nn,"num inputs");
-	if (self->n_outputs != 3) return errlog(nn,"num outputs");
-	return 0;
-}
-
 
 struct nn_node_ops nn_ops_for_Slice_f = {
 	.execute = slice_run_f,
-	.check = slice_check_f,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = slice_dtor,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(1),
 	.earlywork_note_pred = prepare_work_f,
 };
 
 struct nn_node_ops nn_ops_for_Slice_8 = {
 	.execute = slice_run_f,
-	.check = slice_check_8,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = slice_dtor,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(1),
 	.earlywork_note_pred = prepare_work_8,
 };
 
 struct nn_node_ops nn_ops_for_Slice_int32 = {
 	.execute = slice_run_f,
-	.check = slice_check_int32,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = slice_dtor,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(1),
 	.earlywork_note_pred = prepare_work_int32,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedSlice_8 = {
 	.execute = slice_run,
-	.check = slice_check_q8,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = slice_dtor,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
 	.earlywork_note_pred = prepare_work_q8,
 };
 
 
 struct nn_node_ops nn_ops_for_QuantizedSlice_16 = {
 	.execute = slice_run,
-	.check = slice_check_q8,
+	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = slice_dtor,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
 	.earlywork_note_pred = prepare_work_q16,
 };
 

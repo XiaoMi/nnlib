@@ -246,6 +246,7 @@ static int depthspace_d2s_execute(struct nn_node *self, struct nn_graph *nn)
 	int32_t in_batches = in_tensor->shape.batches;
 	const char *in = in_tensor->data;
 	char *out_base = out_tensor->data;
+	int b,w,h,hb;
 	int top_crop = 0;
 	int bottom_crop = 0;
 	int left_crop = 0;
@@ -344,18 +345,18 @@ static int depthspace_d2s_execute(struct nn_node *self, struct nn_graph *nn)
 	// (only used if in_width_trimmed > 1)
 	int copylast_size = (block_size_w-right_crop) *  out_depth*elementsize;
 	int in_next_w = in_depth * elementsize;
-#if 0
+
 	// batch loop
-	for (int b = 0; b < in_batches; b++) {
+	for (b = 0; b < in_batches; b++) {
 		// input height loop
 		int ho = 0;		// output h index
-		for (int h = 0; h < in_height_trimmed; h++) {
+		for (h = 0; h < in_height_trimmed; h++) {
 			// height block loop
 			// normally 0 <= hb < blocksize; but skip top crop when h=0; skip bottom crop
 			//
 			int hb_init = (h==0)?top_crop:0;
 			int hb_limit = min_i32( block_size_h, out_height+hb_init-ho);
-			for(int  hb = hb_init; hb < hb_limit; hb++, ho++){
+			for( hb = hb_init; hb < hb_limit; hb++, ho++){
 
 				char *outp = out_base + ( ho+ b*out_height) * out_width * out_depth * elementsize;
 				char const *inp = in + (h + b*in_height)*in_width*in_next_w + copy_size*hb;
@@ -367,7 +368,7 @@ static int depthspace_d2s_execute(struct nn_node *self, struct nn_graph *nn)
 				inp += in_next_w;
 				// all the rest of the w
 				if (in_width_trimmed > 1){
-					for( int w = 1; w < in_width_trimmed-1; w++ ){
+					for( w = 1; w < in_width_trimmed-1; w++ ){
 						memcpy( outp, inp, copy_size );
 						outp += copy_size;
 						inp += in_next_w;
@@ -378,66 +379,6 @@ static int depthspace_d2s_execute(struct nn_node *self, struct nn_graph *nn)
 			}
 		}
 	}
-#else
-	struct nn_memcpy_manager  mcman;
-	nn_mcmanager_init(nn, &mcman );
-	int odsize = out_depth * elementsize;
-	int owsize = out_width * odsize;
-	// '2d vector memcpy' version
-	// This is adapted directly from the commented-out  code above, and is not very good:
-	//   - when block_size_h = 2, hbn will always be 1 or 2, it would be better to merge
-	//     the copy0_size and copylast_size ops with the main ops when they are the same size
-	//  but for sufficiently large w it should be pretty good.
-	//
-
-	// batch loop
-	for (int b = 0; b < in_batches; b++) {
-		// input height loop
-		int ho = 0;		// output h index
-		for (int h = 0; h < in_height_trimmed; h++) {
-			// height block loop
-			// normally 0 <= hb < blocksize; but skip top crop when h=0; skip bottom crop
-			//
-			int hb_init = (h==0)?top_crop:0;
-			int hb_limit = min_i32( block_size_h, out_height+hb_init-ho);
-
-			char const *inp0 = in + (h + b*in_height)*in_width*in_next_w + copy_size*hb_init;
-			char *outp0 = out_base + ( ho+ b*out_height) * owsize;
-
-			// do the 'copy0_size' copies, for w=0, as a 2d-memcopy across the hb loop (possibly cropped)
-			// (do the first output on 'hbn' output rows)
-			int hbn = hb_limit-hb_init;	 // # of h iterations here.
-			nn_mcmanager_vmemcpy_2d( nn, &mcman,
-					copy0_size, hbn,					// width, height of region
-					outp0,  owsize,						// dest pointer, dest stride
-					inp0 + left_crop * odsize, copy_size);		// src pointer, src stride
-
-			if( in_width_trimmed >1 ){
-				char *outp = outp0 + copy0_size;		// start at second w operation
-				char const *inp = inp0 + in_next_w;
-				// if more than 2, do the intermediate ones as 'hbn' 2d memcpy,
-				// each generating one output row.
-				if( in_width_trimmed >2){
-					for( int hb =0; hb < hbn; hb++){
-						nn_mcmanager_vmemcpy_2d( nn, &mcman,
-								copy_size, in_width_trimmed-2,					// width, height of region
-								outp + owsize*hb,  copy_size,	// dest pointer, dest stride
-								inp + copy_size*hb, in_next_w);		// src pointer, src stride
-					}
-					outp += copy_size * (in_width_trimmed-2);
-					inp += in_next_w * (in_width_trimmed-2);
-				}
-				// do the last output on 'hbn' output rows
-				nn_mcmanager_vmemcpy_2d( nn, &mcman,
-						copylast_size, hbn,					// width, height of region
-						outp,  owsize,	// dest pointer, dest stride
-						inp, copy_size);		// src pointer, src stride
-			}
-			ho += hbn;		// update output pos
-		}
-	}
-	nn_mcmanager_wait( nn, &mcman );
-#endif
 
 	return 0;
 }

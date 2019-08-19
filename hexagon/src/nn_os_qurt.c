@@ -93,14 +93,14 @@ int nn_os_vtcm_choose_size(struct nn_graph *nn)
 #if defined(HEXAGON_V66) || defined(HEXAGON_V65)
 	if (nn->vtcm_size==-1) {
 		// Query available VTCM, and warn if we're getting less than expected.
-		unsigned int avail_block_size = 0, max_page_size = 0, num_pages = 0, arch_page_size = 0, arch_page_count = 0;
+		unsigned int avail_block_size, max_page_size, num_pages, arch_page_size, arch_page_count;
 		if (HAP_query_avail_VTCM(&avail_block_size, &max_page_size, &num_pages)) {
 			// Should this be fatal?
-			errlog(nn,"ERROR: Could not query available VTCM from Qurt");
+			logmsg(nn,1,"ERROR: Could not query available VTCM from Qurt");
 		}
 		if (HAP_query_total_VTCM(&arch_page_size, &arch_page_count)) {
 			// Should this be fatal?
-			errlog(nn,"ERROR: Could not query VTCM architecture from Qurt");
+			logmsg(nn,1,"ERROR: Could not query VTCM architecture from Qurt");
 		}
 		if (arch_page_count != 1) {
 			logmsg(nn,1,"WARN: Architectural VTCM page-count %u!=1 (%u,%u,%u,%u)", arch_page_count, avail_block_size, max_page_size, num_pages, arch_page_size);
@@ -142,11 +142,7 @@ int nn_os_vtcm_acquire(struct nn_graph *nn)
 	nn_os_vtcm_choose_size(nn);
 
 	if (nn->vtcm_size == 0) {
-#if defined(HEXAGON_V66)
-		return errlog(nn, "ERROR: NO VTCM. Required for V66");
-#else
 		return nn_os_vtcm_fake_acquire(nn);
-#endif
 	}
 
 #if defined(HEXAGON_V66)
@@ -170,12 +166,7 @@ int nn_os_vtcm_acquire(struct nn_graph *nn)
 	if (ptr != NULL) {
 		nn->vtcm_ptr = ptr;
 	} else {
- #if defined(HEXAGON_V66)
- 		// fake vtcm is not allowed on V66
- 		return errlog(nn, "Could not acquire VTCM. Required for V66");
- #else
 		return nn_os_vtcm_fake_acquire(nn);
-#endif
 	}
 
 	return 0;

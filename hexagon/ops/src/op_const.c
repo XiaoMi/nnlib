@@ -104,11 +104,6 @@ struct nn_node *hexagon_nn_empty_const_ctor(
 	outdefs[0].max_sizes[2] = width;
 	outdefs[0].max_sizes[3] = depth;
 	outdefs[0].elementsize = data_len/allsize;
-	switch (outdefs[0].elementsize) {
-	case 1: const_tensor->format.type = NN_TYPE_QUINT8; break;
-	case 2: const_tensor->format.type = NN_TYPE_QUINT16; break;
-	default: const_tensor->format.type = NN_TYPE_VOID; break;  // Void has size=4
-	}
 	self->n_inputs = 0;
 	self->noderefhash = 0;
 	self->n_outputs = 1;

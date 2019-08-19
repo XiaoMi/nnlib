@@ -61,9 +61,9 @@ struct tdata {
 };
 // mul vector to vector
 #define OPERATOR_MUL(X,Y) ((X)*(Y))
-BROADCAST_STRIDE_11_FUNC( mul_int32_stride_11, int32_t, int32_t, OPERATOR_MUL)
+BROADCAST_STRIDE_11_FUNC( mul_int32_stride_11, int32_t, OPERATOR_MUL)
 // mul vector by scalar
-BROADCAST_STRIDE_10_FUNC( mul_int32_stride_10, int32_t, int32_t, OPERATOR_MUL)
+BROADCAST_STRIDE_10_FUNC( mul_int32_stride_10, int32_t, OPERATOR_MUL)
 
 
 static const struct elementwise_funcs Mul_int32_funcs = {
@@ -77,7 +77,7 @@ static const struct elementwise_funcs Mul_int32_funcs = {
 
 static int mul_int32_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return nn_elementwise_with_broadcast( self, nn, &Mul_int32_funcs,NULL, NULL, NULL );
+	return nn_elementwise_with_broadcast( self, nn, &Mul_int32_funcs, NULL );
 }
 
 
@@ -392,7 +392,7 @@ static int mul_8x8to8_execute(struct nn_node *self, struct nn_graph *nn)
 				(int)b_tensor->shape.width,
 				(int)b_tensor->shape.depth,  info.b_offset );*/
 
-		int res = nn_elementwise_with_broadcast( self, nn, &QuantizedMul_8x8to8_funcs,NULL, NULL, &info );
+		int res = nn_elementwise_with_broadcast( self, nn, &QuantizedMul_8x8to8_funcs, &info );
 		if( res != 0) return res;
 		// nn_elementwise_with_broadcast has prepared the output tensor, but has formed
 		// the result as a 16-bit intermediate in the scratch area now pointed to by info.tmp_buf.

@@ -62,25 +62,6 @@
         .global inconv2dbbb332_v60_asm
         .balign 32
         .type  inconv2dbbb332_v60_asm, @function
-/* parameters:
- *  r0      ( const uint8_t * input,
- *  r1       const uint8_t * weights,
- *  r2       uint8_t * output,
- *  r3       int in_width_pad,
- *  r4       int next_out_width_row,
- *  r5       int out_width,
- * PARMW(0)  int indepth,
- * PARMW(1)  int filt_width,
- * PARMW(2)  int filt_height,
- * PARMW(3)  int num_out_lines,
- * PARMW(4)  int32_t * minmax_buf,
- * PARMW(5)  int recip_level,
- * PARMW(6)  const int32_t *biasbuf,
- * PARMW(7)  const int32_t *ptr_suma,
- * PARMW(8)  int next_suma,
- * PARMW(9)  int stride_height_width,
- * PARMW(10) int recip_shamt);
- */
 inconv2dbbb332_v60_asm:
 /*=============================================================================*/
 #define ptr_xi                 r0     //data
@@ -103,7 +84,6 @@ inconv2dbbb332_v60_asm:
 #define sum1                   r19
 #define sum2                   r19
 #define sum3                   r19
-#define recip_shamt            r1
 /*=============================================================================*/
 #define fetch_ptr              r0
 #define fetch_ptr0             r2
@@ -160,9 +140,7 @@ inconv2dbbb332_v60_asm:
 #define vzero                  v20
 #define SSR        <<1:rnd:sat:shift  //simplfy mpy instruction
 /*=============================================================================*/
-#define FRAMESIZE 72
-#define PARMW(n) sp+#(8+FRAMESIZE+4*(n))
-       {   allocframe(#FRAMESIZE)                       // 0th entry on stack is (72+8)/4 =20 ints
+       {   allocframe(#72)                              // 0th entry on stack is (72+8)/4 =20 ints
        } {  
            memd(sp+#0)  = r17:16                        //
            memd(sp+#8)  = r19:18                        //
@@ -173,31 +151,34 @@ inconv2dbbb332_v60_asm:
        } {
            memd(sp+#32) = r25:24                        //
            memd(sp+#40) = r27:26                        //
-           mine = vsplat(r23)
        } {
            memw(sp+#48) = ptr_xi
            memw(sp+#52) = ptr_wi
-           maxe = vnot(mine)                           // all -0x80000000
        } {
-           active_sum = memw(PARMW(7))                  //
-           in_depth = memw(PARMW(0))
+           ptr_max = memw(sp+#24<<2)                    //ptr pre computed max value in output
        } {
-           filt_height = memw(PARMW(2))                 //extract filt_height
-           filt_width = memw(PARMW(1))                  //extract filt_width
+           maxe = vmem(ptr_max+#0)                      //[E, 1]
+           active_sum = memw(sp+#27<<2)                 //
+       } {
+           mine = vmem(ptr_max+#1)                      //[E, 2]
+           in_depth = memw(sp+#20<<2)
+       } {
+           filt_height = memw(sp+#22<<2)                //extract filt_height 
+           filt_width = memw(sp+#21<<2)                 //extract filt_width
        } {   
            memw(sp+#56) = ptr_zi
            filt_width = lsr(filt_width, #1)             //
-           out_height = memw(PARMW(3))                  //number of output lines
+           out_height = memw(sp+#23<<2)                 //number of output lines
        } {
-           recip_level = memw(PARMW(5))                 //
-           filt_sum = memw(PARMW(6))
+           recip_level = memw(sp+#25<<2)                // 
+           filt_sum = memw(sp+#26<<2)
            in_width_depth  = mpyi(in_width, in_depth)   //in_depth * in_width line
        } {
            wsum = vmem(filt_sum+#0)                     //
            recipvec = vsplat(recip_level)               //
-           stride_v_h = memw(PARMW(9))
+           stride_v_h = memw(sp+#29<<2)
        } {
-          // next_suma_buf = memw(PARMW(8))
+           next_suma_buf = memw(sp+#28<<2)
            in_width_stride_depth=mpy(in_width_depth.L,stride_v_h.H)//
            stride_v_h = zxth(stride_v_h) 
        } {
@@ -224,7 +205,6 @@ inconv2dbbb332_v60_asm:
            sum0 = memw(active_sum++#8)                  //stride = 8
            fetch_ptr = add(ptr_x0, in_width_depth)      //
        } {
-           next_suma_buf = memw(PARMW(8))
            dcfetch(ptr_x0+#0<<6)                        //[0, 3]
            d0 = vsplat(sum0)
        } {
@@ -240,8 +220,7 @@ inconv2dbbb332_v60_asm:
            d2 = vsplat(sum2)
            sum3 = memw(active_sum++#8)                  //stride = 8
            memw(sp+#56) += out_width_stride_depth       //ptr_zi += out_width_stride_depth
-       } {  // r1 is recip_shamt, except when it's used as next_suma_buf above.
-           recip_shamt = memw(PARMW(10))
+       } {
            memw(sp+#48) += in_width_stride_depth        //ptr_xi+=in_width_stride_depth  //ptr_x+=in_width*stride*in_depth)
            s2.w = vadd(wsum.w, d2.w)
            d3 = vsplat(sum3)
@@ -291,76 +270,6 @@ inconv2dbbb332_v60_asm:
            fetch_ptr = add(fetch_ptr, in_width_depth)   //
        }:endloop0
 /* ---------------------------------------------------------------------------- */
-#if 1
-// << by recip_shamt; scale, and pack. min/max are found on the results
-// prior to packing.
-      {
-           s2.w = vasl(s2.w,recip_shamt)
-           ptr_x0 = sub(ptr_x0, next_outputs)           //reset data ptr to next 4
-           dcfetch(active_sum+#0<<6)
-       } {
-           s3.w = vasl(s3.w,recip_shamt)
-           col_count = add(col_count, #-4)              //
-           loop0(.L_filt_height, filt_height)           //[P, 1]for(fil=0;fil<h*depth/32;fil+=1){
-       } {
-           y2.w  = vmpye(s2.w, recipvec.uh)             //
-           s0.w = vasl(s0.w,recip_shamt)
-           p1 = cmp.eq(col_count, #0)                   //
-       } {
-           y2.w+= vmpyo(s2.w, recipvec.h):SSR           //
-           s1.w = vasl(s1.w,recip_shamt)
-           sum3 = memw(active_sum+#(3*8)) //#2<<2)         //stride = 4
-       } {
-           mine.w = vmin(mine.w, y2.w)                  //see if y2 is min
-           maxe.w = vmax(maxe.w, y2.w)                  //see if y2 is max
-           y3.w  = vmpye(s3.w, recipvec.uh)             //
-       } {
-           d3 =vsplat(sum3)
-           dcfetch(ptr_x0+#0<<6)
-           sum2 = memw(active_sum+#(2*8))                  //stride = 4
-       } {
-           s3.w = vadd(wsum.w,d3.w)
-           fetch_ptr = add(ptr_x0, in_width_depth)      //
-           y3.w+= vmpyo(s3.w, recipvec.h):SSR           //
-       } {
-           mine.w = vmin(mine.w, y3.w)                  //see if y3 is min
-           maxe.w = vmax(maxe.w, y3.w)                  //see if y3 is max
-           y0.w  = vmpye(s0.w, recipvec.uh)             //
-           dcfetch(fetch_ptr+#0<<6)
-       } {
-           sum0 = memw(active_sum+#0)                  //stride = 4
-           d2 = vsplat(sum2)
-           fetch_ptr = add(ptr_x0, in_width_depth)      //
-       } {
-           s2.w = vadd(wsum.w,d2.w)
-           y0.w+= vmpyo(s0.w, recipvec.h):SSR           //
-           y3.h = vpack(y3.w, y2.w):sat                //#sat8  <0, >255
-       } {
-           mine.w = vmin(mine.w, y0.w)                  //see if y0 is min
-           maxe.w = vmax(maxe.w, y0.w)                  //see if y0 is max
-           y1.w  = vmpye(s1.w, recipvec.uh)             //
-       } {
-           y1.w+= vmpyo(s1.w, recipvec.h):SSR           //
-       } {
-           d0 = vsplat(sum0)
-           mine.w = vmin(mine.w, y1.w)                  //see if y1 is min
-           maxe.w = vmax(maxe.w, y1.w)                  //see if y1 is max
-       } {
-           s0.w = vadd(wsum.w,d0.w)
-           sum1 = memw(active_sum+#8)                  //stride = 4
-           y1.h = vpack(y1.w, y0.w):sat                //#sat8  <0, >255
-       } {
-           ptr_w = memw(sp+#52)                         //[P, 0]ptr_wi initialize filter pointer
-           d1 = vsplat(sum1)
-           active_sum = add(active_sum,#8*4)
-       } {
-           s1.w = vadd(wsum.w, d1.w)
-           y3.ub = vpack(y3.h, y1.h):sat                //#sat8  <0, >255
-           vmem(ptr_z++#1) = y3.new                     //#[E,  ]store 2nd 32bytes
-           if(!p1) jump:t .L_width                      //
-       }//end cols per line
-
-#else
        {   y2.w  = vmpye(s2.w, recipvec.uh)             //
            mine.w = vmin(mine.w, s2.w)                  //see if s2 is max
            ptr_x0 = sub(ptr_x0, next_outputs)           //reset data ptr to next 4
@@ -388,7 +297,7 @@ inconv2dbbb332_v60_asm:
            mine.w = vmin(mine.w, s1.w)                  //see if s1 is max
            dcfetch(ptr_x0+#0<<6)                        //[1, 2]
        } {
-           y3.h = vpack(y3.w, y2.w):sat                 //#sat8  <0, >255
+           y3.h = vpacke(y3.w, y2.w)                    //#sat8  <0, >255 
            y0.w+= vmpyo(s0.w, recipvec.h):SSR           //
            sum1 = memw(active_sum++#8)                  //stride = 4
        } {
@@ -408,7 +317,7 @@ inconv2dbbb332_v60_asm:
            fetch_ptr = add(ptr_x0, in_width_depth)      //
        } {
            s2.w = vadd(wsum.w, d2.w)
-           y1.h = vpack(y1.w, y0.w):sat                 //#>>16
+           y1.h = vpacke(y1.w, y0.w)                    //#>>16  
            ptr_w = memw(sp+#52)                         //[P, 0]ptr_wi initialize filter pointer
            d3 = vsplat(sum3)
        } {
@@ -417,32 +326,22 @@ inconv2dbbb332_v60_asm:
            vmem(ptr_z++#1) = y3.new                     //#[E,  ]store 2nd 32bytes
            if(!p1) jump:t .L_width                      //
        }//end cols per line
-#endif
 /* ---------------------------------------------------------------------------- */
        {   p1 = cmp.eq(out_height, #0)                  //
            if(!p1.new) jump:t .L_height                 //
        }//end lines per block
 /* ---------------------------------------------------------------------------- */
-       {
-           ptr_max = memw(PARMW(4))                     //ptr pre computed max value in output
-           r17:16 = memd(sp+#0)
+       {   r17:16 = memd(sp+#0)                         //restore stack
+           ptr_max = memw(sp+#24<<2)                    //ptr pre computed max value in output
        } {
            r19:18 = memd(sp+#8)                         //Q
-           maxo = vmem(ptr_max+#0)
+           vmem(ptr_max+#0) = maxe                      //[E, 1]
        } {
            r21:20 = memd(sp+#16)                        //Q
-          maxe.w = vmax(maxo.w,maxe.w)
-          vmem(ptr_max+#0) = maxe.new
+           vmem(ptr_max+#1) = mine                      //[E, 2]
        } {
-          r23:22 = memd(sp+#24)                        //Q
-          mino = vmem(ptr_max+#1)
-       } {
-          mine.w = vmin(mino.w,mine.w)
-          vmem(ptr_max+#1) = mine.new
-       }
-
-/* ---------------------------------------------------------------------------- */
-       {
+           r23:22 = memd(sp+#24)                        //Q
+       } {    
            r25:24 = memd(sp+#32)                        //Q
            r27:26 = memd(sp+#40)                        //Q
        } {

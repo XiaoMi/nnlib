@@ -97,10 +97,10 @@ setup_integral_buffer_plan( struct nn_node *self, struct nn_graph * nn,
 
 	// can we trim the input ? may be possible if right_pad = 0 or bot_pad = 0, and strides >= 2
 	if( bottom_pad == 0 && stride_ht > 1) {
-		in_ht =  min_i32(in_ht, win_ht + (out_ht-1)*stride_ht);		// may be less than before
+		in_ht =   win_ht + (out_ht-1)*stride_ht;		// may be less than before
 	}
 	if( right_pad == 0 && stride_wid > 1) {
-		in_wid =  min_i32( in_wid,win_wid + (out_wid-1)*stride_wid);	// may be less than before
+		in_wid =   win_wid + (out_wid-1)*stride_wid;	// may be less than before
 	}
 	// if an output dimension is 1, we can trim the window to match the input; also set stride to 1
 	// otherwise, find out the # of 'infeasible' padding rows...

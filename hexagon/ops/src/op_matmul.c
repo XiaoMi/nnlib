@@ -366,6 +366,7 @@ static int matmul_check_ref(struct nn_node *self, struct nn_graph *nn)
 	uint32_t filt_elements_pad = (filt_elements + APAD - 1) & (~(APAD - 1));
 	int out_depth_pad = (out_depth + BPAD - 1) & ~(BPAD-1);
 	uint32_t consts_size;
+	uint32_t vecinfo;
 	filt_elements_pad = (filt_elements_pad < 32)?32:filt_elements_pad;
 	consts_size = filt_elements_pad * out_depth_pad;
 	if (nn_scratch_grow(nn,consts_size)){
@@ -376,13 +377,14 @@ static int matmul_check_ref(struct nn_node *self, struct nn_graph *nn)
 			return errlog(nn,"couldn't allocate buffer for const rearrangement");
 		}
 	}
+	nn_os_hvx_power_on(nn);
+	vecinfo = nn_os_vector_acquire();
 	nn_scratch_grow(nn,filt_elements_pad*out_depth_pad+256);
 	logmsg(nn,2,"Pad B: filt_elements=%lu %lu,out_depth=%lu %d, filt_offset=%ld", filt_elements, out_depth, filt_elements_pad,out_depth_pad, filt_offset);
-
-	nn_mutex_lock(&nn->scratch_mutex);
 	pad2d(filt,filt_elements,out_depth,nn->scratch,filt_elements_pad,out_depth_pad,filt_offset);
 	transpack(nn->scratch,filt_elements_pad,out_depth_pad,self->opaque);
-	nn_mutex_unlock(&nn->scratch_mutex);
+	nn_os_vector_release(vecinfo);
+	nn_os_hvx_power_off(nn);
 	logmsg(nn,2,"matmul node %p check OK",self);
 	return 0;
 }

@@ -63,6 +63,7 @@ q6op_Vuw_vrmpyacc_VuwVubVubPub( HVX_Vector vx, HVX_Vector vu1, HVX_Vector vu0, i
 #define PTR_OFFSET(P,TYP,BYTES)  (TYP)( (char *)(P) + (BYTES))
 
 
+
 void HVX_INTRINSIC_REFFUNC(gvconv2dbbb_v60_asm)(
 		const uint8_t *input,
 		const uint8_t *weights,
@@ -79,9 +80,7 @@ void HVX_INTRINSIC_REFFUNC(gvconv2dbbb_v60_asm)(
 		const int32_t *suma,
 		int32_t next_suma,
 		int32_t *minmax_buf,
-		int32_t const * recip_vals,		// points to 32 scales.
-		int32_t zshift)
-
+		uint32_t recip_val)
 {
 	int out_width_stride_depth = out_next_row;
 
@@ -102,12 +101,12 @@ void HVX_INTRINSIC_REFFUNC(gvconv2dbbb_v60_asm)(
 
 	int in_width_stride_depth = in_width * in_depth * stride_h;
 
-	// get scales
-	HVX_Vector recipvec = ((HVX_Vector const *)recip_vals)[0];
-	// init min/max
-	// (OK to init both to zero)
-	HVX_Vector min_val = Q6_V_vsplat_R(0x7fffffff);
-	HVX_Vector max_val = Q6_V_vsplat_R(-0x7fffffff);
+	HVX_Vector recipvec = Q6_V_vsplat_R( recip_val );
+
+	// init min/max to 'existing' range
+	HVX_Vector max_val = ((HVX_Vector *)minmax_buf)[0];
+	HVX_Vector min_val = ((HVX_Vector *)minmax_buf)[1];
+
 	HVX_Vector wsum = *(HVX_Vector const *)biasbuf;
 
 	HVX_Vector s0,s1,s2,s3;
@@ -211,15 +210,9 @@ void HVX_INTRINSIC_REFFUNC(gvconv2dbbb_v60_asm)(
 				}
 			}
 
-			// scale and reduce to 128 bytes
 			HVX_Vector y0,y1,y2,y3, y0123;
-			if(zshift>0){
-				s0 = Q6_Vw_vasl_VwR( s0, zshift);
-				s1 = Q6_Vw_vasl_VwR( s1, zshift);
-				s2 = Q6_Vw_vasl_VwR( s2, zshift);
-				s3 = Q6_Vw_vasl_VwR( s3, zshift);
-			}
 
+			// scale and reduce to 128 bytes
 
 			y0 = q6op_Vw_vmpy_VwVw_s1_rnd_sat( s0, recipvec);
 			y1 = q6op_Vw_vmpy_VwVw_s1_rnd_sat( s1, recipvec);
@@ -237,18 +230,6 @@ void HVX_INTRINSIC_REFFUNC(gvconv2dbbb_v60_asm)(
 
 
 	}// for irow
-
-	// scale the min/max according to scales
-	min_val = Q6_Vw_vasl_VwR( min_val, zshift);
-	max_val = Q6_Vw_vasl_VwR( max_val, zshift);
-	min_val = q6op_Vw_vmpy_VwVw_s1_rnd_sat( min_val, recipvec);
-	max_val = q6op_Vw_vmpy_VwVw_s1_rnd_sat( max_val, recipvec);
-	// to accomodate -ve scales:
-	HVX_Vector vmin = Q6_Vw_vmin_VwVw( min_val, max_val);
-	HVX_Vector vmax = Q6_Vw_vmax_VwVw( min_val, max_val);
-	// combine with previous min/max
-	min_val = Q6_Vw_vmin_VwVw(vmin, ((HVX_Vector *)minmax_buf)[1]);
-	max_val = Q6_Vw_vmax_VwVw(vmax, ((HVX_Vector *)minmax_buf)[0]);
 
 
 	((HVX_Vector *)minmax_buf)[0] = max_val;

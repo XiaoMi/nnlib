@@ -754,9 +754,6 @@ static int maxpool_execute(struct nn_node *self, struct nn_graph *nn)
 	rstt.pool_alloc = 0;
 
 	if( use_rollbuf){
-		if (nn_scratch_grow(nn, rstt.rollbuf.total_bytes * n_threads)){
-			return errlog(nn, "scratch too small" );
-		}
 		nn_scratch_reset(nn);
 		rstt.rollbuf_pool = nn_scratch_alloc(nn, rstt.rollbuf.total_bytes * n_threads);
 		if( rstt.rollbuf_pool == NULL){

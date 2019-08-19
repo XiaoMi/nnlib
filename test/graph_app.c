@@ -81,6 +81,7 @@ int qtest_get_cmdline(char *, int);
 #define adspmsgd_start(_a, _b, _c)
 #define adspmsgd_stop()
 #endif
+#include "dspCV.h"
 #include "AEEStdErr.h"
 #include <sys/types.h>
 #include <sys/time.h>
@@ -93,29 +94,24 @@ void fastrpc_setup(int MCPS, int MBPS, int DCVS_DISABLE)
 
 	adspmsgd_start(0,RPCMEM_HEAP_DEFAULT,4096);
 	rpcmem_init();
-	
+	dspCV_Attribute attrib[] = {
+		{DSP_TOTAL_MCPS, MCPS},
+		{DSP_MCPS_PER_THREAD, MCPS / 2},
+		{PEAK_BUS_BANDWIDTH_MBPS, MBPS},
+		{BUS_USAGE_PERCENT, 50},
+	};
 	if (DCVS_DISABLE) {
 		retVal = hexagon_nn_disable_dcvs();
 		if (retVal) printf("Failed to disable DSP DCVS (did you ever use SDK to generate a testsig?): %x!\n",retVal);
 	}
-	
-    hexagon_nn_dcvs_type dcvs;
-    if(DCVS_DISABLE)
-    {
-        dcvs=NN_DCVS_DISABLE;
-    }
-    else
-    {
-        dcvs=NN_DCVS_ENABLE;
-    }
-    retVal = hexagon_nn_set_powersave_details(NN_CORNER_TURBO, dcvs, 0);     
-    printf("return value from hexagon_nn_set_powersave_details() : %d \n", retVal);  
-	
+	retVal = dspCV_initQ6_with_attributes(attrib,
+			 sizeof(attrib) / sizeof(attrib[0]));
+	printf("return value from dspCV_initQ6() : %d \n", retVal);
 }
 
 void fastrpc_teardown()
 {
-	hexagon_nn_set_powersave_details(NN_CORNER_RELEASE, FALSE, 0);
+	dspCV_deinitQ6();
 	rpcmem_deinit();
 	adspmsgd_stop();
 }

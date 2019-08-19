@@ -62,27 +62,7 @@
         .global inconv2dbbb_v60_asm
         .balign 32
         .type  inconv2dbbb_v60_asm, @function
-/* parameters:
- *  r0     ( const uint8_t * input,
- *  r1       const uint8_t * weights,
- *  r2       uint8_t * output,
- *  r3       int in_width_pad,
- *  r4       int next_out_width_row,
- *  r5       int out_width,
- * PARMW(0)  int indepth,
- * PARMW(1)  int filt_width,
- * PARMW(2)  int filt_height,
- * PARMW(3)  int num_out_lines,
- * PARMW(4)  int32_t * minmax_buf,
- * PARMW(5)  int recip_level,
- * PARMW(6)  const int32_t *biasbuf,
- * PARMW(7)  const int32_t *ptr_suma,
- * PARMW(8)  int next_suma,
- * PARMW(9)  int stride_height_width,
- * PARMW(10) int recip_shamt);
- */
- inconv2dbbb_v60_asm:
-
+inconv2dbbb_v60_asm:
 /*=============================================================================*/
 #define ptr_xi                 r0     //data
 #define ptr_wi                 r1     //weights
@@ -104,7 +84,6 @@
 #define sum1                   r19
 #define sum2                   r19
 #define sum3                   r19
-#define recip_shamt            r7
 /*=============================================================================*/
 #define fetch_ptr              r0
 #define fetch_ptr0             r2
@@ -161,47 +140,47 @@
 #define vzero                  v20
 #define SSR        <<1:rnd:sat:shift  //simplfy mpy instruction
 /*=============================================================================*/
-#define FRAMESIZE 72
-#define PARMW(n) sp+#(8+FRAMESIZE+4*(n))
-       {   allocframe(#FRAMESIZE)                              // 0th entry on stack is (72+8)/4 =20 ints
+       {   allocframe(#72)                              // 0th entry on stack is (72+8)/4 =20 ints
        } {  
            memd(sp+#0)  = r17:16                        //
            memd(sp+#8)  = r19:18                        //
        } {
-           r16 = #0x7fffffff;
            memd(sp+#16) = r21:20                        //
            memd(sp+#24) = r23:22                        //
        } {
            memd(sp+#32) = r25:24                        //
            memd(sp+#40) = r27:26                        //
-           mine = vsplat(r16)
        } {
            memw(sp+#48) = ptr_xi
            memw(sp+#52) = ptr_wi
-           maxe = vnot(mine)
        } {
-           in_depth = memw(PARMW(0))
-           filt_height = memw(PARMW(2))                 //extract filt_height
+           ptr_max = memw(sp+#24<<2)                    //ptr pre computed max value in output
        } {
-           filt_width = memw(PARMW(1))                  //extract filt_width
+           maxe = vmem(ptr_max+#0)                      //[E, 1]
+           in_depth = memw(sp+#20<<2)
+       } {
+           mine = vmem(ptr_max+#1)                      //[E, 2]
+           filt_height = memw(sp+#22<<2)                //extract filt_height 
+       } {
+           filt_width = memw(sp+#21<<2)                 //extract filt_width
            p0 = cmp.eq(filt_height, #1)                 //is filt 1xN?
        } {   
            p3 = tstbit(filt_width,#0)                   //is filter Nx2 ?
            memw(sp+#56) = ptr_zi
            filt_width = lsr(filt_width, #1)             //
-           out_height = memw(PARMW(3))                  //number of output lines
+           out_height = memw(sp+#23<<2)                 //number of output lines
        } {
            p2 = cmp.eq(filt_width, #0)                  //is filt width = 1? (now 0)?
-           recip_level = memw(PARMW(5))                 //
-           filt_sum = memw(PARMW(6))
+           recip_level = memw(sp+#25<<2)                // 
+           filt_sum = memw(sp+#26<<2)
            in_width_depth  = mpyi(in_width, in_depth)   //in_depth * in_width line
        } {
            wsum = vmem(filt_sum+#0)                     //
            recipvec = vsplat(recip_level)               //
-           stride_v_h = memw(PARMW(9))
+           stride_v_h = memw(sp+#29<<2)
        } {
-           next_suma_buf = memw(PARMW(8))
-           active_sum = memw(PARMW(7))                 //
+           next_suma_buf = memw(sp+#28<<2)
+           active_sum = memw(sp+#27<<2)                 //
            in_width_stride_depth=mpy(in_width_depth.L,stride_v_h.H)//
            stride_v_h = zxth(stride_v_h) 
        } {
@@ -341,12 +320,10 @@
            x37x34_x33x30 = memd(ptr_x1+in_depth3<<#0)   //[1, 0]
        }:endloop0
 /* ---------------------------------------------------------------------------- */
+       {   if(!p3) jump .L_even1                        //for even filters
+       }
 	// note: p2=1, p3=0 doesn't happen.
 .L_epi_only_1:
-       {   if(!p3) jump .L_even1                        //for even filters
-          // recip_shamt uses x37x34 which has just become dead
-           recip_shamt = memw(PARMW(10))			// get recip_shamt from srack frame
-       }
        {
            y0.cur     = vmem(ptr_w+#0)                  //[1, 1]
            s2.uw       += vrmpy(y0.ub, x23x20.ub)       //[1, 1]
@@ -360,41 +337,34 @@
        } 
 .L_even1:
        {   y2.w  = vmpye(s2.w, recipvec.uh)             //
-           p1=cmp.eq(recip_shamt,#0)
-           mino.w = vmin(mine.w, s2.w)                  //see if s2 is max
+           mine.w = vmin(mine.w, s2.w)                  //see if s2 is max
            ptr_x0 = sub(ptr_x0, next_outputs)           //reset data ptr to next 4
        } {
            y2.w+= vmpyo(s2.w, recipvec.h):SSR           //
            col_count = add(col_count, #-4)              //
-           maxo.w = vmax(maxe.w, s2.w)                  //[E, 4]
-           if (!p1)jump .L_apply_shamt;
-       }
-//NOTE: the code at .L_apply_shamt must duplicate effects
-//      of these two bypassed packets
-       {
-           y3.w  = vmpye(s3.w, recipvec.uh)             //#
-           mino.w = vmin(mino.w, s3.w)                  //[E, 4]see if s3 is max
+           loop1(.L_filt_height, filt_height)           //[P, 1]for(fil=0;fil<h*depth/32;fil+=1){
        } {
-           maxo.w = vmax(maxe.w, s3.w)                  //[E, 3]
+           y3.w  = vmpye(s3.w, recipvec.uh)             //#
+           mine.w = vmin(mine.w, s3.w)                  //[E, 4]see if s3 is max
+           maxe.w = vmax(maxe.w, s3.w)                  //[E, 3]
+           p1 = cmp.eq(col_count, #0)                   //
+       } {
+           maxe.w = vmax(maxe.w, s2.w)                  //[E, 4]
            y3.w+= vmpyo(s3.w, recipvec.h):SSR           //
            sum0 = memw(active_sum++M0) //#2<<2)         //stride = 4
-       }
-.L_back_from_apply_shamt:
-        {
-           p1 = cmp.eq(col_count, #0)                   //
-           maxe.w = vmax(maxo.w, s0.w)                  //see if s0 is max
-           mine.w = vmin(mino.w, s0.w)                  //see if s0 is max
+       } {
+           maxe.w = vmax(maxe.w, s0.w)                  //see if s0 is max
+           mine.w = vmin(mine.w, s0.w)                  //see if s0 is max
            y0.w = vmpye(s0.w, recipvec.uh)              //
        } {
            d0 =vsplat(sum0)
            maxe.w = vmax(maxe.w, s1.w)                  //
            mine.w = vmin(mine.w, s1.w)                  //see if s1 is max
        } {
-           y3.h = vpack(y3.w, y2.w):sat                 //#sat8  <0, >255
+           y3.h = vpacke(y3.w, y2.w)                    //#sat8  <0, >255 
            y0.w+= vmpyo(s0.w, recipvec.h):SSR           //
            sum1 = memw(active_sum++M0)                  //stride = 4
        } {
-           loop1(.L_filt_height, filt_height)           //[P, 1]for(fil=0;fil<h*depth/32;fil+=1){
            s0.w = vadd(wsum.w, d0.w)
            y1.w  = vmpye(s1.w, recipvec.uh)             //
        } {
@@ -409,7 +379,7 @@
            sum3 = memw(active_sum++M0)                  //stride = 4
        } {
            s2.w = vadd(wsum.w, d2.w)
-           y1.h = vpack(y1.w, y0.w):sat                 //#>>16
+           y1.h = vpacke(y1.w, y0.w)                    //#>>16  
            ptr_w = memw(sp+#52)                         //[P, 0]ptr_wi initialize filter pointer
            d3 = vsplat(sum3)
        } {
@@ -419,30 +389,35 @@
            if(!p1) jump:t .L_width                      //
        }//end cols per line
 /* ---------------------------------------------------------------------------- */
-       {
+       {   c4 = #4                                      //
            p1 = cmp.eq(out_height, #0)                  //
            if(!p1.new) jump:t .L_height                 //
        }//end lines per block
 /* ---------------------------------------------------------------------------- */
- /* scale mine, maxe according to recipvec ; apply to overall range */
+           ptr_max = memw(sp+#24<<2)                    //ptr pre computed max value in output
+           vmem(ptr_max+#0) = maxe                      //[E, 1]
+           vmem(ptr_max+#1) = mine                      //[E, 2]
+#if 0
+       {   loop0(.L_peak, #4)                           //[P, 0]
+           ptr_max = memw(sp+#24<<2)                    //ptr pre computed max value in output
+           maxomaxe=vshuff(maxe,maxe,c4)                //[0, 0]
+       } 
+.L_peak:
+       {   minomine=vshuff(mine,mine,c4)                //[0, 1]
+           maxe.w = vmax(maxo.w, maxe.w)                //[0, 1]
+           c4 = add(c4, c4)                             //[0, 1]
+       } {
+           mine.w = vmin(mino.w, mine.w)                //[0, 2]
+           maxomaxe=vshuff(maxe,maxe,c4)                //[1, 0]
+       }:endloop0 
        {
-           mino.w = vmpye(mine.w, recipvec.uh)
-           ptr_max = memw(PARMW(4))                     //ptr pre computed max value in output
+           minomine=vshuff(mine,mine,c4)                //[1, 1]
+           maxe.w = vmax(maxo.w, maxe.w)                //[1, 1]
+           vmem(ptr_max+#0) = maxe.new                  //[E, 1]
        } {
-           mine = vmem(ptr_max+#1)
-           mino.w+= vmpyo(mine.w, recipvec.h):SSR
-       } {
-           mine.w = vmin( mine.w, mino.w)
-           vmem(ptr_max+#1) = mine.new                      //[E, 2]
-           maxo.w = vmpye(maxe.w, recipvec.uh)
-       } {
-           maxo.w+= vmpyo(maxe.w, recipvec.h):SSR
-           maxe = vmem(ptr_max+#0)
-       } {
-           maxe.w = vmax( maxe.w, maxo.w)
-           vmem(ptr_max+#0) = maxe.new                      //[E, 1]
+           mine.w = vmin(mino.w, mine.w)                //[1, 2]
        }
-
+#endif
 /*=============================================================================*/
        {   r17:16 = memd(sp+#0)                         //restore stack
            r19:18 = memd(sp+#8)                         //Q
@@ -454,34 +429,6 @@
            r27:26 = memd(sp+#40)                        //Q
        } {
            dealloc_return                               //Q
-       }
- // * Shift s0,s1,s2,s3 left by recip_shamt
- // * do the work which is skipped or invalidated in the main line:
- //     - update min/max for the *new* s2,s3 (results to mino,maxo);
- //   - find y2,y3 products for the *new* s2,s3'
- //   - load sum0
- //
-.L_apply_shamt:
-       {
-           sum0 = memw(active_sum++M0) //#2<<2)         //stride = 4
-           s2.w = vasl(s2.w, recip_shamt)
-       } {
-           mino.w = vmin(mine.w, s2.w)                  //see if s2 is min
-           maxo.w = vmax(maxe.w, s2.w)                  //see if s2 is max
-           s3.w = vasl(s3.w, recip_shamt)
-       } {
-           y2.w  = vmpye(s2.w, recipvec.uh)
-           mino.w = vmin(mino.w, s3.w)                  //see if s3 is min
-           maxo.w = vmax(maxo.w, s3.w)                  //see if s2 is max
-       } {
-           s0.w = vasl(s0.w, recip_shamt)
-           y2.w+= vmpyo(s2.w, recipvec.h):SSR           //
-       } {
-           y3.w  = vmpye(s3.w, recipvec.uh)             //#
-           s1.w = vasl(s1.w, recip_shamt)
-       } {
-           y3.w+= vmpyo(s3.w, recipvec.h):SSR           //
-           jump .L_back_from_apply_shamt;
        }
 .L_end:
 /*=============================================================================*/

@@ -173,7 +173,7 @@ int nn_transpose_analyze_direct( struct nn_transpose_desc * tdp,
                   int32_t const*perm_arr, int permn,
                   uint32_t const *dims, int ndim );
 
-// nn_transpose_analyze is a special case of nn_transpose_analyze_direct for ndim=4.
+// nn_transpose_analyze is a special case of nn_transpose_analyze for ndim=4.
 
 static inline int nn_transpose_analyze( struct nn_transpose_desc * td,
 		int elementsize,
@@ -187,39 +187,11 @@ static inline int nn_transpose_rescale_for_batches(struct nn_transpose_desc cons
 	return -1;
 }
 
-// ********
-// * NOTE *
-// ********
-// nn_transpose_execute actually does the operation. You can call in *execute*
-// phase, from a scalar thread with nn_graph pointer, and it will spawn hvx threads
-// to do the work.
-// OR, you can can call from a hvx thread, with NULL pointer for nn, and it will do
-// all the work in the calling thread. This is intended for use, e.g. in prepare
-// Same applies to nn_transpose_operation (which calls nn_transpose_execute indirectly)
-
 static inline int nn_transpose_execute( struct nn_graph *nn, struct nn_transpose_desc const * td, void *buffer,
 				 uint8_t * output, uint8_t const *input)
 {
 	return (*td->execute_fp)( nn,td,buffer, output, input );
 }
-
-// 'One step' entry point for transpose op
-// The elementsize, perm_arr, permn, dims, ndim are exactly as per
-//     nn_transpose_analyze_direct
-// You can optionally pass in a scratch buffer via scratch, scratch_bytes.
-// If the operation needs a scratch buffer, and the supplied buffer is
-// too small, one will be allocated and freed.
-// See **NOTE** above.
-//
-int nn_transpose_operation( struct nn_graph *nn,
-		void *outp,			// output, vec-aligned
-		void const *inp,	// input, vec-aligned
-        int elementsize,
-        int32_t const*perm_arr, int permn,
-        uint32_t const *dims, int ndim,
-        void * scratch,		// or NULL; must be vector aligned
-        uint32_t scratch_bytes );	// size of scratch buffer.
-
 
 //
 // These are exported symbols in case they are useful elsewhere

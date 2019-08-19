@@ -240,8 +240,6 @@ int nn_elementwise_with_broadcast(
 	struct nn_node *self,
 	struct nn_graph *nn,
 	struct elementwise_funcs const * functabp,
-	void *intermed_a,
-	void *intermed_b,
 	void *opaque)
 {
 	const struct tensor *a_tensor = self->inputs[0];
@@ -301,13 +299,7 @@ int nn_elementwise_with_broadcast(
 	if( outp == NULL) return errlog(nn,"broadcast: no output address!");
 
 	uint8_t const *inp_a = (uint8_t*) a_tensor->data;
-	if (intermed_a != NULL){
-		inp_a = (uint8_t *) intermed_a;
-	}
 	uint8_t const *inp_b = (uint8_t*) b_tensor->data;
-	if (intermed_b != NULL){
-		inp_b = (uint8_t *) intermed_b;
-	}
 
 	struct bcast_runstate rst = {
 			.inp_a = inp_a,  // a & b may get reversed, below...

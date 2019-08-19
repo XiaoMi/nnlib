@@ -61,7 +61,7 @@ static int check_execute(struct nn_node *self, struct nn_graph *nn)
 	CHECK(shape.width);
 	CHECK(shape.depth);
 	CHECK(data_size);
-	if (memcmp(dut->data,ref->data,dut->data_size) != 0) {
+	if (memcmp(dut->data,ref->data,ref->data_size) != 0) {
 		return errlog(nn,"data mismatch");
 	}
 	logmsg(nn,2,"check node %p OK",self);

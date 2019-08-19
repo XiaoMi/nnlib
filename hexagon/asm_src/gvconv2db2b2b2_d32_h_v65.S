@@ -134,11 +134,9 @@ gvconv2db2b2b2_d32_v65_asm:
 #define filt_wid               r18
 #define filt_ht                r19
 #define suma                   r20
-#define fetch_ptrh0            r20
 #define stride_w               r21
 #define ptr_ze                 r22
 #define ptr_zo                 r23
-#define fetch_ptrl0            ptr_zo
 #define ptr_zo_ptr_ze          r23:22
 #define out_y                  r24
 #define out_x4                 r25
@@ -269,7 +267,7 @@ gvconv2db2b2b2_d32_v65_asm:
     { memd(r29+#off_recip) = r7:6                       //
       ptr_wh = mpyi(ptr_wh,r11)                         // filt_width*filt_height*in_depth
       next_outputs = mpyi(filt_ht,in_width_4)           //
-//      suma = memw(r29+#APTR+32)                         // recip|ptr_minmax
+      suma = memw(r29+#APTR+32)                         // recip|ptr_minmax
     }
     { ptr_wh = addasl(weights,ptr_wh,#3)                //
       next_outputs += mpyi(stride_w4,#-2)               // -2*(stride_w4*2)
@@ -287,12 +285,12 @@ gvconv2db2b2b2_d32_v65_asm:
     }
     { m1 = r22                                          // -2*tsride_w4+8
       shh0.w = vadd(wsum.w,vsuma0.w)                    //
-//      suma += mpyi(stride_w,#3)                         //
+      suma += mpyi(stride_w,#3)                         //
     }
     { vsuma1 = #0 //vsplat(suma1)                            //
       vsuma2 = #0 //vsplat(suma2)                            //
 //      suma3 = memw(suma+#0)                             //
-//      suma = add(suma,stride_w)                         //
+      suma = add(suma,stride_w)                         //
     }
     { shh1.w = vadd(wsum.w,vsuma1.w)                    //
       shh2.w = vadd(wsum.w,vsuma2.w)                    //
@@ -317,7 +315,7 @@ gvconv2db2b2b2_d32_v65_asm:
       sumainc_sumat = memd(r29+#APTR+32)                //
     }
     { memd(r29+#off_in_bufe) = in_bufoet                //
-      out_bufet = addasl(ptr_ze,next_out_width,#1)            //
+      out_bufet = add(ptr_ze,next_out_width)            //
       out_bufot = add(ptr_zo,next_out_width)            //
       sumat = add(sumat,sumainc)                        //
     }
@@ -351,11 +349,6 @@ gvconv2db2b2b2_d32_v65_asm:
     { wh0.cur = vmem(ptr_wh++#1)                        //
       shl1_shl0.w += vrmpy(wh0.b,xl13x10_xl03x00.ub)    //
       xl37x34_xl33x30 = memd(ptr_xl1+stride_w4<<#0)     //
-      if (!p3) fetch_ptrh0 = ptr_xh0
-    }
-    { dcfetch(fetch_ptrh0+#0)                           //
-      fetch_ptrh0 = add(fetch_ptrh0,#64)                //
-      if (!p3) fetch_ptrl0 = add(ptr_xl0,in_width_4)    //
       if (!p3) ptr_xl0 = add(ptr_xl0,in_width_4)        //
     }
     { wl0.cur = vmem(ptr_wl++#1)                        //
@@ -369,8 +362,6 @@ gvconv2db2b2b2_d32_v65_asm:
     }
     { wl1.cur = vmem(ptr_wl++#1)                        //
       sll1_sll0.w += vrmpy(wl1.b,xl17x14_xl07x04.ub)    //
-      dcfetch(fetch_ptrl0+#0)
-      fetch_ptrl0 = add(fetch_ptrl0,#64)
     }
     { shl3_shl2.w += vrmpy(wh0.b,xl33x30_xl23x20.ub)    //
       sll3_sll2.w += vrmpy(wl0.b,xl33x30_xl23x20.ub)    //
@@ -410,7 +401,7 @@ gvconv2db2b2b2_d32_v65_asm:
     { shl1.w += vasr(sll1.w,c8w)                        //
       ptr_xl0 = sub(ptr_xl0,next_outputs)               //
       ptr_xh0 = sub(ptr_xh0,next_outputs)               //
-      //if (!p1) suma = sumabuf                           //
+      if (!p1) suma = sumabuf                           //
     }
     { shh0.w += vasr(shl0.w,c8w)                        //
       loop1(.L_filt_height,filt_ht)                     //[p2]
@@ -450,7 +441,7 @@ gvconv2db2b2b2_d32_v65_asm:
     { s3.w = VASL(shh3.w,recip_shift)                   //
       y1.w += vmpyo(s1.w,recipvec.h):<<1:rnd:sat:shift  //
       min_val.w = vmin(min_val.w,sk.w)                  //
-      //suma += mpyi(stride_w,#3)                         //
+      suma += mpyi(stride_w,#3)                         //
     }
     { y2.w = vmpye(s2.w,recipvec.uh)                    //
       max_val.w = vmax(max_val.w,sk.w)                  //
@@ -460,7 +451,7 @@ gvconv2db2b2b2_d32_v65_asm:
     { y2.w += vmpyo(s2.w,recipvec.h):<<1:rnd:sat:shift  //
       min_val.w = vmin(min_val.w,sk.w)                  //
       max_val.w = vmax(max_val.w,sk.w)                  //
-      //suma = add(suma,stride_w)                         //
+      suma = add(suma,stride_w)                         //
     }
     { y3.w = vmpye(s3.w,recipvec.uh)                    //
       sll2 = #0                                         //
@@ -472,12 +463,12 @@ gvconv2db2b2b2_d32_v65_asm:
       shl3 = constw80                                   //
       ptr_wh_wl = memd(r29+#off_ptr_wl)                 //[p2]
     }
-    { y0.uh = vpack(y1.w,y0.w):sat                      //
+    { y1.uh = vpack(y1.w,y0.w):sat                      //
       vsuma0 = #0//vsplat(suma0)                            //
       vsuma1 = #0//vsplat(suma1)                            //
       sll1 = #0                                         //
     }
-    { y1.uh = vpack(y3.w,y2.w):sat                      //
+    { y3.uh = vpack(y3.w,y2.w):sat                      //
       shh0.w = vadd(wsum.w,vsuma0.w)                    //
       vsuma2 = #0//vsplat(suma2)                            //
       vsuma3 = #0//vsplat(suma3)                            //
@@ -486,13 +477,11 @@ gvconv2db2b2b2_d32_v65_asm:
       shh2.w = vadd(wsum.w,vsuma2.w)                    //
       shh3.w = vadd(wsum.w,vsuma3.w)                    //
     }
-    { //y1y0 = vdeal(y1,y0,c_1w)                          //
-      //vmem(ptr_ze++#1) = y0.new                         //
-      vmem(ptr_ze++#1) = y0                             //
+    { y1y0 = vdeal(y3,y1,c_1w)                          //
+      vmem(ptr_ze++#1) = y0.new                         //
       c8w = #8                                          //
     }
-    { //vmem(ptr_zo++#1) = y1                             //
-      vmem(ptr_ze++#1) = y1                             //
+    { vmem(ptr_zo++#1) = y1                             //
       if (p1) jump:t .L_width                           //
       out_x4 = add(out_x4,#-4)                          //[p2]
       p1 = cmp.gt(out_x4,#4)                            //[p2] last iteration

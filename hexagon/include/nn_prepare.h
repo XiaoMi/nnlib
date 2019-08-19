@@ -60,14 +60,8 @@ static const struct output Output_ScalarFloat = {
 
 void make_outputdesc_from_shape(struct output *outp, struct shape const *shp, int elsize, int add_d32_padding_unused);
 
-// extract shape from output desc
-void shape_from_outputdesc(struct shape *shp, struct output const *outp);
-
-//legacy
-static inline
-void shape_from_outdesc(struct shape *shp, struct output const *outp, int add_d32_padding){
-	shape_from_outputdesc(shp,outp);
-}
+// extract shape from output desc; optionally add d32 padding
+void shape_from_outdesc(struct shape *shp, struct output const *outp, int add_d32_padding);
 
 struct nn_node *create_node(
 	struct nn_graph *nn,
@@ -87,7 +81,7 @@ struct nn_node *create_convert(
 	struct nn_graph *nn,
 	int src_id,
 	int output_idx,
-	struct shape const *outsize,
+	struct shape outsize,
 	uint32_t operation);
 
 // find a node, but only if node_type == ntype
@@ -329,8 +323,5 @@ change_multi_output_refs_table( struct nn_graph * nn,
 		int n_outputs,					// number of outputs to rewire
 		struct input const new_inpref[] );  // array of new
 
-
-// used to convert a 13-input supernode (with channelscale) to 12
-int handle_channelscaled_supernode( struct nn_graph *nn, struct nn_node *nodep);
 
 #endif //NN_PREPARE_H

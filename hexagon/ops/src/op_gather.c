@@ -87,8 +87,6 @@
 //          -  leading 1's in the table shape are dropped (table is considered to be (8,64,20) in examples)
 //          -  leading 1's in the index tensor are dropped.
 //          -  The index tensor shape replaces the 'index dimension' in the tables shape.
-//     By defining a dimension select, you can force use of a table dimension which is size 1;
-//    in this case the index input must be all 0 (or will be ignored, if range-clipping is used).
 //
 // (C) if the 'index_rank' is given, this must be 0..4 and overrides auto-detecting the rank
 //     of the index tensor. Any leading dimensions (the first '4-index_rank') must be 1.
@@ -196,7 +194,7 @@
 //
 // OUT-OF-RANGE indices:
 //   handled according to the 'padding' field:
-//     NN_PAD_NA:    same as 'NN_PAD_VALID'
+//     NN_PAD_NA:    same as 'NN_PAD_SAME'
 //     NN_PAD_SAME :  error if the value is < 0 or >= TabN
 //     NN PAD_VALID:   values are 'clipped' to range 0 .. TabN-1
 //   Others are undefined.
@@ -305,11 +303,7 @@ analyze_gather_op( struct nn_graph * nn, struct tensor const *index_tensor, stru
 	// it will still work as dei
 
 	int tabsize = table_tensor->shape.dimension[index_dim];
-	//
-	// Now allowing tabsize == 1
-	// In this situation, index must be 0 (unless we are clipping, in which case it will be ignored)
-	//
-	if( 0 && tabsize <= 1){
+	if( tabsize <= 1){
 		return errlog(nn,"can't lookup on dimension %d of table tensor (size=%d)", index_dim, tabsize);
 	}
 	// proven:

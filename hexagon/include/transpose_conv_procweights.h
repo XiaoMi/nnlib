@@ -41,10 +41,7 @@
 #include "nn_graph_types.h"
 struct transpose_conv_filter_parms {
   struct tensor const * filt_tensor;
-  uint32_t block_h;
-  uint32_t block_w;
-  uint8_t pad_num_filters;			// expand output depth to multiple of 32?
-  uint8_t elbytes;					// 1 or 2, for 8 or 16-bit data.
+  struct tensor const * strides_tensor;
   uint8_t *out_data;
   uint32_t zero_offset;      			// byte to fill when padding
   uint32_t data_size;

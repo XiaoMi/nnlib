@@ -144,73 +144,6 @@ int adjust_minmax_for_zero_16b(float *min_p, float *max_p)
 	}
 }
 
-int adjust_minmax_for_zero_with_constraints_16b( float *min_p, float *max_p , int constraint )
-{
-        float mn = *min_p;
-        float mx = *max_p;
-        float dif = mx-mn;
-        if( !(dif >= 1e-6f)) return -1; // check valid min,max_p
-        if( mn == 0.0f) return 0;               // common case
-        float z = (-65536.f)*mn / dif;          // current 'zero point'
-        float zi = floorf(z);
-        float zf = z - zi;
-        // if within 2^-6 of an integer, call it close enough
-        // (don't accept z outside 0.. 65535 though)
-        if ((zf <= 0.015625f || zf >= 0.984375f ) && z >=-0.02f && z <= 65535.02f)
-                return 0;
-        // choose which end to move
-        // Avoid divide by 0.
-        //
-
-        float mnk = (zf-1.0f) * mn;
-        float mxk =  zf *mx;
-        float zirnd = (zf >=0.5f)? (zi+1.0f): zi;
-
-        switch( constraint &3 ){
-         default:
-         case 0:
-                // move whichever requires least change.
-                if( zi >= 1.0f && ( zi >= 65535.0f || mnk >= mxk ))
-                        goto move_max_out;
-                goto move_min_out;
-         case 1:                // min is fixed; max is free
-                // skew decision to 'move max out'
-                if( zi >= 1.0f && (z >= 49152.25f ||  mnk * 8.0f > mxk) )
-                        goto move_max_out;
-                goto move_min_nearest;
-         case 2:
-                // skew decision to 'move min out'
-                if( z >= 16383.75f && ( zi >= 65535.0f || mnk > mxk * 8.0f ))
-                        goto move_max_nearest;
-                goto move_min_out;
-         case 3:
-                // move single endpoint if range is skewed at least 3:1; otherwise both.
-                if( z <= 16383.75f ) goto move_min_nearest;
-                if( z >= 49152.25f) goto move_max_nearest;
-                // shift zero to zirnd, by moving both ends.
-                float adj = (z-zirnd)*dif * (float)(1./65536.);
-                *min_p = mn + adj;
-                *max_p = mx + adj;
-                return 3;
-        }
-        /* NOTREACHED*/
-
-   move_max_nearest:   // move max, change z to nearest
-     zi = zirnd;
-   move_max_out:                // move max, change z to zi
-        *max_p = mn - 65536.0f*mn/zi;
-        return 2;
-
-   move_min_out:   // move min; change z to zi+1
-         zirnd = zi+1.0f;
-   move_min_nearest:    // move min, change z to nearest
-        *min_p = mx*zirnd/(zirnd-65536.0f);
-         printf(" djusted min max = %f %f \n",*min_p, *max_p);
-        return 1;
-}
-
-
-
 //
 // This is like adjust_minmax_for_zero except that it accepts a 'constraint'
 // parameter which indicates which endpoints are (nominally) fixed:
@@ -244,7 +177,7 @@ int adjust_minmax_for_zero_with_constraints( float *min_p, float *max_p , int co
 	float mn = *min_p;
 	float mx = *max_p;
 	float dif = mx-mn;
-	if(!(dif > 0.0f)) return -1;
+	if( !(dif >= 1e-6f)) return -1;	// check valid min,max_p
 	if( mn == 0.0f) return 0;		// common case
 	float z = (-255.0f)*mn / dif;		// current 'zero point'
 	float zi = floorf(z);

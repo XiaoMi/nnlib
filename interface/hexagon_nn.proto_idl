@@ -118,7 +118,7 @@ enum hexagon_nn_option_type {
 	// WARNING - DANGER!  Do not alter existing enum-IDs.
 	//                    These IDs should be stable across builds
 	//                    So you should:
-    //                    Add new items to BOTTOM
+        //                                 Add new items to BOTTOM
 	NN_OPTION_NOSUCHOPTION,
 	NN_OPTION_SCALAR_THREADS,
 	NN_OPTION_HVX_THREADS,
@@ -330,9 +330,6 @@ long get_power(in long type);
 
 /* set an option */
 long set_graph_option(in hexagon_nn_nn_id id, in string name, in long value);
-
-/* program cached Graph.  Internal API, Do Not Use*/
-long populate_graph(in hexagon_nn_nn_id id, in sequence<octet> graph_data);
 
 /*^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 //   Add new interfaces to the end!!!!

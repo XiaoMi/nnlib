@@ -595,7 +595,6 @@ struct nn_node_ops nn_ops_for_QuantizedPRelu_8_V2 = {
     .check = NULL,
     .ctor = node_alloc_common,
     .dtor = node_free_common,
-    .flags = NN_NODE_FLAG_CLS_PRELU,
 	.n_inputs = NN_IOCOUNT_RANGE(6,8),
 	.n_outputs = NN_IOCOUNT(3),
 };
@@ -604,7 +603,7 @@ struct nn_node_ops nn_ops_for_QuantizedPRelu_8_V2_d32 = {
 	.check = prelu_check_opt,
 	.ctor = node_alloc_common,
 	.dtor = prelu_dtor,
-	.flags = NN_NODE_FLAG_CLS_PRELU | NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 	.n_inputs = NN_IOCOUNT_RANGE(6,8),
 	.n_outputs = NN_IOCOUNT(3),
 };

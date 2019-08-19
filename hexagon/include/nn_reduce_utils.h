@@ -157,10 +157,10 @@ static void reduce_sum_single_axis_hvx_8(const uint8_t * in_data, int32_t * out_
             // Output : [96, 97, 98, ... 127]
             HVX_VectorPair sum_hi = Q6_W_vshuff_VVR(Q6_V_hi_W(sum1_3), Q6_V_hi_W(sum0_2), -4);
 
-            vmemu(&out_data[xd + 0]) = Q6_V_lo_W(sum_low);
-            vmemu(&out_data[xd + 32]) = Q6_V_hi_W(sum_low);
-            vmemu(&out_data[xd + 64]) = Q6_V_lo_W(sum_hi);
-            vmemu(&out_data[xd + 96]) = Q6_V_hi_W(sum_hi);
+            *(HVX_Vector *)&out_data[xd + 0] = Q6_V_lo_W(sum_low);
+            *(HVX_Vector *)&out_data[xd + 32] = Q6_V_hi_W(sum_low);
+            *(HVX_Vector *)&out_data[xd + 64] = Q6_V_lo_W(sum_hi);
+            *(HVX_Vector *)&out_data[xd + 96] = Q6_V_hi_W(sum_hi);
         }
         if (leftovers)
         {
@@ -180,7 +180,7 @@ static void reduce_sum_single_axis_hvx_8(const uint8_t * in_data, int32_t * out_
             HVX_VectorPair abcd_even = Q6_W_vshuff_VVR(sum2, sum0, -4);
             HVX_VectorPair abcd_odd = Q6_W_vshuff_VVR(sum3, sum1, -4);
             HVX_VectorPair abcd_low = Q6_W_vshuff_VVR(Q6_V_lo_W(abcd_odd), Q6_V_lo_W(abcd_even), -4);
-            HVX_Vector *outp = &vmemu(&out_data[xd]);
+            HVX_Vector *outp = (HVX_Vector *)&out_data[xd];
             q6op_vstu_variable_ARV(outp, leftovers * sizeof(uint32_t), Q6_V_lo_W(abcd_low));
         }
         in_data += num_blobs * blob_size;

@@ -82,24 +82,24 @@ gvconv2dbbbs1_d16_v66_asm:
 #define ptr_filtsum           r27   //5 aligned 128
 #define ptr_max               r21   //6 aligned 128
 #define recip_level           r23   //7  recip is 31bit unsigned 0x7f800000000LL / max
+//#define recip_level_ptr_max   r13:12//
 #define out_align             r1    //8 0, 32, 64, 96
-#define skip_col              r7    //9
+#define skip_col              r7    //21   //9
 #define out_next_d32          r7    //10
 #define nslice                r12   //11
-#define recip_shamt           r12   //12
-#define STP                   r21   //
-#define AEQ0                  r10   //
+#define equalize              r10   //12
 /*=============================================================================*/
 #define filt_width_in         r26   //
 #define filt_depth_width      r11   //total depth 32 iterations of each h filter
 #define in_width_stride_h_depth r28 //in_width * stride_h * in_depth for next output 
-#define ptr_x0                r6    //
+#define ptr_x0                r6    //r6 spare
 #define ptr_x1                r7    //
 #define ptr_x1_ptr_x0         r7:6  //
 #define stride_w              r18   //stride width =1
 #define next_outputs          r19   //jump to input ptr for next set of outputs
 #define ptr_w                 r20   //
 #define in_width_32           r22   //
+//#define ptr_x2                r23   //
 #define ptr_z                 r24   //
 #define col_count             r25   //
 #define filt_cnt              r18
@@ -111,9 +111,7 @@ gvconv2dbbbs1_d16_v66_asm:
 #define c8                    r15
 #define filt_width512         r16   //corrected to use ptr_w as a counter for fused loop
 #define c640                  r14
-#define lmask                 r23   //
 #define BASE                  72
-#define PRED3_0               C4    //
 /*=============================================================================*/
 #define PS(SSRC) .word (0x1DFFE100+SSRC) //debug vec reg
 #define PV(VSRC) .word (0x1DFFE020+VSRC)
@@ -137,14 +135,21 @@ gvconv2dbbbs1_d16_v66_asm:
 #define y2                    v10   //
 #define y3                    v11   //
 #define wsum                  v14   //initialzed to in_offsey*wsum + biasoffset
+#define maxomaxe              v13:12//
 #define maxe                  v12   //
+#define maxo                  v13   //
+#define minomine              v19:18//
 #define mine                  v18   //
+#define mino                  v19   //
 #define biasvec               v16   //
 #define recipvec              v15   //
-#define recip_sh_vec          v20   //
 #define RSS     <<1:rnd:sat:shift   //unverbose the insturction
+#define gmax                  v20   //
+#define gmin                  v22   //
+#define wscale                 v23   //
 /*=============================================================================*/
        {   filt_height_width = memd(sp+#8)            //
+           //recip_level_ptr_max = memd(sp+#24)         //
            sp = add(sp,#-BASE)                          //
            out_width = lsr(out_width, #2)             //4 outputs at once
        } {
@@ -169,58 +174,42 @@ gvconv2dbbbs1_d16_v66_asm:
        } {
            memd(sp+#32) = r25:24                      //
            ptr_w = ptr_wi                             //[P,0]ptr_y=ptr_yi initialize filter pointer
-           maxe = vmem(ptr_max+#0)                    //
+           gmax = vmem(ptr_max+#0)                    //
        } {
            memw(sp+#48) = ptr_xi                      //
            in_width_stride_h_depth=mpyi(in_width,in_width_stride_h_depth) //total vertical stride bytes
            in_width_32 = asl(in_width, #5)            //32 * in_width d32 line
-           mine = vmem(ptr_max+#1)                    //
+           gmin = vmem(ptr_max+#1)                    //
        } {
-           recipvec = vmem(recip_level++#1)           //
+           recipvec = vmem(recip_level++#1)             //
            next_outputs=mpyi(next_outputs,in_width)   //filt_height*in_width*in_depth
            weight_batch_size = mpyi(filt_depth_width,filt_height)
+           equalize = memw(sp+#(BASE+48))
        } {
-           memw(sp+#(BASE+28)) = recip_level          //
-           r6 = #32                                   //
-           recip_shamt = memw(sp+#(BASE+48))          //
-       } {
-           out_align = memw(sp+#(BASE+32))            //
+           out_align = memw(sp+#(BASE+32))              //
            filt_depth_width = sub(filt_depth_width, filt_width)//-1 to allow for depth 16 pass
            weight_batch_size = asl(weight_batch_size,#10) // 32*filt_width*filt_height*in_depth
            filt_width_in = add(filt_width, #-1)       //account for peeling 1 iteration off
        } {
-           recip_sh_vec = vsplat(recip_shamt)         //
-           r6 -= lsr(out_align,#2)                    //
-       } {
-           r6 = and(r6, #0x1f)                        // 
-           r7 = #-1                                   //
-       } {
-           r7 = asl(r7, r6)                           //
-       } {
-           memw(sp+#64) = r7                          //
-           skip_col = memw(sp+#(BASE+36))             //
-           r6 = #0x1f
-       } {
-           r6 &= asl(skip_col, #3)                    //
-           r7 = #-1                                   //
-       } {
-           r7 = lsr(r7, r6)                           //
-       } {
-           memw(sp+#68) = r7                          //
-       } {
            memw(sp+#60) = weight_batch_size           //
            filt_width = asl(filt_width, #10)          //convert for use in address counter sequence
            loop1(.L_filt_h, filt_height)              //for(filt_y=0;filt_y<height*in_depth/32;filt_y+=1)
-           AEQ0 = cmp.eq(out_align, #0)                 //if no alignment enable store
+           p0 = cmp.eq(out_align, #0)                 //if no alignment enable store
        } {
            next_outputs = add(next_outputs, #-4)      //1,2
            c8_c96 = combine(#8, #96)                  //
            filt_width = add(filt_width, #-128)        //1 cycle off from consumer to generator 
+//         filt_width512 = add(filt_width, #-512)     //account for 512bytes per loop of w 
            filt_width512 = add(filt_width, #-512-512) //account for 512bytes per loop of w + precorrect for loop correction
        } {
            ptr_filtsum = memw(sp+#(BASE+20))            //ptr pre computed weight sum
+           nslice = memw(sp+#(BASE+44))                 //
            filt_depth_width +=add(filt_depth_width, #-1) //as 16 per loop so need 2x; peel 1 iteration off
            next_outputs = asl(next_outputs, #5)       //(flt_hight*in_width*in_depth/32-4*stride)*32
+       } {
+           memw(sp+#64) = nslice                      //
+           mine = gmin                                //
+           maxe = gmax                                //
        }
 /*=============================================================================*/
         .balign 64
@@ -228,8 +217,7 @@ gvconv2dbbbs1_d16_v66_asm:
        {   
            ptr_xi = memw(sp+#48)                      //
            filt_cnt = add(filt_width512, ptr_w)       //add(filt_width, #-1) //ptr_w)
-           STP = !cmp.eq(r0, r0)                      //force p2 off
-           lmask = memw(sp+#64)                       //left mask
+           p2 = !cmp.eq(r0, r0)                       //force p2 off
        } {
            col_count = out_width                      //setup first width loop
            memw(sp+#52) = ptr_w                       //save wi for someone else
@@ -250,6 +238,7 @@ gvconv2dbbbs1_d16_v66_asm:
         .balign 64
 .L_height:
 .L_width:
+//         filt_cnt = add(filt_cnt, #-512)             //precorrect for loop correction
 .L_filt_h:
        {   w0.tmp     = vmem(ptr_w++#1)                //[0, 0]load weights
            s3s2s1s0.w += vrmpyz(w0.b, ptr_x1.ub++)     //[0, 0]perform mac across 4 streams with saem weights
@@ -335,99 +324,70 @@ gvconv2dbbbs1_d16_v66_asm:
            ptr_x1 = add(ptr_x1_, #4 )                  //[0, 3]reset ptr for next row of filter taps
        }:endloop0:endloop1                             //
 /*=============================================================================*/
-           s0.w = vasl(s0.w, recip_sh_vec.w)           //
-           s1.w = vasl(s1.w, recip_sh_vec.w)           //
-           s2.w = vasl(s2.w, recip_sh_vec.w)           //
-           s3.w = vasl(s3.w, recip_sh_vec.w)           //
-       {   
-           x1.h = vpack(y1.w, y0.w):sat                //[E1, 0]packe low 16bits together
+       {   maxe.w = vmax(maxe.w, s0.w)                 //[E0, 0]see if s0 is max
+           mine.w = vmin(mine.w, s0.w)                 //[E0, 0]see if s0 is min
+           x1.h = vpacke(y1.w, y0.w)                   //[E1, 0]packe low 16bits together
            loop1(.L_filt_h, filt_height)               //for(filt_y=0;filt_y<height*in_depth/32;filt_y++)
-       } {
-           PRED3_0 = lmask
-           lmask = #-1                                 //
        } {
            ptr_x0 = sub(ptr_x0, next_outputs)          //[E0, 1]reset data ptr to next 4
            y0.w = vmpye(s0.w, recipvec.uh)             //[E0, 1](s2 * recip + rnd)>>31
-           x3.h = vpack(y3.w, y2.w):sat                //[E1, 1]pack low 16bits together
+           x3.h = vpacke(y3.w, y2.w)                   //[E1, 1]pack low 16bits together
            col_count = add(col_count, #-1)             //
        } {
+           maxe.w = vmax(maxe.w, s3.w)                 //[E0, 2]
+           mine.w = vmin(mine.w, s3.w)                 //[E0, 2]see if z0 is max
            y0.w+= vmpyo(s0.w, recipvec.h):RSS          //<<1:rnd:sat:shift //[E0, 2]
            ptr_w = memw(sp+#52)                        ////[E0, 5]ptr_w=ptr_wi init filter pointer
        } {
-           if(!p0) y0 = maxe                           //
-       } {
-           maxe.w = vmax(maxe.w, y0.w)                 //[E0, 0]see if s0 is max
-           if(!p0) y0 = mine                           //
-       } {
-           mine.w = vmin(mine.w, y0.w)                 //[E0, 0]see if s0 is min
-       } {
            y1.w  = vmpye(s1.w, recipvec.uh)            //[E0, 3](s2 * recip + rnd)>>31
+           maxe.w = vmax(maxe.w, s1.w)                 //[E0, 3]
            x3210.ub = vpack(x3.h, x1.h):sat            //[E1, 3]#sat8  <0, >255  and pack low 8bits
            ptr_x1 = add(ptr_x0, #100)  //4                   //setup initial pointer
        } {
            y1.w+= vmpyo(s1.w, recipvec.h):RSS          //<<1:rnd:sat:shift //[E0, 4](s2 * recip + rnd)>>31
-       } {
-           if(!p1) y1 = maxe                           //
-       } {
-           maxe.w = vmax(maxe.w, y1.w)                 //[E0, 3]
-           if(!p1) y1 = mine                           //
-       } {
-           mine.w = vmin(mine.w, y1.w)                 //[E0, 4]see if z0 is max
-           p1 = STP                                    //
+           mine.w = vmin(mine.w, s1.w)                 //[E0, 4]see if z0 is max
+           maxe.w = vmax(maxe.w, s2.w)                 //[E0, 4]
+           p3 = cmp.eq(col_count, #0)                  //
        } {
            y2.w  = vmpye(s2.w, recipvec.uh)            //[E0, 5](s2 * recip + rnd)>>31
-           s1s0 = vcombine(wsum, wsum)                 //[E0, 5]initialize accumulator 0
+           mine.w = vmin(mine.w, s2.w)                 //[E0, 5]see if z0 is max
+           s0 = wsum                                   //[E0, 5]initialize accumulator 0
            filt_cnt = add(ptr_w,filt_width512)         //using the ptr_w as a counter
        } {
            y2.w+= vmpyo(s2.w, recipvec.h):RSS          //<<1:rnd:sat:shift //[E0, 6](s2 * recip + rnd)>>31
+           s1 = wsum                                   //[E0, 6]initialize accumulator 1
            xout = vlalign(x3210,x3_prev,out_align)     //[E1, 6]
-           if(p1)vmem(ptr_z++#1):nt = xout.new         //[E1, 6]store 2nd 32bytes
-       } {
-           if(!p2) y2 = maxe                           //
-           p0 = cmp.eq(col_count, #1)                  //
-       } {
-           maxe.w = vmax(maxe.w, y2.w)                 //[E0, 4]
-           if(!p2) y2 = mine                           //
-       } {
-           mine.w = vmin(mine.w, y2.w)                 //[E0, 5]see if z0 is max
-           p1 = cmp.eq(col_count, #0)                  //
-           if(p0) lmask = memw(sp+#68)                 //right mask
+           if(p2)vmem(ptr_z++#1):nt = xout.new         //[E1, 6]store 2nd 32bytes
        } {
            y3.w  = vmpye(s3.w, recipvec.uh)            //[E0, 7]#(s2 * recip + rnd)>>31
            x3_prev = x3210                             //[E1, 7]save data for next output align
-           STP = AEQ0                                  //[E1, 7]update predicate piplione
-           AEQ0 = cmp.eq(r0, r0)                       //[E1, 7]set to true
+           p2 = p0                                     //[E1, 7]update predicate piplione
+           p0 = cmp.eq(r0, r0)                         //[E1, 7]set to true
        } {
            y3.w+= vmpyo(s3.w, recipvec.h):RSS          //<<1:rnd:sat:shift //[E0,8](s2 * recip + rnd)>>31
            s3s2 = vcombine(wsum, wsum)                 //[E0, 8]initialize accumulator 2,3
            z = vmem(ptr_x0+#0)                         //pre load 0-127 for next row of filter
-       } {
-           if(!p3) y3 = maxe                           //
-       } {
-           maxe.w = vmax(maxe.w, y3.w)                 //[E0, 2]
-           if(!p3) y3 = mine                           //
-       } {
-           mine.w = vmin(mine.w, y3.w)                 //[E0, 2]see if z0 is max
-           if(!p1) jump .L_width                       //
+           if(!p3) jump .L_width                       //
        }//cols per line kernel loop width
 /*=============================================================================*/
-       {   x1.h = vpack(y1.w, y0.w):sat                //[E1, 0]#>>16
+       {   x1.h = vpacke(y1.w, y0.w)                   //[E1, 0]#>>16  
            out_height = add(out_height, #-1)           //Prolog width
-           STP = !cmp.eq(r0, r0)                       //[Pheight]force p2 off
+           p2 = !cmp.eq(r0, r0)                        //[Pheight]force p2 off
        } {
-           x3.h = vpack(y3.w, y2.w):sat                //[E1, 1]#sat8  <0, >255
+           x3.h = vpacke(y3.w, y2.w)                   //[E1, 1]#sat8  <0, >255 
            p1 = !cmp.eq(out_height, #0)                //EE
-           loop1(.L_filt_h, filt_height)               //for(filt_y=0;filt_y<height*in_depth/32;filt_y+=1)
        } {
            ptr_x0 = ptr_xi                             //Prolog width ptr_xi 
-           AEQ0 = cmp.eq(out_align, #0)                //[Pheight]if no alignment enable store
+           p0 = cmp.eq(out_align, #0)                  //[Pheight]if no alignment enable store
            col_count = out_width                       //outer loop set up width
+           loop1(.L_filt_h, filt_height)               //for(filt_y=0;filt_y<height*in_depth/32;filt_y+=1)
        } {
            ptr_xi = add(ptr_xi,in_width_stride_h_depth)//[Pheight]ptr_x+=in_width*stride_h*in_depth)
            x3210.ub = vpack(x3.h, x1.h):sat            //[E1, 3]#sat8  <0, >255 
            skip_col = memw(sp+#(BASE+36))              //
+           if(!p1) wscale = vmem(equalize++#1)         //load equalize on last line
        } {
-           p3 = tstbit(skip_col, #2)                  //[E1, 6] == 4
+           p3 = !cmp.eq(skip_col, #0)                  //[E1, 6] != 0
            ptr_zi = add(ptr_zi, out_width_stride_depth)//EEnext out line for this depth segment
            ptr_x1 = add(ptr_x0, #100)                  //[Pheight]setup initial pointer
            if (p1) z = vmem(ptr_x0+#0)                 //[Pheight]load 0-127
@@ -441,34 +401,38 @@ gvconv2dbbbs1_d16_v66_asm:
            if (p1) jump:t .L_height                    //EE
        }//end lines per block//last cols per line
 /*=============================================================================*/
-       {   
-           nslice = memw(sp+#(BASE+44))                 //
+       {   maxo.w = vmpye(maxe.w, wscale.uh)           //[1, 0]equalize max's
+           nslice = memw(sp+#64)                       //update weight chunks
            weight_batch_size_ptr_zi = memd(sp+#56)     //
        } {
+           mino.w = vmpye(mine.w, wscale.uh)           //[1, 1]equalize min's
            nslice = add(nslice,#-1)                    //
            ptr_w = add(ptr_w,weight_batch_size)        //
        } {
+           maxo.w+= vmpyo(maxe.w, wscale.h):RSS        //[1, 2]equalize max's
            out_next_d32 = memw(sp+#(BASE+40))          //
+           maxe = vmem(ptr_max+#0)                    //initilize with current max and min
            p1 = cmp.gt(nslice,#0)                      //
-           recip_level = memw(sp+#(BASE+28))           //
        } {
            ptr_zi = add(ptr_zi,out_next_d32)           //
+           gmax.w = vmax(gmax.w, maxo.w)               //get global max
+           mino.w+= vmpyo(mine.w,wscale.h):RSS         //[1, 3]equalize min's
            if(p1) recipvec = vmem(recip_level++#1)     //
        } {
-           memw(sp+#(BASE+28)) = recip_level           //
-           memw(sp+#(BASE+44)) = nslice                //update nslice (weight chunks)
+           gmin.w = vmin(gmin.w, mino.w)               //get global min
+           memw(sp+#64) = nslice                       //update nslice (weight chunks)
+           mine = vmem(ptr_max+#1)                     //initilize with current max and min
            if p1 jump .L_depth                         //
        }
 /*=============================================================================*/
-           ptr_max = memw(sp+#(BASE+24))              //
        {   r17:16 = memd(sp+#0)                        //restore r16,r17 from stack
            r19:18 = memd(sp+#8)                        //restore r18,r19
        } {
-           vmem(ptr_max+#0) = maxe                     //[E, 0]32max
+           vmem(ptr_max+#0) = gmax                     //[E, 0]32max
            r23:22 = memd(sp+#24)                       //restore r22,r23
        } {
            r25:24 = memd(sp+#32)                       //restore r24,r25
-           vmem(ptr_max+#1) = mine                     //[E, 0]32min
+           vmem(ptr_max+#1) = gmin                     //[E, 0]32min
        } {
            r21:20 = memd(sp+#16)                       //restore r20,r21
            r27:26 = memd(sp+#40)                       //restore r26,r27
@@ -479,6 +443,3 @@ gvconv2dbbbs1_d16_v66_asm:
 /*=============================================================================*/
       .size gvconv2dbbbs1_d16_v66_asm, .L_end-gvconv2dbbbs1_d16_v66_asm
 /*=============================================================================*/
-/*
- * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
- */

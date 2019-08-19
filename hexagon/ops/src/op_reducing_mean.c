@@ -43,7 +43,6 @@
 #include <quantize.h>
 #include <nn_reduce_utils.h>
 #include "nn_axis.h"
-#include "hvx_inlines.h"
 
 #define NUM_DIMS 4
 
@@ -70,13 +69,15 @@ struct t32data
 struct tadjdata
 {
     int32_t *in_data;
+    int32_t *out_data_tmp;
     uint8_t *out_data;
     int32_t out_data_size;
     int32_t divisor;
     float in_min;
     float in_max;
-    float out_min;
-    float out_max;
+    float * out_min;
+    float * out_max;
+    int32_t adj;
     nn_sem_t donesem;
 };
 
@@ -114,103 +115,61 @@ static void reduce_sum_single_axis_hvx_32_wrapper(struct nn_graph *nn, void *vtd
     nn_sem_post(&td->donesem);
 }
 
-/*Output scaling for mean is done as follows:
-1) Inital sum is computed, result is 32 bits
-2) This sum is has an addtional num elements_reduced * in_offset term that we need to subtract to obtain a zero based result
-3) Multiply by a quantized muliplier with 31 fractional bits (input scale / output scale / num elements)
-4) Add output offset
-5) Pack to 8 bits
-*/
-
-static void set_output_scaling_for_mean(struct nn_graph *nn, void *vtd)
+static void adjust_minmax_for_mean(struct nn_graph *nn, void *vtd)
 {
     struct tadjdata *td = vtd;
     int32_t *in_data = td->in_data;
     uint8_t *out_data = td->out_data;
     int32_t out_data_size = td->out_data_size;
+    int32_t *out_data_tmp = td->out_data_tmp;
     int32_t divisor = td->divisor;
+    int32_t adj = td->adj;
     float in_min = td->in_min;
-    float in_max = td->in_max;
-    float out_min = td->out_min;
-    float out_max = td->out_max;
-
-    float in_stepsize = 0.0f;
-    float out_stepsize = 0.0f;
-    int in_offset = get_qu8_level_size_zero( in_min, in_max, &in_stepsize);
-    int out_offset = get_qu8_level_size_zero( out_min, out_max, &out_stepsize);
-    int loop_count = out_data_size / sizeof(HVX_Vector); //Number of full vecs to process
-    int leftovers = out_data_size - loop_count * sizeof(HVX_Vector);
-    int k = ((leftovers + 31) & -31) >> 5;
-    float realMultiplier = fminf(0.99999f, (in_stepsize / (out_stepsize * divisor)));
-    int32_t outputMultiplier = 0;
-    int32_t outputShift = 0;
-    if (QuantizeMultiplierSmallerThanOne(realMultiplier, &outputMultiplier, &outputShift) == -1)
+	float in_max = td->in_max;
+    float * out_min = td->out_min;
+	float * out_max = td->out_max;
+	float stepsize;
+	float recip_stepsize;
+	int32_t in_max_val;
+	int32_t in_min_val;
+	int32_t inval;
+    float level_size = (in_max - in_min) / 255;
+    float max = 2147483648.0f/*0x1.0p31f*/ * level_size;
+    float min = -max;
+	float in_level_size = (max - min) * (1.0f/ 4294967296.0f)/*0x1.0p-32f*/;
+    HVX_Vector adjv = Q6_V_vsplat_R(adj);
+    for (int i = 0; i < out_data_size; i += sizeof(HVX_Vector) / sizeof(int32_t))
     {
-        errlog(nn, "Unable to determine quantized mulipiler for output");
+        HVX_Vector outv = *(HVX_Vector *) &in_data[i];
+        vmemu(&out_data_tmp[i]) = Q6_Vw_vsub_VwVw_sat(outv, adjv);
     }
+	/* Requantize with new range */
+	const uint32_t  log2VLEN = 5;
+	uint32_t elements_vector_iterations = out_data_size >> log2VLEN;
+	inval = 0;
+	l2fetch(out_data_tmp, 128, 128, elements_vector_iterations + 1);
+	union { HVX_Vector as_v; int32_t as_i32[32];} minmax_union;
+	find_min_max_int32( out_data_tmp, out_data_size, & minmax_union.as_i32[0] );
+	Q6_dcfetch_A(&minmax_union);
 
-    HVX_Vector adjv = Q6_V_vsplat_R(in_offset * divisor);
-    HVX_Vector out_offset_vec = Q6_V_vsplat_R(out_offset);
-    HVX_Vector *out_data_vec = (HVX_Vector *)(out_data);
-    for (int i = 0; i < loop_count; i++)
-    {
-        HVX_Vector vin = *(HVX_Vector *)in_data;
-        in_data += 32;
-        HVX_Vector vin1 = *(HVX_Vector *)in_data;
-        in_data += 32;
-        HVX_Vector vin2 = *(HVX_Vector *)in_data;
-        in_data += 32;
-        HVX_Vector vin3 = *(HVX_Vector *)in_data;
-        in_data += 32;
-        HVX_Vector s1 = Q6_Vw_vsub_VwVw_sat(vin, adjv);
-        HVX_Vector s2 = Q6_Vw_vsub_VwVw_sat(vin1, adjv);
-        HVX_Vector s3 = Q6_Vw_vsub_VwVw_sat(vin2, adjv);
-        HVX_Vector s4 = Q6_Vw_vsub_VwVw_sat(vin3, adjv);
+	in_max_val = max_i32(~minmax_union.as_i32[1], 0);
+	in_min_val = min_i32(minmax_union.as_i32[0], 0);
 
-        s1 = Q6_Vw_vadd_VwVw_sat(MultiplyByQuantizedMultiplier(s1, outputMultiplier, -outputShift), out_offset_vec);
-        s2 = Q6_Vw_vadd_VwVw_sat(MultiplyByQuantizedMultiplier(s2, outputMultiplier, -outputShift), out_offset_vec);
-        s3 = Q6_Vw_vadd_VwVw_sat(MultiplyByQuantizedMultiplier(s3, outputMultiplier, -outputShift), out_offset_vec);
-        s4 = Q6_Vw_vadd_VwVw_sat(MultiplyByQuantizedMultiplier(s4, outputMultiplier, -outputShift), out_offset_vec);
-        s4 = Q6_Vh_vpacke_VwVw(s4, s3); // take upper 16 bits.
-        s1 = Q6_Vh_vpacke_VwVw(s2, s1);
-        *out_data_vec++ = Q6_Vub_vpack_VhVh_sat(s4, s1); // sat to u8
-    }
-    //Process any leftovers
-    {
-        HVX_Vector s1 = Q6_V_vzero();
-        HVX_Vector s2 = Q6_V_vzero();
-        HVX_Vector s3 = Q6_V_vzero();
-        HVX_Vector s4 = Q6_V_vzero();
+	/* Make sure min val <= 0.0 in floaty land */
+	*out_min = in_level_size * (float)in_min_val;
+	*out_max = in_level_size * (float)in_max_val;
 
-        HVX_Vector vin = *(HVX_Vector *)in_data;
-        in_data += 32;
-        s1 = Q6_Vw_vsub_VwVw_sat(vin, adjv);
-        s1 = Q6_Vw_vadd_VwVw_sat(MultiplyByQuantizedMultiplier(s1, outputMultiplier, -outputShift), out_offset_vec);
-        if (k != 1)
-        {
-            HVX_Vector vin1 = *(HVX_Vector *)in_data;
-            in_data += 32;
-            s2 = Q6_Vw_vsub_VwVw_sat(vin1, adjv);
-            s2 = Q6_Vw_vadd_VwVw_sat(MultiplyByQuantizedMultiplier(s2, outputMultiplier, -outputShift), out_offset_vec);
-            if (k != 2)
-            {
-                HVX_Vector vin2 = *(HVX_Vector *)in_data;
-                in_data += 32;
-                s3 = Q6_Vw_vsub_VwVw_sat(vin2, adjv);
-                s3 = Q6_Vw_vadd_VwVw_sat(MultiplyByQuantizedMultiplier(s3, outputMultiplier, -outputShift), out_offset_vec);
-                if (k != 3)
-                {
-                    HVX_Vector vin3 = *(HVX_Vector *)in_data;
-                    s4 = Q6_Vw_vsub_VwVw_sat(vin3, adjv);
-                    s4 = Q6_Vw_vadd_VwVw_sat(MultiplyByQuantizedMultiplier(s4, outputMultiplier, -outputShift), out_offset_vec);
-                }
-            }
-        }
-        s4 = Q6_Vh_vpacke_VwVw(s4, s3); // take upper 16 bits.
-        s1 = Q6_Vh_vpacke_VwVw(s2, s1);
-        q6op_vstu_variable_ARV(out_data_vec, leftovers, Q6_Vub_vpack_VhVh_sat(s4, s1)); // sat to u8
-    }
+	quantize_adjust_range(
+		out_min,out_max,
+		&stepsize,&recip_stepsize,
+		*out_min,*out_max);
 
+	/* Requantize with new range */
+	nn_requantize_i32_to_qu8_hvx( out_data, out_data_tmp, out_data_size, in_level_size, *out_min, *out_max);
+
+    /* To get the mean, just divide out min/max by the number of elements that were reduced */
+    *out_max /= divisor;
+    *out_min /= divisor;
     nn_sem_post(&td->donesem);
 }
 
@@ -236,15 +195,14 @@ static int reducing_mean_execute(struct nn_node *self, struct nn_graph *nn)
     int32_t modified_shape_final[NUM_DIMS] = {in_batches, in_height, in_width, in_depth};
     int32_t axes[NUM_DIMS];
 
+
     int32_t modified_data_size = 1;
     if (axes_size > NUM_DIMS)
         return errlog(nn, "Number of elements in axes tensor is %d, support a maximum of 4", axes_size);
-    for (int i = 0; i < axes_size; i++)
-    {
-        axes[i] = axes_orig[i];
+    for (int i = 0; i < axes_size; i++){
+    	axes[i] = axes_orig[i];
     }
-    if (handle_negative_axes(nn, axes, axes_size) != 0)
-        return -1;
+    if( handle_negative_axes(nn, axes, axes_size)!=0) return -1;
 
     //Handle negative axis also checks that the axes are sane, so we don't need to check them here
     for (int i = 0; i < axes_size; i++)
@@ -344,7 +302,9 @@ static int reducing_mean_execute(struct nn_node *self, struct nn_graph *nn)
             modified_shape[axis] = 1;
         }
     }
-    
+
+    // carefully handle min and max to handle going from quint8 with asymetric min and max to
+    // qint32 with symetric min and max
     int32_t elements = 1;
 
     for (int i = 0; i < axes_size; i++)
@@ -356,26 +316,25 @@ static int reducing_mean_execute(struct nn_node *self, struct nn_graph *nn)
     adjust_minmax_for_zero(&minval, &maxval);
     float out_min = minval;
     float out_max = maxval;
-    if (self->n_inputs >= 5)
-    {
-        out_min = tensor_get_float(self->inputs[4], 0);
-    }
-    if (self->n_inputs == 6)
-    {
-        out_max = tensor_get_float(self->inputs[5], 0);
-    }
+    float range = fmaxf(0.0001f,maxval-minval);
+    float stepsize = flt_div_255(range);
+    uint8_t qzero = saturate_u8(roundf_i32(-minval/stepsize));
+    int32_t adj = elements * qzero;
     struct tadjdata td = {
         .in_data = out_data,
         .out_data = out_tensor->data,
+        .out_data_tmp = out_data + out_data_size,
         .out_data_size = out_data_size,
         .divisor = elements,
+        .adj = adj,
         .in_min = minval,
         .in_max = maxval,
-        .out_min = out_min,
-        .out_max = out_max};
+        .out_min = &out_min,
+        .out_max = &out_max
+    };
 
     nn_sem_init(&td.donesem, 0);
-    nn_os_work_for_vector(nn, set_output_scaling_for_mean, &td);
+    nn_os_work_for_vector(nn, adjust_minmax_for_mean, &td);
     nn_sem_wait(&td.donesem);
 
     tensor_set_single_float(out_min_tensor, out_min);
@@ -383,11 +342,22 @@ static int reducing_mean_execute(struct nn_node *self, struct nn_graph *nn)
     return 0;
 }
 
+static int reducing_mean_check(struct nn_node *self, struct nn_graph *nn)
+{
+    int k;
+    logmsg(nn, 2, "reducing mean node %p", self);
+    k = node_check_inputs_outputs_n(self, nn, "reducing mean", 4, 3);
+    if (k != 0)
+        return k;
+    logmsg(nn, 2, "reducing mean %p check OK", self);
+    return 0;
+}
+
 struct nn_node_ops nn_ops_for_QuantizedMean_8 = {
     .execute = reducing_mean_execute,
-    .check = NULL,
+    .check = reducing_mean_check,
     .ctor = node_alloc_common,
     .dtor = node_free_common,
-    .n_inputs = NN_IOCOUNT_RANGE(4, 6),
-    .n_outputs = NN_IOCOUNT(3),
+    .n_inputs = NN_IOCOUNT(4),
+	.n_outputs = NN_IOCOUNT(3),
 };

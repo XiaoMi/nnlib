@@ -511,15 +511,10 @@ printf("left_padding = %d; right = %d; infeas_w = %d\n",ibp->wpad_left, ibp->wpa
 	}else{
 		// else
 		// allocate scratch for the integral buffers
-		
 		integ_buf_bytes = ibp->ibuf_total_bytes;
-		if (nn_scratch_grow(nn, integ_buf_bytes*n_threads)){
-			return errlog(nn, "scratch too small");
-		}
-		nn_scratch_reset(nn);
 		integ_buf = nn_scratch_alloc(nn, integ_buf_bytes*n_threads);
 		if( integ_buf == NULL){
-			return errlog(nn, "could not alloc %d bytes of scratch %d",integ_buf_bytes*n_threads,nn->scratch_size);
+			return errlog(nn, "could not alloc %d bytes of scratch",integ_buf_bytes*n_threads );
 		}
 	}
 	// fill in the 'thrinfo' and launch threads

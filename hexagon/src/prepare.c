@@ -52,7 +52,6 @@
 #include "transpose_conv_procweights.h"
 #include "nn_prepare.h"
 #include "expand_nodes.h"
-#include "nn_gentranspose.h"
 
 // int hexagon_nn_prepare(nn_id id);
 
@@ -372,7 +371,7 @@ static inline int shape_X11X( struct shape const * shp){
 }
 //////////////////////////////////////////////////////
 static struct nn_node * __attribute__((unused))create_convert_to_d32(struct nn_graph *nn, int src_id, int output_idx);
-static struct nn_node *create_convert_from_d32(struct nn_graph *nn, int src_id, int output_idx, struct shape const * outsize, int elbytes);
+static struct nn_node *create_convert_from_d32(struct nn_graph *nn, int src_id, int output_idx, struct shape outsize);
 static int change_refs(struct nn_graph *nn, int old_id, int old_out_idx, int new_id, int new_out_idx);
 
 //
@@ -489,112 +488,17 @@ static int run_op_setup(struct nn_graph *nn)
 #endif
 
 // 'check' all of the ops in the graph.
-static int __attribute__((unused))run_op_check_serial(struct nn_graph *nn)
+static int run_op_check(struct nn_graph *nn)
 {
 	struct nn_node *node;
-	int err=0;
-	int vv = nn_os_vector_acquire();
+	int err;
 	for (node = nn->head; node != NULL; node = node->next) {
-		if ( (node->ops->check!=NULL)&&
-				((err = node->ops->check(node,nn)) != 0))
-			break;
+		if ( (node->ops->check!=NULL) &&
+				(err = node->ops->check(node,nn)) != 0) return err;
 	}
-	nn_os_vector_release(vv);
-	return err;//0 if all check functions returned 0
-}
-struct opcheck_manager
-{
-	volatile struct nn_node *current_node;
-	volatile int error_status;
-	nn_sem_t * donesem;
-	int pending;
-};
-extern int Num_Vector_Threads;
-
-static void opcheck_wait(struct opcheck_manager* manager){
-	while( manager->pending > 0 ){
-		nn_sem_wait(manager->donesem);
-		--manager->pending;
-	}
-}
-
-static void opcheck_worker_func(struct nn_graph *nn,void* vman){
-	struct opcheck_manager * manager = (struct opcheck_manager *) vman;
-	volatile struct nn_node* my_node;
-	volatile struct nn_node* next_node;
-	volatile struct nn_node* my_node_copy;
-	struct nn_node* my_node_nv;//not volatile
-	volatile int previous_err;
-	int current_err=0;
-	do {
-	//try to find node to process,
-	//but make sure no other thread is processing the node
-		my_node = manager->current_node;
-		previous_err= manager->error_status;
-		if ( my_node == NULL || previous_err !=0 ){ //stop processing
-			goto quit;
-		}
-		next_node = my_node->next;
-		my_node_copy = __sync_val_compare_and_swap( &manager->current_node,
-										my_node, next_node );
-	}while(my_node!=my_node_copy);//retry if another node is another thread is processing the node
-
-	//do the op check
-	my_node_nv=(struct nn_node*)my_node;
-	if ((my_node_nv->ops->check != NULL) &&
-			( (current_err = my_node_nv->ops->check(my_node_nv, nn)) != 0 )) {
-		__sync_val_compare_and_swap( &manager->error_status, 0, current_err );
-	}
-	quit:
-	nn_sem_post( manager->donesem );
-}
-
-static int
-opcheck_add_to_q(struct nn_graph *nn,struct opcheck_manager* manager){
-	volatile struct nn_node* old_node = manager->current_node;
-	volatile int previous_err = manager->error_status;
-	if (old_node == NULL || previous_err !=0 ){
-			return 1; /*stop processing*/
-	}
-	// if too many pending, wait.
-	// makes sure not too many threads accessing the vector context on v60
-	while( manager->pending >= Num_Vector_Threads ){
-		nn_sem_wait(manager->donesem );
-		manager->pending--;
-	}
-	manager->pending++;
-	nn_os_work_for_vector( nn, opcheck_worker_func, manager );
 	return 0;
 }
 
-//check parallely
-static int __attribute__((unused)) run_op_check_queue(struct nn_graph *nn){
-	nn_sem_t sem;
-	nn_sem_init(&sem,0);
-	nn_os_vector_workers_acquire(nn);
-	struct opcheck_manager manager = {
-		.current_node = nn->head,
-		.donesem = &sem,
-		.error_status = 0,
-		.pending = 0
-	};
-	while(opcheck_add_to_q(nn,&manager) == 0){
-		/*iterate*/
-	}
-	//wait for launched work to finish
-	opcheck_wait(&manager);
-	nn_os_vector_workers_release(nn);
-	return manager.error_status;
-}
-
-// 'check' all of the ops in the graph.
-static int run_op_check(struct nn_graph *nn){
-	if(Num_Vector_Threads<2){
-		return run_op_check_serial(nn);
-	}else{
-		return run_op_check_queue(nn);
-	}
-}
 // return 0 if all outputs of 'producer' go only to 'consumer'; otherwise -1
 
 static inline int check_all_outputs(
@@ -804,9 +708,7 @@ static void
 requantize_op_minmax_inputs( struct nn_graph *nn, struct nn_node *qdown1_node,
 		struct input minmax_in[2])	// set these
 {
-	int node_type = qdown1_node->node_type;
-
-	if (node_type == OP_Requantize_32to8 || node_type == OP_Requantize_32tou16) {		// copy from  qdown1_node inputs
+	if (qdown1_node->node_type == OP_Requantize_32to8) {		// copy from  qdown1_node inputs
 		minmax_in[0] = qdown1_node->input_refs[3];
 		minmax_in[1] = qdown1_node->input_refs[4];
 	}else{
@@ -864,9 +766,7 @@ struct supernode_replacement_desc {
 	int new_node_type_bias32;	// -1 if no 'bias32' support
 	int (*extra_checks)(struct nn_graph *, struct nn_node *);	// func to call for extra checks
 	int old_n_inputs:8;			// # of inputs on the 'old' operation (usually 7; 6 if no 'stride')
-	unsigned is_u16:1;		// for u16 supernode. (with 16 or 32-bit bias)
-	unsigned skip_if_no_bias:1;		// skip this conversion if the add-bias is missing.
-	unsigned allow_channelscale:1;	// allow 'QuantizedChannelScale_32xf' immediately after.
+	int skip_if_no_bias:1;		// skip this conversion if the add-bias is missing.
 };
 
 //
@@ -895,14 +795,13 @@ static int try_make_supernode_flavored(struct nn_graph *nn, struct nn_node **con
 		struct supernode_replacement_desc const * descp )
 {
 	struct nn_node *conv_node = *conv_node_p;
-	struct nn_node *channel_scale_node = NULL;
 	struct nn_node *qdown0_node;
 	struct nn_node *biasadd_node;
 	struct nn_node *qdown1_node = NULL;
 	struct nn_node *relu_node = NULL;
 	struct nn_node *supernode;
 	struct nn_node *lastop;
-	const int max_num_inputs = 13;	///12, +1 to all allow for ChannelScale
+	const int max_num_inputs = 12;
 	struct input new_inputs[max_num_inputs];
 	struct input minmax_inputs[2];
 	struct output new_outputs[3];
@@ -919,32 +818,10 @@ static int try_make_supernode_flavored(struct nn_graph *nn, struct nn_node **con
 	// the bias32  case
 	int newop_bias32 = descp->new_node_type_bias32;
 
-	static const int requant8_ops[3] = { OP_QuantizeDownAndShrinkRange_32to8, OP_Requantize_32to8 , OP_QuantizedBiasAdd_32p32to32};
-	static const int requant16_ops[3] = { OP_QuantizeDownAndShrinkRange_32to16, OP_Requantize_32tou16 , OP_QuantizedBiasAdd_32p32to32};
+	static const int requant_ops[3] = { OP_QuantizeDownAndShrinkRange_32to8, OP_Requantize_32to8 , OP_QuantizedBiasAdd_32p32to32};
 	static const int relu_ops[3] = { OP_QuantizedRelu_8, OP_QuantizedReluX_8, OP_QuantizedClamp_8 };
 
-	int is_u16 = descp->is_u16;
-	int const * requant_ops = is_u16? requant16_ops : requant8_ops;
-
-	struct nn_node * upnode = conv_node;
-	// may allow a 'ChannelScale' here.
-	if(descp->allow_channelscale){	// first check looks for channelscale.
-		channel_scale_node = find_unique_consumer_mustbe( nn,upnode, OP_QuantizedChannelScale_32xf, 0 );
-		if (channel_scale_node != NULL){
-			upnode = channel_scale_node;
-			//.. check if properly connected
-			unsigned conv_nid = conv_node->node_id;
-			for( int i = 0; i < 3; i++){
-				struct input const *inp = &channel_scale_node->input_refs[i==0?0:(i+1)];	// 0,2,3
-				if( inp->src_id != conv_nid || inp->output_idx != i ) return 0;
-			}
-			if( find_node_must_be_Const_from_ref(nn, &channel_scale_node->input_refs[1]) ==NULL)
-				return 0;
-		}
-	}
-
-	qdown0_node = find_unique_consumer(nn, upnode, (newop_bias32>=0)?3: 2, requant_ops, 0);
-
+	qdown0_node = find_unique_consumer(nn, conv_node, (newop_bias32>=0)?3: 2, requant_ops, 0);
 	if( qdown0_node == NULL) return 0;
 	// is it a bias32 case?
 	if( qdown0_node->node_type == OP_QuantizedBiasAdd_32p32to32 ){	// looks like it is...
@@ -953,14 +830,13 @@ static int try_make_supernode_flavored(struct nn_graph *nn, struct nn_node **con
 		qdown0_node = NULL;				// this is unused
 		operation = newop_bias32;
 	}else{
-		if(is_u16) return 0;	// TODO: I don't know what the pattern should be here
 		// must be an 8-bit bias situation. Some cases don't support bias8; but we look at that
 		// later, and try to transform the bias input to 32 in these cases.
 		logmsg(nn,9,"found qdown0");
 		biasadd_node =  find_unique_consumer_mustbe( nn, qdown0_node,OP_QuantizedBiasAdd_8p8to32,0 );
 		if( biasadd_node == NULL){
 			// we can stop matching here, if the qdown0 node was OP_QuantizeDownAndShrinkRange_32to8.
-			if( qdown0_node->node_type != requant_ops[0]){
+			if( qdown0_node->node_type != OP_QuantizeDownAndShrinkRange_32to8){
 				return 0;
 			}
 		}
@@ -1013,7 +889,6 @@ static int try_make_supernode_flavored(struct nn_graph *nn, struct nn_node **con
 	// in the pattern, and set the flag.
 	int need_bias32_convert = 0;
 	if( operation < 0){
-		if( is_u16) return 0;	// @@
 		if( biasadd_node ==NULL || biasadd_node->node_type != OP_QuantizedBiasAdd_8p8to32 || newop_bias32 < 0 ){
 			return 0;
 		}
@@ -1040,7 +915,6 @@ static int try_make_supernode_flavored(struct nn_graph *nn, struct nn_node **con
 	}else{
 		// Need a zero bias input for supernode.
 		// depth of supernode output...
-		// TODO: 16 and 32-bit?
 		int depth  = conv_node->output_defs[0].max_sizes[3];
 		int k = get_zero_flat_qu8_const(nn, depth, &new_inputs[n_in]);	 // fills in 3 slots.
 		if( k!= 0){
@@ -1053,7 +927,6 @@ static int try_make_supernode_flavored(struct nn_graph *nn, struct nn_node **con
 	// if successful, it creates new bias and range nodes, and updates the three
 	// input refs in-place.
 	if( need_bias32_convert){
-		if( is_u16) return 0;	// TODO: need a 16-bit version
 		int res = convert_qu8_const_to_qint32( nn, & new_inputs[n_in],0, 16384 );
 		if(res !=0) return 0;		// didn't work...
 	}
@@ -1062,11 +935,6 @@ static int try_make_supernode_flavored(struct nn_graph *nn, struct nn_node **con
 	new_inputs[n_in+3] = minmax_inputs[0];
 	new_inputs[n_in+4] = minmax_inputs[1];
 	n_in += 5;
-
-	if( channel_scale_node != NULL){
-		// new extra input is the 'scale' tensor for ChannelScale
-		new_inputs[n_in++] = channel_scale_node->input_refs[1];
-	}
 
 	/* FIXME: struct vals / ordering. */
 	/* FIXME: Time to merge fastrpc branch back into master */
@@ -1082,7 +950,7 @@ static int try_make_supernode_flavored(struct nn_graph *nn, struct nn_node **con
 	//    0  and supernode != NULL, if it did.
 	//  Note that the function is allowed to scribble on new_inputs and new_outputs.
 	//.
-	if( channel_scale_node== NULL && (operation == OP_Supernode_8x8p8to8 || operation == OP_Supernode_8x8p32to8)){
+	if( operation == OP_Supernode_8x8p8to8 || operation == OP_Supernode_8x8p32to8){
 		int res = maybe_morph_supernode_to_superfc( nn,
 				lastop->node_id , operation, conv_node->padding, n_in, new_inputs , new_outputs , &supernode);
 		if( res != 0) return -1;
@@ -1093,7 +961,8 @@ static int try_make_supernode_flavored(struct nn_graph *nn, struct nn_node **con
 	/* Allocate new node */
 	if( supernode == NULL){
 
-		if ((supernode = create_node(nn,
+		if ((supernode = optab[operation]->ctor(
+			nn,
 			lastop->node_id,
 			operation,
 			conv_node->padding,
@@ -1104,11 +973,11 @@ static int try_make_supernode_flavored(struct nn_graph *nn, struct nn_node **con
 	}
 	/* Clean up the old not needed nodes */
 
-	/* note: channel_scale_node, qdown0_node, relu_node may be null */
+	/* note:qdown0_node, relu_node may be null */
 
 
 	if( replace_nodes(nn,conv_node_p,supernode,
-			conv_node, channel_scale_node, qdown0_node, biasadd_node, qdown1_node, relu_node) !=0 ){
+			conv_node, qdown0_node, biasadd_node, qdown1_node, relu_node) !=0 ){
 		return errlog(nn, "replace_nodes failed in make_supernode");
 	}
 
@@ -1277,7 +1146,6 @@ struct supernode_replacement_desc ReplaceConv_SuperNode = {
 	.new_node_type_bias32 = OP_Supernode_8x8p32to8,
 	.extra_checks = NULL,
 	.old_n_inputs = 7,
-	.allow_channelscale= 1
 };
 // we could replace depthwise directly to _d32
 // but that would defeat merging a 'mul-by-scalar' which follows it.
@@ -1297,7 +1165,7 @@ struct supernode_replacement_desc ReplaceMult_BatchNorm = {
 	.new_node_type_bias32 = OP_QuantizedBatchNorm_8x8p32to8,
 	.extra_checks = batchnorm_extrachecks,
 	.old_n_inputs = 6,		// no 'stride' so only 6
-	.skip_if_no_bias = 1	// don't convert this if no 'biasadd'
+	.skip_if_no_bias = 1	// don't convert this if no 'biasadd
 };
 
 // replace OP_QuantizedMatMul_8x8to32 and following biasadd, quantize; with OP_SuperFC_8x8p32to8
@@ -1310,21 +1178,6 @@ struct supernode_replacement_desc ReplaceMatMult_Supernode = {
 	.old_n_inputs = 6,		// no 'stride' so only 6
 	.skip_if_no_bias = 1	// don't convert this if no 'biasadd'.
 };
-
-// 16-bit supernode
-
-static const
-struct supernode_replacement_desc ReplaceConv16_SuperNode = {
-	.old_node_type = OP_QuantizedConv2d_16x16to32,
-	.new_node_type = OP_Supernode_16x16p16to16,
-	.new_node_type_bias32 = OP_Supernode_16x16p32to16,
-	.is_u16 = 1,
-	.extra_checks = NULL,
-	.old_n_inputs = 7,
-	.allow_channelscale= 1
-};
-
-
 
 static int try_make_qadd_supernode(struct nn_graph *nn, struct nn_node **qadd_node_p);
 
@@ -1380,9 +1233,6 @@ static int try_make_supernode(struct nn_graph *nn, struct nn_node **conv_node_p)
 		 sdescp = &ReplaceMatMult_Supernode;
 		 break;
 
-	 case OP_QuantizedConv2d_16x16to32:
-		 sdescp = &ReplaceConv16_SuperNode;
-
 	 default:
 		break;
 	}
@@ -1393,8 +1243,6 @@ static int try_make_supernode(struct nn_graph *nn, struct nn_node **conv_node_p)
 }
 
 
-/////////////////////////////////////
-
 static inline int graph_iterator(struct nn_graph *nn, int (*f)(struct nn_graph *nn, struct nn_node **trynode))
 {
 	struct nn_node **root;
@@ -1403,57 +1251,6 @@ static inline int graph_iterator(struct nn_graph *nn, int (*f)(struct nn_graph *
 	}
 	return 0;
 }
-static inline int graph_iterator_nochange(struct nn_graph *nn, int (*f)(struct nn_graph *nn, struct nn_node *trynode))
-{
-	struct nn_node *node;
-	for (node = nn->head;  node != NULL; node = node->next) {
-		if (f(nn,node) != 0) return errlog(nn,"function returned error");
-	}
-	return 0;
-}
-/////////////////////////////////////
-
-static int try_unimplemented_channelscale(struct nn_graph *nn, struct nn_node *nodep)
-{
-	if( nodep->n_inputs == 13 ){
-		switch(nodep->node_type){
-		  default:
-			break;
-		  // remove items from the list as support is added for them.
-		  //case OP_Supernode_8x8p8to8_d32:
-		  //case OP_Supernode_8x8p32to8_d32:
-		  case OP_DepthwiseSupernode_8x8p8to8_d32:
-		  case OP_DepthwiseSupernode_8x8p32to8_d32:
-		  case OP_InputSupernode_8x8p8to8_outd32:
-		  case OP_InputSupernode_8x8p32to8_outd32:
-
-		  case OP_Supernode_8x8p8to8:
-		  case OP_Supernode_8x8p32to8:
-		  case OP_Supernode_8x8p8to8_ref:
-		  case OP_Supernode_8x8p32to8_ref:
-		  case OP_DepthwiseSupernode_8x8p8to8:
-		  case OP_DepthwiseSupernode_8x8p32to8:
-		  case OP_Supernode3322_8x8p8to8:
-		  case OP_Supernode3322_8x8p32to8:
-			logmsg(nn,2,"node 0x%X: squashing ChannelScale into weights", (unsigned)nodep->node_type);
-			return handle_channelscaled_supernode( nn, nodep);
-		}
-	}
-	return 0;
-}
-
-//
-// this is a late pass which looks for Supernode types which don't actually support the 13th input
-// 'ChannelShuffle', but have ended up with one (due to some conversion path).
-// The 'channelshuffle' will be applied to the weights, and removed (we don't actually remove it,
-// we just change it to 'const float = 1.0' input)
-//
-static int remove_unimplemented_channelscale( struct nn_graph *nn)
-{
-	return graph_iterator_nochange(nn,try_unimplemented_channelscale);
-}
-
-
 
 static int make_autorequantize(struct nn_graph *nn)
 {
@@ -1602,18 +1399,6 @@ static int check_spaceop_ok_for_d32(struct nn_graph * nn, struct nn_node * srcno
 static int check_batchop_ok_for_d32(struct nn_graph * nn, struct nn_node * srcnode );
 static int get_blocksize_values( struct nn_graph *nn, struct input inref,  int * blocksize_h, int * blocksize_w);
 
-//
-// given a node that might be converted to d32, this
-// returns:
-//     new_op                 (if it's ok to convert to new_op
-//      D32REPL_16 | new_op   (if it's ok to convert to new_op as a 16-bit op)
-//      -1                    (if it should not be replaced).
-// The value "D32REPL_TWOIN" will be or'd in if the op has 2 inputs that need conversion.
-//
-#define D32REPL_16 (1<<24)
-#define D32REPL_TWOIN (1<<25)
-#define D32REPL_FLAGS  (D32REPL_16|D32REPL_TWOIN)
-
 static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode )
 {
 	int try_op = srcnode->node_type;
@@ -1641,14 +1426,8 @@ static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode
 			return (try_op==OP_Supernode_8x8p8to8)? OP_Supernode_8x8p8to8_d32: OP_Supernode_8x8p32to8_d32;
 	 }
 
-	 case OP_Supernode_16x16p16to16:		return OP_Supernode_16x16p16to16_d32 | D32REPL_16;
-	 // 32-bit bias (when available as d32)
-	 case OP_Supernode_16x16p32to16:		return OP_Supernode_u16x16p32to16_d32 | D32REPL_16;
-
 	 case OP_DepthwiseSupernode_8x8p8to8:   return OP_DepthwiseSupernode_8x8p8to8_d32;
 	 case OP_DepthwiseSupernode_8x8p32to8:  return OP_DepthwiseSupernode_8x8p32to8_d32;
-
-
 	 case OP_QuantizedBatchNorm_8x8p8to8:	return OP_QuantizedBatchNorm_8x8p8to8_d32;
 	 case OP_QuantizedBatchNorm_8x8p32to8:	return OP_QuantizedBatchNorm_8x8p32to8_d32;
 	 case OP_QuantizedMaxPool_8:            return OP_QuantizedMaxPool_8_d32;
@@ -1656,8 +1435,6 @@ static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode
 	 case OP_QuantizedPRelu_8:              return OP_QuantizedPRelu_8_d32;
 	 case OP_QuantizedPRelu_8_V2:           return OP_QuantizedPRelu_8_V2_d32;
 	 case OP_QuantizedConcat_8:             return OP_QuantizedConcat_8_d32;
-	 case OP_QuantizedConcat_u16:           return OP_QuantizedConcat_u16_d32 | D32REPL_16;
-
 	 case OP_Convert_from_aix:              return OP_Convert_from_aix_d32;
 	 case OP_Convert_to_aix_d32:            return OP_Convert_to_aix_d32_d32;
 	 case OP_QuantizedSoftmax_8:
@@ -1694,8 +1471,7 @@ static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode
 		return OP_QuantizedLRN_8_d32;
 	  }
 	 case OP_QuantizedSub_8p8to8:  // this op is currently not supported in non-d32
-		 return OP_QuantizedSub_8p8to8_d32 | D32REPL_TWOIN;
-
+		 return OP_QuantizedSub_8p8to8_d32;
 
 	 case OP_QuantizedAdd_8p8to8:
 	  {
@@ -1732,31 +1508,28 @@ static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode
 		if( bcode < 0		// # <0 means incompatible even with broadcasting
 			|| !( (bcode& 0x0C) == 0 || ( bcode & 0x30) == 0x30 ))
 			  return -1;
-		 return D32REPL_TWOIN | ((try_op==OP_QuantizedAdd_8p8to8)? OP_QuantizedAdd_8p8to8_d32: OP_QuantizedSub_8p8to8_d32);
+		 return (try_op==OP_QuantizedAdd_8p8to8)? OP_QuantizedAdd_8p8to8_d32: OP_QuantizedSub_8p8to8_d32;
 	  }
 	 case OP_QuantizedPad_8:		// this can be converted if it does not do depth padding.
-	 case OP_QuantizedPad_u16:
 	 {
-		int is_u16 = (try_op==OP_QuantizedPad_u16);
-
 		if( srcnode->n_inputs < 4) return -1;
 		struct nn_node * src = find_node(nn,srcnode->input_refs[0].src_id);
 		if (src == NULL) return errlog(nn,"Oops, can't find src of pad op");
-		if (src->node_type != (is_u16? OP_Convert_from_d32_16b: OP_Convert_from_d32)) return -1;		// Only use pad d32 if input is d32 format
+		if (src->node_type != OP_Convert_from_d32) return -1;		// Only use pad d32 if input is d32 format
 		struct nn_node * dims_node = find_node_must_be_Const(nn,srcnode->input_refs[3].src_id);
 		if( dims_node == NULL || srcnode->input_refs[3].output_idx != 0 ){
 			 return -1;
 		}
 		// the dims tensor is of shape [n,2] where n can be 1,2,3,4; each row is pad_before, pad_after.
-		// The last row is always for depth. Check if depth before & after = 0.
+		// if n <= 3, there is no depth padding.
 		struct tensor const * dims = dims_node->outputs[0];
 		int nvals = dims->data_size / (2*sizeof(int32_t));		// this is 'n'
-		if( nvals <1 || nvals > 4 ) return -1;
-		// may include depth padding. Can't convert if so.
-		int32_t const *ptr = (int32_t const*)dims->data;
-		if( ptr[(nvals-1)*2]!= 0 || ptr[(nvals-1)*2+1]!= 0) return -1;
-
-		return is_u16? (OP_QuantizedPad_u16_d32 | D32REPL_16):  OP_QuantizedPad_8_d32;
+		if( nvals > 3 ){
+			// may include depth padding. Can't convert if so.
+			int32_t const *ptr = (int32_t const*)dims->data;
+			if( ptr[3*2]!= 0 || ptr[3*2+1]!= 0) return -1;
+		}
+		return OP_QuantizedPad_8_d32;
 	 }
       //only for testing instance norm hvx for now
 	 case OP_QuantizedInstanceNorm_8:       return OP_QuantizedInstanceNorm_8_d32;
@@ -1814,13 +1587,6 @@ static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode
 			return OP_DepthToSpace_8_d32;
 		return -1;
 	  }
-	 // DepthToSpace_16 also does u16 so there's a d32 version
-	 case OP_DepthToSpace_16:
-	  {
-		if( check_spaceop_ok_for_d32(nn,srcnode) == 0 )
-			return OP_DepthToSpace_16_d32| D32REPL_16;
-		return -1;
-	  }
 	  case OP_QuantizedResizeBilinear_8: 
 	  {
 		if (srcnode->output_defs[0].max_sizes[3] > 2) return OP_QuantizedResizeBilinear_8_d32;
@@ -1856,14 +1622,6 @@ static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode
             }
             break;
 	  }
-	/////////////////// 16-bit arith ops //////////////////////
-	 case OP_QuantizedAdd_u16:
-		return OP_QuantizedAdd_u16_d32 | D32REPL_TWOIN | D32REPL_16;
-	 case OP_QuantizedSub_u16:
-		return OP_QuantizedSub_u16_d32 | D32REPL_TWOIN | D32REPL_16;
-
-
-
 	 default:
 			return -1;
 	}
@@ -1874,8 +1632,7 @@ static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode
 	if( new_op > 0){
 		struct nn_node * inp0_node = NULL;
 		if( srcnode->n_inputs >=1 ){
-			int convop = (new_op & D32REPL_16)? OP_Convert_from_d32_16b: OP_Convert_from_d32;
-			inp0_node = find_node_must_be( nn, srcnode->input_refs[0].src_id,convop);
+			inp0_node = find_node_must_be( nn, srcnode->input_refs[0].src_id, OP_Convert_from_d32);
 			if( inp0_node == NULL )
 				return -1;
 		}
@@ -1979,10 +1736,8 @@ static struct nn_node *create_convert_to_d32(struct nn_graph *nn, int src_id, in
 		logmsg(nn,0,"producer not found");
 		return NULL;
 	}
-	struct output const * odp =  &producer->output_defs[output_idx];
-	int oper = (odp->elementsize==2)? OP_Convert_to_d32_16b:OP_Convert_to_d32;
-	shape_from_outputdesc( &outsize, odp);
-	return create_convert(nn,src_id,output_idx,&outsize,oper);
+	shape_from_outdesc( &outsize, &producer->output_defs[output_idx], /*add_d32_pad=*/ 0);
+	return create_convert(nn,src_id,output_idx,outsize,OP_Convert_to_d32);
 }
 
 //
@@ -1995,7 +1750,6 @@ static struct nn_node *create_convert_to_d32(struct nn_graph *nn, int src_id, in
 //
 static struct nn_node *
 find_existing_tod32( struct nn_graph *nn,
-		int op_type,							// type of the Convert_to node (OP_Convert_to_d32 or _16b)
 		struct input input_ref,					// look for a conversion from this.
 		struct nn_node const *src_node,			// the node corresponding to input_ref.src_id (or NULL)
 		struct nn_node const * must_precede )
@@ -2009,7 +1763,7 @@ find_existing_tod32( struct nn_graph *nn,
 	//
 	while( tmp != NULL){
 		if( tmp == must_precede) return NULL;
-		if( tmp->node_type == op_type
+		if( tmp->node_type == OP_Convert_to_d32
 			&& tmp->n_inputs == 1
 			&& tmp->input_refs[0].src_id == input_ref.src_id
 			&& tmp->input_refs[0].output_idx == input_ref.output_idx ){
@@ -2034,8 +1788,7 @@ find_existing_tod32( struct nn_graph *nn,
 //   If it didn't need to make a new node, *result_nodep is set to NULL, and *result_inpref is set to the source
 //     of a d32 tensor (the input of from_d32, or output of exisiting to_d32).
 // Returns -1 on error.
-// This works for 16-bit, based on the elementsize of the indicated output.
-//
+
 static int
 need_convert_to_d32(struct nn_graph *nn,
 		struct nn_node * target_node,					// point to node which needs the convert as its input
@@ -2045,22 +1798,11 @@ need_convert_to_d32(struct nn_graph *nn,
 {
 	*result_nodep = NULL;
 	struct nn_node *producer =  find_node(nn,current_inpref.src_id);
-	if (producer == NULL || producer->n_outputs <= current_inpref.output_idx) {
+	if (producer == NULL) {
 		logmsg(nn,0,"producer not found");
 		return -1;
 	}
-	struct output * prod_output = &producer->output_defs[current_inpref.output_idx];
-	int elbytes = prod_output->elementsize;
-	int conv_to_op = OP_Convert_to_d32;
-	int conv_from_op = OP_Convert_from_d32;
-	if( elbytes == 2){
-		conv_to_op = OP_Convert_to_d32_16b;
-		conv_from_op = OP_Convert_from_d32_16b;
-	}
-
-
-
-	if( current_inpref.output_idx == 0 && producer->node_type == conv_from_op){
+	if( current_inpref.output_idx == 0 && producer->node_type == OP_Convert_from_d32){
 		// we can use the input of that node
 		*result_inpref = producer->input_refs[0];
 		//printf("bypassed from 0x%X:%d\n", (int)result_inpref->src_id, (int)result_inpref->output_idx );
@@ -2070,7 +1812,7 @@ need_convert_to_d32(struct nn_graph *nn,
 	// is there an existing tod32 with the same input that we can use?
 	//
 	{
-		struct nn_node * existing_tod32 = find_existing_tod32( nn,conv_to_op, current_inpref, producer, target_node);
+		struct nn_node * existing_tod32 = find_existing_tod32( nn, current_inpref, producer, target_node);
 		if( existing_tod32 != NULL){
 			logmsg(nn,3,"reuse node %X for convert_to_d32({%X,%d})", existing_tod32->node_id,
 					current_inpref.src_id, current_inpref.output_idx );
@@ -2082,8 +1824,8 @@ need_convert_to_d32(struct nn_graph *nn,
 
 	// otherwise make a new one
 	struct shape outsize;
-	shape_from_outputdesc( &outsize, &producer->output_defs[current_inpref.output_idx]);
-	struct nn_node * new_node =  create_convert(nn,current_inpref.src_id,current_inpref.output_idx,&outsize,conv_to_op);
+	shape_from_outdesc( &outsize, &producer->output_defs[current_inpref.output_idx], /*add_d32_pad=*/ 0 );
+	struct nn_node * new_node =  create_convert(nn,current_inpref.src_id,current_inpref.output_idx,outsize,OP_Convert_to_d32);
 
 	if( new_node == NULL) return -1;
 	result_inpref->src_id = new_node->node_id;
@@ -2093,12 +1835,11 @@ need_convert_to_d32(struct nn_graph *nn,
 
 }
 
-// make Convert_from_d32 or Convert_from_d32_16, according to elbytes.
-static struct nn_node *create_convert_from_d32(struct nn_graph *nn, int src_id, int output_idx, struct shape const * outsize, int elbytes)
-{
-	return create_convert(nn,src_id,output_idx,outsize,  (elbytes ==1)? OP_Convert_from_d32:  OP_Convert_from_d32_16b);
-}
 
+static struct nn_node *create_convert_from_d32(struct nn_graph *nn, int src_id, int output_idx, struct shape outsize)
+{
+	return create_convert(nn,src_id,output_idx,outsize,OP_Convert_from_d32);
+}
 static struct nn_node *create_autoquantize(struct nn_graph *nn, struct nn_node *srcnode, int src_idx)
 {
 	struct nn_node *new_node;
@@ -2227,8 +1968,6 @@ static int do_convert_concat_depth32(struct nn_graph *nn, struct nn_node **nodep
 	struct nn_node *new_d32node;
 	//struct nn_node *tmp;
 
-	int elbytes = (new_operation == OP_QuantizedConcat_u16_d32)? 2:1;
-
 	int node_ins = srcnode->n_inputs;
 	int node_outs = srcnode->n_outputs;
 	int i;
@@ -2316,8 +2055,7 @@ static int do_convert_concat_depth32(struct nn_graph *nn, struct nn_node **nodep
 		if ((convert_from_node = create_convert_from_d32( nn,
 			new_d32node->node_id,	// each connected to new node
 			i,		// each connected to a separate output
-			&srcnode->outputs[i]->shape,
-			elbytes  )) == NULL) {
+			srcnode->outputs[i]->shape)) == NULL) {
 			return errlog(nn,"Can't make convert to d32");
 		}
 		new_from_d32_nodes[i] = convert_from_node;
@@ -2420,8 +2158,7 @@ static int do_convert_to_short_conv(struct nn_graph *nn, struct nn_node **nodept
 		nn,
 		new_d32node->node_id,
 		0,
-		&srcnode->outputs[0]->shape,
-		1 /*elbytes*/ )) == NULL) {
+		srcnode->outputs[0]->shape)) == NULL) {
 		return errlog(nn,"can't make convert from d32");
 	}
 	change_output_refs( nn, srcnode, new_d32node->node_id, convert_from_node->node_id, 0xFF1);
@@ -2459,17 +2196,13 @@ static int do_convert_to_depth32(struct nn_graph *nn, struct nn_node **nodeptr)
 
 	// Does this operation have a d32 version?
 	if ((new_operation = depth32_replacement_op(nn, srcnode)) < 0) return 0;
-	// remove the flags
-	unsigned repl_flags = (new_operation & D32REPL_FLAGS);
-	new_operation &= ~D32REPL_FLAGS;
 
 	// some special cases...
 	if ( new_operation == OP_Convert_from_aix_d32)
 		convinput_set = 0;
 	else if( new_operation == OP_InputSupernode_8x8p8to8_outd32)
 		return do_convert_to_short_conv(nn,nodeptr);		// (also includes bias32 variant)
-	else if( new_operation == OP_QuantizedConcat_8_d32  || new_operation == OP_QuantizedSplit_8_d32
-			|| new_operation == OP_QuantizedConcat_u16_d32 )
+	else if( new_operation == OP_QuantizedConcat_8_d32  || new_operation == OP_QuantizedSplit_8_d32)
 		return do_convert_concat_depth32(nn,nodeptr, new_operation);
 	else if(new_operation == OP_ArgMax_8_d32) {
 		convoutput_set = -1;    //flat output, no conversion afterwards
@@ -2490,7 +2223,7 @@ static int do_convert_to_depth32(struct nn_graph *nn, struct nn_node **nodeptr)
 		}
 		convinput_set = 2;		// convert input #1, not #0
 	}
-	if(repl_flags & D32REPL_TWOIN){ // Add, Sub etc
+	if(new_operation == OP_QuantizedAdd_8p8to8_d32 || new_operation ==  OP_QuantizedSub_8p8to8_d32){
 		convinput_set = 1 + 2;		// convert both inputs.
 	}
 
@@ -2505,9 +2238,16 @@ static int do_convert_to_depth32(struct nn_graph *nn, struct nn_node **nodeptr)
 
 	logmsg(nn, 2, "Converting %s %p to %s", hexagon_nn_op_names[srcnode->node_type], srcnode, hexagon_nn_op_names[new_operation]);
 
+	make_outputdesc_from_shape( &new_outputs[0], &srcnode->outputs[0]->shape, /*elsize=*/tensor_type_size(output_type), /*pad_d32=*/ 0);
 
-	// copy the output descs, and inputs
-	memcpy( &new_outputs[0], &srcnode->output_defs[0], sizeof( struct output)* (n_outputs));
+	logmsg(nn, 10, "Will create d32_out padded from %p to %dx%dx%dx%d",
+	       srcnode->outputs[0],
+	       new_outputs[0].max_sizes[0],new_outputs[0].max_sizes[1],
+	       new_outputs[0].max_sizes[2],new_outputs[0].max_sizes[3]);
+
+	// copy the other output descs, and inputs
+	if( n_outputs > 1)
+		memcpy( &new_outputs[1], &srcnode->output_defs[1], sizeof( struct output)* (n_outputs-1));
 	memcpy( new_inputs, srcnode->input_refs, sizeof(struct input)* n_inputs);
 
 
@@ -2535,7 +2275,6 @@ static int do_convert_to_depth32(struct nn_graph *nn, struct nn_node **nodeptr)
 		new_outputs)) == NULL) {
 		return errlog(nn,"can't make new d32node");
 	}
-	int elbytes = (repl_flags & D32REPL_16)?2:1;
 
 	// Create the conversion back from d32 format
 	//logmsg(nn,0,"srcnode: %d max_size: %d convert_to max_size: %d",srcnode->node_id,srcnode->outputs[0]->max_size,convert_to_node->outputs[0]->max_size);
@@ -2544,8 +2283,7 @@ static int do_convert_to_depth32(struct nn_graph *nn, struct nn_node **nodeptr)
 			nn,
 			new_d32node->node_id,
 			0,
-			&srcnode->outputs[0]->shape,
-			elbytes)) == NULL) {
+			srcnode->outputs[0]->shape)) == NULL) {
 			return errlog(nn,"can't make convert from d32");
 		}
 		// Stitch in the conversion-to-d32, d32-operation, conversion-from-d32
@@ -3232,87 +2970,6 @@ static int try_combine_chanshuffle(struct nn_graph *nn, struct nn_node **chanshu
 	return 0;
 }
 
-static int do_pad_prelu_outrange(struct nn_graph *nn, struct nn_node **nodeptr)
-{
-    struct nn_node *prelu_node = *nodeptr;
-    if(prelu_node->node_type != OP_QuantizedPRelu_8_V2 && prelu_node->node_type != OP_QuantizedPRelu_8_V2_d32) return 0;
-    if(prelu_node->n_inputs != 8) return 0;
-
-    //get input min, max
-    struct nn_node *in_min_node = find_node(nn, prelu_node->input_refs[1].src_id);
-    struct nn_node *in_max_node = find_node(nn, prelu_node->input_refs[2].src_id);
-    if(in_min_node->node_type != OP_Const || in_max_node->node_type != OP_Const) return 0;
-
-    //get alpha min, max
-    struct nn_node *alpha_min_node = find_node(nn, prelu_node->input_refs[4].src_id);
-    struct nn_node *alpha_max_node = find_node(nn, prelu_node->input_refs[5].src_id);
-    if(alpha_min_node->node_type != OP_Const || alpha_max_node->node_type != OP_Const) return 0;
-
-    //get output min, max
-    struct nn_node *out_min_node = find_node(nn, prelu_node->input_refs[6].src_id);
-    struct nn_node *out_max_node = find_node(nn, prelu_node->input_refs[7].src_id);
-    if(in_min_node->node_type != OP_Const || in_max_node->node_type != OP_Const) return 0;
-
-    float in_min = tensor_get_float(in_min_node->outputs[0], 0);
-    float in_max = tensor_get_float(in_max_node->outputs[0], 0);
-    float alpha_min = tensor_get_float(alpha_min_node->outputs[0], 0);
-    float alpha_max = tensor_get_float(alpha_max_node->outputs[0], 0);
-    float out_min = tensor_get_float(out_min_node->outputs[0], 0);
-    float out_max = tensor_get_float(out_max_node->outputs[0], 0);
-
-    float in_range = in_max - in_min;
-    float out_range = out_max - out_min;
-    float alpha_maxmag = fmaxf(fabsf(alpha_min), fabsf(alpha_max));
-    float cutoff_out_range = in_range * alpha_maxmag * flt_power2(-7);
-
-    if(out_range > cutoff_out_range) return 0;
-    logmsg(nn, 2, "Specified PRelu output range is insufficient. Padding PRelu outrange and requantizing after");
-
-    //first append temporary padded output min and maxes to replace current ones
-    float temp_outmin = out_min - (cutoff_out_range - out_range);
-    float temp_outmax = out_max + (cutoff_out_range - out_range) + 1;
-    const uint32_t temp_outmin_nid = create_const_float_op(nn, temp_outmin);
-    const uint32_t temp_outmax_nid = create_const_float_op(nn, temp_outmax);
-    int res = change_output_refs(nn, prelu_node, out_min_node->node_id, temp_outmin_nid, 0x1);
-    if(res == -1) return errlog(nn, "Failed to change prelu input refs to temp outmin");
-    res = change_output_refs(nn, prelu_node, out_max_node->node_id, temp_outmax_nid, 0x1);
-    if(res == -1) return errlog(nn, "Failed to change prelu input refs to temp outmax");
-
-    //add dequant
-    struct input dequant_input_refs[3] = {
-        {prelu_node->node_id, 0},
-        {prelu_node->node_id, 1},
-        {prelu_node->node_id, 2}
-    };
-
-    struct output dequant_output_def = prelu_node->output_defs[0];
-    dequant_output_def.elementsize = sizeof(float);
-    dequant_output_def.zero_offset = 0;
-    dequant_output_def.stepsize = 0;
-
-    struct nn_node *dequant_node = create_node(nn, 0, OP_Dequantize, NN_PAD_NA, 3, 1, dequant_input_refs, &dequant_output_def);
-
-    //add quantize
-    struct input quant_input_refs[3] = {
-        {dequant_node->node_id, 0},
-        {out_min_node->node_id, 0},
-        {out_max_node->node_id, 0}
-    };
-
-    struct output quant_output_defs[3];
-    quant_output_defs[0] = prelu_node->output_defs[0];
-    quant_output_defs[1] = quant_output_defs[2] = Output_ScalarFloat;
-
-    struct nn_node *quant_node = create_node(nn, 0, OP_Quantize, NN_PAD_NA, 3, 3, quant_input_refs, quant_output_defs);
-
-    //insert new nodes and change references to prelu to new quant output
-    struct nn_node *inspos = find_first_consumer(nn, prelu_node, 0);
-    insert_nodes(nn, &prelu_node->next, dequant_node, quant_node);
-    change_output_refs(nn, inspos, prelu_node->node_id, quant_node->node_id, 0x321);
-
-    return 0;
-}
-
 static int combine_chanshuffle(struct nn_graph *nn)
 {
 	return graph_iterator(nn,try_combine_chanshuffle);
@@ -3328,10 +2985,6 @@ static int create_dilated_conv(struct nn_graph* nn)
 	return graph_iterator(nn, expand_dilated_conv_nodes);
 }
 
-static int try_pad_prelu_outrange(struct nn_graph *nn)
-{
-    return graph_iterator(nn, do_pad_prelu_outrange);
-}
 // helper for try_combine_chanshuffle
 // Finds an eligible upstream QuantizedConcat_8, or returns NULL if there isn't one.
 // The concat must be
@@ -4023,7 +3676,7 @@ static int do_convert_insane_dwise_to_Conv2d(struct nn_graph *nn, struct nn_node
 		nn,
 		node->node_id,
 		new_operation,
-		node->padding,
+		NN_PAD_NA,
 		7,3,
 		node->input_refs,
 		node->output_defs)) == NULL) return errlog(nn,"ctor fail");
@@ -4290,114 +3943,7 @@ remove_dead_nodes(struct nn_graph *nn)
 	return res;
 }
 
-// Consumes the pattern Const->Transpose and replaces it with a 
-// single pre-transposed Const node
-static int do_transpose_consts(struct nn_graph *nn, struct nn_node **transpose_node_p)
-{
-    struct nn_node *transpose_node = *transpose_node_p;
 
-    // Is it a transpose op?
-    int elbytes, eltype;
-
-    switch(transpose_node->node_type) {
-        case(OP_Transpose_f):
-        case(OP_Permute_f):
-            elbytes = 4;
-            eltype = NN_TYPE_FLOAT;
-            break;
-        case(OP_Transpose_int32):
-            elbytes = 4;
-            eltype = NN_TYPE_INT32;
-            break;
-        case(OP_Transpose_8):
-        case(OP_QuantizedPermute_8):
-            elbytes = 1;
-            eltype = NN_TYPE_QUINT8;
-            break;
-        default:
-            return 0;
-    }
-
-    // Input is a const?
-    uint32_t parent_nid = transpose_node->input_refs[0].src_id;
-    struct nn_node *parent_node = find_node(nn, parent_nid);
-    if(parent_node == NULL) return errlog(nn, "Pre-transpose consts: Transpose node %x has null parent!", transpose_node->node_id);
-    if(parent_node->node_type != OP_Const) return 0;
-
-    // Check the inputs 
-    struct tensor *in_tensor = parent_node->outputs[0];
-    struct nn_node *dims_node = find_node_must_be_Const_from_ref(nn, &transpose_node->input_refs[1]);
-    if(dims_node == NULL) {
-        errlog(nn, "WARNING: Cannot find transpose dims node, skipping pre-transpose step");
-        return 0;
-    }
-
-    struct tensor *dims_tensor = dims_node->outputs[0];
-    if(dims_tensor->shape.batches * dims_tensor->shape.width * dims_tensor->shape.height != 1) {
-        errlog(nn, "WARNING: transpose dims not 1D, skipping pre-transpose step");
-        return 0;
-    }
-
-    int32_t const *perm_p = (int32_t const*) dims_tensor->data;
-    int n_perm = dims_tensor->data_size / sizeof(int32_t);
-    if(unlikely(n_perm > 4)) {
-        errlog(nn, "WARNING: transpose dims cannot have more than 4 ints, skipping pre-transpose step");
-        return 0;
-    }
-
-    //get shapes
-    struct shape in_shape = in_tensor->shape;
-    struct shape out_shape;
-    shape_from_outdesc(&out_shape, &transpose_node->output_defs[0], 0);
-    uint32_t out_data_size = out_shape.batches * out_shape.height * out_shape.width * out_shape.depth * elbytes;
-
-    // Prepare to do transpose
-    struct nn_transpose_desc txdesc;
-    int res = 0;
-    res = nn_transpose_check(perm_p, n_perm, &in_shape, &out_shape);
-    if(res) return errlog(nn, "Pre-transpose consts: Bad transpose control");
-    res = nn_transpose_analyze(&txdesc, elbytes, perm_p, n_perm, &in_shape);
-    if(res) return errlog(nn, "Pre-transpose consts: Failed to analyze");
-    if(txdesc.buffer_needed > nn->scratch_size) {
-        if(nn_scratch_grow(nn, txdesc.buffer_needed) != 0)
-            return errlog(nn, "Pre-transpose consts: Failed to grow scratch!");
-    }
-
-    uint32_t transposed_const_nid = nn_graph_new_internal_node_id(nn);
-    const struct tensor *out_tensor = do_prepend_const_node_ptr(nn, transposed_const_nid, out_shape.batches, out_shape.height, out_shape.width, out_shape.depth, NULL, out_data_size);
-
-    // run transpose
-    nn_os_vector_workers_acquire(nn);
-    res = nn_transpose_execute(nn, &txdesc, nn->scratch, (uint8_t *)out_tensor->data, (uint8_t *const)in_tensor->data);
-    if (res) {
-        nn_os_vector_workers_release(nn);
-        return errlog(nn, "Pre-transpose consts: Transpose exec errors %d", res);
-    }
-    nn_os_vector_workers_release(nn);
-
-    // Re-wire the input refs of nodes that consume the transpose outputs
-    uint32_t n_outputs = transpose_node->n_outputs;
-    struct input new_input_refs[n_outputs];
-    new_input_refs[0] = (struct input) {transposed_const_nid, 0};
-    if(n_outputs == 3) {
-        new_input_refs[1] = transpose_node->input_refs[2]; //input min
-        new_input_refs[2] = transpose_node->input_refs[3]; //input max
-    } 
-
-    res = change_multi_output_refs_table(nn, transpose_node, transpose_node->node_id, n_outputs, new_input_refs);
-    if(res == -1) return errlog(nn, "Pre-transpose consts: Failed to change output refs!");
-
-    // Remove the transpose node from the linked list
-    replace_node_with_sequence(nn, transpose_node_p, transpose_node, NULL, 0);
-
-    logmsg(nn, 2, "Pre-transposed const node %x", parent_nid);
-
-    return 0;
-}
-
-static inline int transpose_consts(struct nn_graph *nn) {
-    return graph_iterator(nn, do_transpose_consts);
-}
 
 //
 // for node 'nodep', find all of the nodes reference by its inputs
@@ -4679,26 +4225,22 @@ static int optimize(struct nn_graph *nn)
 	if( (nn->op_class_set & NN_NODE_FLAG_CLS_QUANTIZE)!=0){			// any Quantize?
 		if ((err = make_autoquantize(nn)) != 0) return err;
 	}
-    if((err = transpose_consts(nn)) != 0) return err;        // replace const->transpose pattern with transposed const
 	PREPARE_TIME()
 	if ( (nn->op_class_set & NN_NODE_FLAG_CLS_TRANSPOSECONV)!=0){
         if ((err = create_transpose_conv_nodes(nn)) != 0) return err;
-    }
-    if ( (nn->op_class_set & NN_NODE_FLAG_CLS_IMAGETRANSFORM)!=0){
+  }
+  if ( (nn->op_class_set & NN_NODE_FLAG_CLS_IMAGETRANSFORM)!=0){
         if ((err = change_concat_pre_imagetransform(nn)) != 0) return err;
-    }
-    if( (nn->op_class_set & NN_NODE_FLAG_CLS_GROUPEDCONV) != 0){    // any GroupedConv2d?
-        if((err = create_grouped_conv(nn)) != 0) return err;
-    }
+  }
+  if( (nn->op_class_set & NN_NODE_FLAG_CLS_GROUPEDCONV) != 0){    // any GroupedConv2d?
+      if((err = create_grouped_conv(nn)) != 0) return err;
+  }
 	if( (nn->op_class_set & NN_NODE_FLAG_CLS_DILATEDCONV) != 0 ) { //any DilatedConv2d?
 			if ((err = create_dilated_conv(nn)) != 0) return err;
 	}
 	if( (nn->op_class_set & NN_NODE_FLAG_CLS_DWCONVF)!= 0){			// any DepthwiseConv2d_f ?
 		if ((err = make_quantized_dwise(nn)) != 0) return err;
 	}
-    if ((nn->op_class_set & NN_NODE_FLAG_CLS_PRELU) != 0) {
-        if((err = try_pad_prelu_outrange(nn)) != 0) return err;
-    }
 	if (1) if ((err = convert_insane_dwise(nn)) != 0) return err;			// Convert QuantizedDepthwiseConv to regular Conv for some cases
 	PREPARE_TIME()
 	if ((err = remove_unnecessary_quants(nn)) != 0) return err;
@@ -4737,7 +4279,6 @@ static int optimize(struct nn_graph *nn)
 	PREPARE_TIME();
 	if ((err = remove_dead_nodes(nn)) != 0) return err;
 	PREPARE_TIME();
-	if ((err = remove_unimplemented_channelscale(nn))!=0 ) return err;
 	if ((err = remove_unnecessary_d32_converts(nn)) != 0) return err;
 	CHECK(GRAPHCHECK_HASH)
 	// We have to remove dead nodes before we remove concats with placement,
@@ -4784,15 +4325,6 @@ static int do_prepare_inner(struct nn_graph *nn)
 	}
 	//if ((err = run_op_setup(nn)) != 0) return err; /* FIXME: needed? Or just call ctor? */
 	if ((err = optimize(nn)) != 0) return err;
-	// prep for graph looping must be done after gather_const_nodes
-	// and before prepare_inputs
-	if( (nn->op_class_set & NN_NODE_FLAG_CLS_LOOP_CONTROL_NODE)!=0){
-		if ((err=nn_graphloop_prepare_graph(nn)) != 0) return err;
-	}
-	// some nodes have dynamically sized output but are not necessarily loop nodes
-	if( (nn->op_class_set & NN_NODE_FLAG_CLS_DYNAMIC_TENSOR)!=0){
-		if ((err=nn_dynamictensor_prepare_graph(nn)) != 0) return err;
-	}
 	if ((err = prepare_inputs(nn)) != 0) return err;
 	if ((err = allocate_graph_storage(nn)) != 0) return err;
 	if ((err = run_op_check(nn)) != 0) return err;

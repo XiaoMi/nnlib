@@ -111,8 +111,8 @@ static int axis_aligned_bbox_transform_execute(struct nn_node *self, struct nn_g
         for (uint32_t i = 0; i < numClasses; i++) {
 
             BoxEncodingCenter roiAfterCentered;
-            roiAfterCentered.w = expf(deltas[2]) * roiBefore.w;
-            roiAfterCentered.h = expf(deltas[3]) * roiBefore.h;
+            roiAfterCentered.w = exp(deltas[2]) * roiBefore.w;
+            roiAfterCentered.h = exp(deltas[3]) * roiBefore.h;
             roiAfterCentered.x = roiBefore.x + deltas[0] * roiBefore.w;
             roiAfterCentered.y = roiBefore.y + deltas[1] * roiBefore.h;
 

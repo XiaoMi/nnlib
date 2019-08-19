@@ -1,38 +1,3 @@
-/*
- * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted (subject to the limitations in the
- * disclaimer below) provided that the following conditions are met:
- *
- *    * Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *
- *    * Redistributions in binary form must reproduce the above
- *      copyright notice, this list of conditions and the following
- *      disclaimer in the documentation and/or other materials provided
- *      with the distribution.
- *
- *    * Neither the name of The Linux Foundation nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
- *
- * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
- * GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
- * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
- * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
- * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
- * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -500,11 +465,9 @@ static void rearrange_weights_3wto4_get_sumb(
 int supernode3322_check(struct nn_node *self, struct nn_graph *nn)
 {
     struct supernode3322_info *info = self->opaque;
+    if (self->n_inputs  != 12) return errlog(nn,"supernode wrong # inputs... now need min/max with inf for self-detecting");
+    if (self->n_outputs != 3 ) return errlog(nn,"supernode wrong # outputs");
 
-    // supernode may wind up with 13 inputs due to ChannelScale - but by
-    // the time we get to here, it should be dealt with and will be just a scalar [1.0].
-    // so we can ignore it.
-    // n_inputs = 12 or 13; n_outputs = 3; checked in ctor
     const struct tensor *filt_tensor = self->inputs[1];
     const struct tensor *filt_min_tensor = self->inputs[4];
     const struct tensor *filt_max_tensor = self->inputs[5];
@@ -658,17 +621,12 @@ static int supernode_dtor(struct nn_node *self, struct nn_graph *nn)
     self->opaque = NULL;
     return node_free_common(self,nn);
 }
-// supernode may wind up with 13 inputs due to ChannelScale - but by
-// the time we get to here, it should be dealt with and will be just a scalar [1.0].
-// so we can ignore it.
 
 struct nn_node_ops nn_ops_for_Supernode3322_8x8p8to8 = {
     .execute = supernode3322_execute_hvx,
     .check = supernode3322_check,
     .ctor = node_alloc_common,
     .dtor = supernode_dtor,
-    .n_inputs = NN_IOCOUNT_RANGE(12,13),
-    .n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_Supernode3322_8x8p32to8 = {
@@ -676,6 +634,4 @@ struct nn_node_ops nn_ops_for_Supernode3322_8x8p32to8 = {
     .check = supernode3322_check,
     .ctor = node_alloc_common,
     .dtor = supernode_dtor,
-    .n_inputs = NN_IOCOUNT_RANGE(12,13),
-    .n_outputs = NN_IOCOUNT(3),
 };

@@ -121,7 +121,9 @@ struct workitem {
 	const uint8_t *input;	// Input data.  Could be from input tensor or temp buf
 	const uint8_t *weights;	// Filter data.  Could be from input tensor or temp buf
 	const int32_t *biases;	// Bias data, in product space (added to in * filt products)
-	const uint32_t *recip;  // Vector per channel reciprocal quantization
+        const uint32_t *recip;  // Vector per channel reciprocal quantization
+        const int32_t *recip_sh;// Vector per channel reciprocal quantization shift, not used in v66
+        const int32_t *equalize;  // Vector per channel max/min rescale back to original unscaled weights
 	uint8_t *output;	// Output data.  Could be output tensor or temp buf
 	int32_t *suma_buf;	// Output data.  Could be output tensor or temp buf
 	int32_t start_line;	// Row to start working on
@@ -193,6 +195,7 @@ struct supernode_info_new {
 	int32_t *biasbuf;	// int32 bias buffer, including min offsets and gemsumb
 	int32_t *minmax_buf;	// pointer to min/max values, enough storage per thread...
         uint32_t *recip;        //local quantization per channel
+        int32_t *recip_sh;     //local quantization shift per channel
 	nn_sem_t *semaphores;	// pointer to preallocated array of semaphores
 	struct workitem *work_items;	// All the work items to execute at execute time
 	nn_os_workitem_t *work_list;	// compiled work list
@@ -201,26 +204,23 @@ struct supernode_info_new {
 	int workitems_alloc;	//	bytes allocated for work items
 	float out_minval;	// Minimum output value, either specified or guessed
 	float out_maxval;	// maximum output value, either specified or guessed
-	uint8_t outrange_firstguess;	// is the output range a baseless guess
-	uint8_t minval_precalculated;	// Is the minval precalculated?
-	uint8_t maxval_precalculated;	// Is the maxval precalculated?
-	uint8_t minmax_precalc_flags;	// bit 0 = min_precalc, bit 1 = max_precalc
+	int minval_precalculated;	// Is the minval precalculated?
+	int maxval_precalculated;	// Is the maxval precalculated?
 	float out_minval_spec;		// exact value specified (when not precalculated)
 	float out_maxval_spec;		// exact value specified (when not precalculated)
-	// Note: minval,maxval are in *output* units (without saturation) for supernode,
-	// to support channel and weight scaling more easily.
-	// For Depthwise and shortin, they are in product space.
-	int32_t minval;			// Minimum value actually observed
-	int32_t maxval;			// Maximum value actually observed
+	int32_t minval;			// Minimum value (in prod space) actually observed
+	int32_t maxval;			// Maximum value (in prod space) actually observed
 	int32_t weight_batch_size;	// How big is a weight batch (32 filters)
 	int32_t n_weight_batches;	// Number of weight batches we can try and fit at once into vtcm
-	uint8_t is_dwise;			// is depthwise?
-	uint8_t needs_retry;		// Do we need to try this op over again?
-	uint8_t strategy_valid;		// Do we believe the strategy is currently valid?
-	uint8_t UNUSED_weights_arranged;	// Have the weights been rearranged yet?
+	int32_t needs_retry;		// Do we need to try this op over again?
+	int32_t strategy_valid;		// Do we believe the strategy is currently valid?
+	int32_t weights_arranged;	// Have the weights been rearranged yet?
 	float in_max_float;	// maximum input float value
 	float in_min_float;	// minimum input float value
+        float  weight_scale_factor;
+        int32_t * weight_scale;           // per channel scale applied
 	float weights_level_size;	// how large in float is one increment in the weights?
+        float * weights_level;          // how large in float is one increment in the weights in each channel?
 	int weights_offset;	// where is 0 in weight number space?
 	struct shape in_shape;		// previous actual shape
 	int32_t in_height;	// height of the input
@@ -254,7 +254,7 @@ struct supernode_info_new {
 	int32_t integral_off;   //index into integral buffer used by gvsuma
 	int32_t recip_val;	// reciprocal for product space --> output space
 	int32_t recip_shamt;	// amount to shift before recip mpy
-	int recip_shamt_must_be_zero;	// set in nodes which don't support recip_shamt (shortinconv; v66 conv)
+	int recip_shamt_must_be_zero;	// set in nodes which don't support recip_shamt (shortinconv)
 	int32_t circ_buf_size;  //size pf the circular buffer used in v65 conv
 	int32_t num_accs;       // number of accumulators used in main computation
 	int in_offset;		// amount to normalize inputs by.  Needed?
@@ -264,30 +264,13 @@ struct supernode_info_new {
 	const uint8_t *input_base;	// first row (including in-use left padding, in-use top padding).
 	const uint8_t *weights_base;
 	const uint8_t * raw_input; //ptr to the input tensor for use when copied into temp
-
-
-	// 'k' is the channel scaling factors channel_scale[d]/wt_scale[d]; channel_scale
-	// is the optional 'channel_scale' external factors (<=1.0) and wt_scale is the internal
-	// weight scaling factor (127/256 <= wt_scale <= 1.0)
-	// Both are vector aligned and dimensioned as [out_depth_total].
-	// Intiially the channel_scale are loaded into k_factor, and the weight_scale into k_factor_recip
-	// (as fixed-point integer), and then both are corrected.
-	float * k_factor;
-	float * k_factor_recip;
-	uint8_t has_channel_scale;
-	uint8_t has_weight_scale;
-	float max_k_factor;		// the  largest 'k_factor' (and >=1.0).
-
-	// min_valid_val, max_valid_val apply only when min/max is in product space.
 	int32_t max_valid_val;	// maximum value that results in a value not above max_out
 	int32_t min_valid_val;	// minimum value that results in a value not below min_out
 	float prod_level_size;	// in_level_size * filt_level_size
-	float output_level_size;
 	int32_t *gemsumb;	// GEMSUMB value, if we want to calculate it at preparation time
-	uint8_t use_v65;	// Should we use V65 mode?
-	uint8_t use_v66;	// Should we use V66 mode?
-	uint8_t use_signed_weights;		// weights converted to signed?
-	uint8_t use_vtcm;       //flag to use vtcm or not for weights
+	int32_t use_v65;	// Should we use V65 mode?
+	int32_t use_v66;	// Should we use V66 mode?
+	int32_t use_vtcm;       //flag to use vtcm or not for weights
 	uint64_t cycles;	// Cycle accumulator for children
 	struct nn_os_bufstack_t bufstack;	// stack of temporary buffers
 	struct buffer_pool bufpool_suma_scratch;// pool of 'suma_scratch' buffers
@@ -303,7 +286,7 @@ struct supernode_info_new {
 };
 
 
-static int setup_initial_output_range( struct nn_graph *nn, struct supernode_info_new *info, float,float,float,float);
+static void setup_initial_output_range( struct supernode_info_new *info, float,float,float,float);
 
 static inline int supernode_execute_some_strategy(struct nn_node *self, struct nn_graph *nn, int start, int n_work_items)
 {
@@ -327,7 +310,19 @@ static inline int supernode_execute_some_strategy(struct nn_node *self, struct n
 
 
 #define roundup(a, p2)       (((a)+(p2)-1)&~((p2)-1))
+static inline int  __attribute__((unused))
+supernode_signed_weight_divisor(struct supernode_info_new *info, int weight_offset)
+{       //return ((weight_offset > (128-8)) && (weight_offset < (128+8))) ? 1 : 2; //EEK!
+        int d ;
+	d = (weight_offset > (128-8)) && (weight_offset < (128+8)) ? 1 : 2;
+	if (info->use_v65 == 0 && info->use_v66 == 0) d = 1;	// don't use V65/6 signed stuff
+	return d;
+}
 
+static inline int supernode_unsigned_weight_divisor(int weight_offset)
+{
+	return 1;
+}
 
 static inline int supernode_n_weight_batches(int batch_size, int vtcm_size)
 {
@@ -1078,6 +1073,7 @@ static void supernode_execute_hvx_conv_work(struct nn_graph *nn, void * vinfo)
 			w = 0; 
 			//logmsg(nn,0,"v65 w=%d weight_chunks=%d conv input=%p",w,weight_chunks,work->circ_buf + cbuf_row*buf_width);
 			if(weight_chunks & 1) {  //1st time round and weight chunks odd
+
 				(*func32) ( //gvconv2dbbb_circ_d32_v65_asm
 					work->circ_buf + cbuf_row*buf_width,
 					(int8_t *)weights,
@@ -1097,7 +1093,8 @@ static void supernode_execute_hvx_conv_work(struct nn_graph *nn, void * vinfo)
 					work->circ_buf,
 					info->recip_shamt,
 					info->in_offset,
-					store_cntrl);
+					store_cntrl,
+                                        work->equalize);
 				w+=1;
 			}
 
@@ -1122,7 +1119,8 @@ static void supernode_execute_hvx_conv_work(struct nn_graph *nn, void * vinfo)
 					work->circ_buf,
 					info->recip_shamt,
 					info->in_offset,
-					store_cntrl);
+					store_cntrl,
+                                        work->equalize + w*32);
 			}//end w
 
 			if(out_row < stop_line-1) { //dont do another repstream at end
@@ -1262,8 +1260,7 @@ static void supernode_execute_hvx_conv_work(struct nn_graph *nn, void * vinfo)
 					suma + info->suma_start,
 					next_suma_row,
 					minmax.words,
-					work->recip + w*32,
-					info->recip_shamt);
+					recip_val);
 			}
 			input += proc_rows*in_next_row*stride_height;
 			output+= proc_rows*out_next_row;
@@ -1429,9 +1426,9 @@ static void supernode_execute_hvx_conv_work_v66(struct nn_graph *nn, void * vinf
 				minmax.words,
 				work->recip, //recip_val,
 				32*((4-out_left_junk)&3),
-				Q6_R_combine_RlRl(skip_col, 32*info->in_left_skip+(stride_width == 2)),
+				32*info->in_left_skip+(stride_width == 2),
 				out_next_d32,weight_chunks,
-				info->recip_shamt); //(int32_t const*)work->recip);
+                                work->equalize);
 
 			input  += proc_rows*in_next_row*stride_height;
 			output += proc_rows*out_next_row;
@@ -1456,7 +1453,7 @@ static void supernode_execute_hvx_conv_work_v66(struct nn_graph *nn, void * vinf
 				output,
 				in_next_d32>>5,
 				out_next_row,
-				out_width - (skip_col & 4),
+				out_width - skip_col,
 				Q6_R_combine_RlRl(stride_height*skip_lines,stride_width),
 				in_depth,
 				filt_width,
@@ -1468,7 +1465,7 @@ static void supernode_execute_hvx_conv_work_v66(struct nn_graph *nn, void * vinf
 				32*((4-out_left_junk)&3),
 				skip_col,
 				out_next_d32, weight_chunks,
-				info->recip_shamt); //(int32_t const*)work->recip);
+                                work->equalize);
                 
 			input  += proc_rows*in_next_row*stride_height;
 			output += proc_rows*out_next_row;
@@ -1506,7 +1503,7 @@ static void supernode_execute_hvx_conv_work_v66(struct nn_graph *nn, void * vinf
 				0,
 				0,
 				out_next_d32,weight_chunks,
-				info->recip_shamt); //(int32_t const*)work->recip);
+                                work->equalize);
 
 			input  += proc_rows*in_next_row*stride_height;
 			output += proc_rows*out_next_row;
@@ -1532,7 +1529,7 @@ static void supernode_execute_hvx_conv_work_v66(struct nn_graph *nn, void * vinf
 				output,
 				in_next_d32>>5,
 				out_next_row,
-				out_width - (skip_col & 4),
+				out_width - skip_col,
 				Q6_R_combine_RlRl(stride_height*skip_lines,stride_width),
 				in_depth,
 				filt_width,
@@ -1544,7 +1541,7 @@ static void supernode_execute_hvx_conv_work_v66(struct nn_graph *nn, void * vinf
 				32*((4-out_left_junk)&3),
 				skip_col,
 				out_next_d32,weight_chunks,
-				info->recip_shamt); //(int32_t const*)work->recip);
+                                work->equalize);
 
 			input  += proc_rows*in_next_row*stride_height;
 			output += proc_rows*out_next_row;
@@ -1554,6 +1551,7 @@ static void supernode_execute_hvx_conv_work_v66(struct nn_graph *nn, void * vinf
 		}//end activation rows
 	}
 	gvrmaxmin(minmax.words);
+        logmsg(nn,2,"scaling back max by %f",info->weight_scale_factor);
 	nn_atomic_min(&info->minval,minmax.words[32]); 
 	nn_atomic_max(&info->maxval,minmax.words[ 0]); 
 
@@ -2112,39 +2110,30 @@ static int supernode_execute_workitem_check_for_retry(struct workitem *work, str
 	struct supernode_info_new *info = node->opaque;
 	float newval;
 	float extreme_out;
-
-	logmsg(nn,1,"output range is %d .. %d\n", (int)info->minval , (int)info->maxval);
+        float prod_level_size;
+        prod_level_size = info->prod_level_size/info->weight_scale_factor ;
+            
 	int recalc = 0;
-	int precalc_flags = info->minmax_precalc_flags;
-
-	if( precalc_flags == 3)
-		return 0;		// nothing to move
-
-	int min_allowed, max_allowed;
-	float minmax_level_size;
-	if( !info->is_dwise){		// min/max results are in 'output space'
-		min_allowed = 0;
-		max_allowed = 255;
-		minmax_level_size = info->output_level_size;
-	}else{					// are in product units
-		min_allowed = info->min_valid_val;
-		max_allowed = info->max_valid_val;
-		minmax_level_size = info->prod_level_size;
-	}
-	if (unlikely((precalc_flags&2)==0 && (info->maxval >max_allowed))) {
+	if (info->minval_precalculated && info->maxval_precalculated) return 0;
+        //if(info->use_v66) {
+        if(info->use_v66 || info->use_v65) {
+            info->maxval *= 2.f*info->weight_scale_factor;
+            info->minval *= 2.f*info->weight_scale_factor;
+        }
+	if (unlikely(!info->maxval_precalculated && (info->maxval > info->max_valid_val))) {
 		/* Mark as needing retry and set new max value */
 		info->needs_retry = 1;
-		extreme_out = minmax_level_size*(info->maxval + 0.5f)+ info->out_minval;
+		extreme_out = info->maxval * prod_level_size + info->out_minval;
 		newval = round_up_quarter_octave( fmaxf(extreme_out, 0x1.0p-4f));
 		logmsg(nn,1,"max too small, recalculating %d > %d / %f > %f... picking %f",
 			info->maxval,info->max_valid_val,extreme_out,info->out_maxval,newval);
 		info->out_maxval = newval;
 		recalc = 1;
 	}
-	if (unlikely((precalc_flags&1)==0 && (info->minval < min_allowed))) {
+	if (unlikely(!info->minval_precalculated && (info->minval < info->min_valid_val))) {
 		/* Mark as needing retry and set new min value */
 		info->needs_retry = 1;
-		extreme_out = minmax_level_size*(info->minval - 0.5f)+ info->out_minval;
+		extreme_out = info->minval * prod_level_size  + info->out_minval;
 		newval = round_up_quarter_octave( fminf(extreme_out, -0x1.0p-8f));
 		logmsg(nn,1,"min too large, recalculating %d < %d / %f < %f... picking %f",
 			info->minval,info->min_valid_val,extreme_out,info->out_minval,newval);
@@ -2152,12 +2141,19 @@ static int supernode_execute_workitem_check_for_retry(struct workitem *work, str
 		recalc = 1;
 	}
 	// if endpoints moved, adjust to get a valid zero.
+	// TODO: this should also be done if one of the endpoints is 'fixed',
+	// (using adjust_minmax_for_zero_with_constraint); but that will, in some cases, want
+	// to move the 'fixed' endpoint by a small amount, and so there should also be a mechanism
+	// in place to ensure that the 'fixed' endpoint is always moved to the preset value before the
+	// adjustment (so it can't "drift" after repeated corrections).
+	// In cases where the 'fixed' endpoint is zero, this is moot; a range with a zero endpoint
+	// never needs adjustment.
 	//
-	if( recalc ){
-		if( precalc_flags & 1) info->out_minval = info->out_minval_spec;
-		if( precalc_flags & 2) info->out_maxval = info->out_maxval_spec;
-		adjust_minmax_for_zero_with_constraints( & info->out_minval, &info->out_maxval, precalc_flags);
+	if( recalc && !info->maxval_precalculated && !info->minval_precalculated ){
+		adjust_minmax_for_zero( &info->out_minval, &info->out_maxval);
+		logmsg(nn,2,"corrected range: %f ... %f", info->out_minval, info->out_maxval);
 	}
+
 
 	//logmsg(nn,1,"Checking workitem, maxval=%x minval=%x max_valid_val=%x needs_retry=%d",info->maxval,info->minval,info->max_valid_val,info->needs_retry);
 	return 0;
@@ -3114,6 +3110,18 @@ void supernode_rearrange_d32(
 
 #endif //!ENABLE_VECTOR_WEIGHT_ARRANGE
 
+#if 0
+static inline float supernode_convert_weights_to_signed(
+	uint8_t *src, 
+	int filt_height,
+	int filt_width,
+	int in_depth,
+	int out_depth,
+	int zero_val)
+{
+	return 1.0f;
+}
+#endif
 
 
 #if 0
@@ -3218,8 +3226,8 @@ void fast_rearrange_32x32(
     out_data[v*32+s*4+i] = in_data[(v+i)*filt_batches+s];
   }
 }
-static void __attribute__((unused))
-supernode_rearrange_for_d32(
+
+void supernode_rearrange_for_d32(
   uint8_t *out_data,
   const uint8_t* in_data,
   int filt_height,
@@ -3474,7 +3482,7 @@ static inline __attribute__((unused)) void *supernode_add_suma(
 	logmsg(nn,0,"I thought this was if zero'd out");
 	return NULL;
 #endif
-	if (info->use_signed_weights) return NULL;
+	if (info->use_v65 || info->use_v66) return NULL;
 	struct workitem suma_work;
 	//int32_t in_width_total = info->in_width;
 	//int32_t in_height = info->in_height;
@@ -3851,9 +3859,7 @@ static int fill_info_minmax_basics(
 	if( !flt_isfinite(in_min_float) || ! flt_isfinite(in_max_float)){
 		return errlog(nn,"input range to supernode, not finite");
 	}
-	if( in_min_float > 0.0f || in_max_float < 0.0f || in_min_float >= in_max_float )
-		return errlog(nn, "supernode: invalid input min/max");
-	//in_max_float = fmaxf(in_max_float,in_min_float+0.00001f);
+	in_max_float = fmaxf(in_max_float,in_min_float+0.00001f);
 	//float filt_min_float = tensor_get_float(min_filt_tensor,0);
 	//float filt_max_float = fmaxf(tensor_get_float(max_filt_tensor,0),filt_min_float+0.00001f);
 	//float bias_min_float = tensor_get_float(bias_min_tensor,0);
@@ -3869,63 +3875,18 @@ static int fill_info_minmax_basics(
 	/* The product level size is the product of the input and filter level size */
 	float prod_level_size = in_level_size * filt_level_size;
 
+#if 1	// new calculation without int64 divide
 	//
 	// final scaling is to multiply by prod_level_size / output_level_size.
 	//
 	float output_level_size;
 	/*int32_t output_offset =*/ get_qu8_level_size_zero(info->out_minval,info->out_maxval, & output_level_size);
 	// output level size, adjusted for weight scaling
-	info->output_level_size = output_level_size;
-	float max_k = info->max_k_factor;
-	if( max_k == 0.0f){
-		logmsg(nn,0,"max_k was 0.0!!");// shouldn't happen - maybe if some dwise/shortin not updated?
-		max_k = 1.0f;
-	}
-	if( max_k < 1.0f || max_k > 2.02f){
-		return errlog(nn,"bad maxk = %.7g", max_k);
-	}
-	// for cases with per-channel scaling, max_k sets the highest scale, and determines the
-	// recip_shamt.
-
-	float final_scaling = max_k * prod_level_size/output_level_size;
-
-	if( info->outrange_firstguess){
-		float max_scale = info->recip_shamt_must_be_zero ? 0.875f: 1.75f;
-		if( final_scaling > max_scale ){ // do not want to go with a large scale on the first guess
-			output_level_size = max_k * prod_level_size /max_scale;	// final scaling will be max_scale;
-			int need_adjust = 0;
-			switch(info->minmax_precalc_flags){
-			 case 0:
-			 default: // should not happen; out_range_firstguess not set unless 0,1 or 2.
-				 info->out_minval = -63.0f * output_level_size;
-				 info->out_maxval = 192.0f * output_level_size;
-				 break;
-			 case 1:		// only min is specified
-				 info->out_maxval = info->out_minval + 255.0f * output_level_size;
-				 need_adjust = (info->out_minval < 0.0f);
-				 break;
-			 case 2:		// only max is specified
-				 info->out_minval = info->out_maxval - 255.0f * output_level_size;
-				 need_adjust = 1;
-				 break;
-			}
-			final_scaling = max_scale;
-			if( need_adjust){
-				// adjust zero and recalc all the things
-				adjust_minmax_for_zero_with_constraints( & info->out_minval, & info->out_maxval, info->minmax_precalc_flags);
-				output_level_size= flt_div_255( info->out_maxval - info->out_minval);
-				final_scaling = max_k * prod_level_size/output_level_size;
-			}
-			info->output_level_size = output_level_size;
-		}
-		logmsg(nn,3,"first guess changed to %f .. %f scaling = %f\n", info->out_minval, info->out_maxval, final_scaling);
-		info->outrange_firstguess = 0;
-	}
-
-
-	// if it's >1.0 we need recip_shift > 0
-	int recip_shamt = (final_scaling <= 1.0f)? 0: flt_getexp(final_scaling);
-	unsigned recip_val;
+	float output_level_size_adj = output_level_size * info->weight_scale_factor;
+	float final_scaling = prod_level_size/output_level_size_adj;
+	// if it's >=1.0 we need recip_shift > 0
+	int recip_shamt = max_i32( 0, flt_getexp(final_scaling));
+	int recip_val;
 	float final_scaling_inv;
 
 	if( recip_shamt > 0 && info->recip_shamt_must_be_zero ){
@@ -3941,11 +3902,10 @@ static int fill_info_minmax_basics(
 		// is set when this occurs.
 		int need_correction = 0;
 		if( final_scaling > 1.0f){ // because it could be exactly 1.0
-			int flags = info->minmax_precalc_flags;
+			int flags = (info->minval_precalculated?1:0) | (info->maxval_precalculated?2:0);
 			if( flags== 3 ){
 				logmsg(nn,0,"can't support this fixed output range; need gain=%f", final_scaling);
 			}else{
-				// TODO: Maybe this should be unified with the 'first_guess' adjustment
 				if(flags == 0 ){	// unconstrained
 					info->out_minval *= final_scaling;
 					info->out_maxval *= final_scaling;
@@ -3973,18 +3933,17 @@ static int fill_info_minmax_basics(
 			recip_val= 0x7FFFFFFF;
 			final_scaling = final_scaling_inv = 1.0f;
 		}else{
-			recip_val = roundf_u32(  final_scaling * (float)(1u<<31));
+			recip_val = roundf_i32(  final_scaling * (float)(1u<<31));
 			final_scaling_inv = 1.0f/final_scaling;
 		}
 
 	}else{
 		// find final_scaling with 31-recip_shamt frac bits now.
-		// Will be <= 0x7FFFFF80, except in border case where final_scaling = 1.0
+		// Will be <= 0x7FFFFF80,
 		//This rounding will be lossless unless final_scaling < (1/128).
-		recip_val = roundf_u32( flt_ldexp( final_scaling, (31-recip_shamt)));
-		final_scaling_inv = output_level_size/(prod_level_size*max_k);
+		recip_val = roundf_i32( flt_ldexp( final_scaling, (31-recip_shamt)));
+		final_scaling_inv = output_level_size_adj/prod_level_size;
 	}
-	recip_val = (recip_val < 0x7fffffffu)? recip_val :0x7FFFFFFFu;
 	info->prod_level_size = prod_level_size;
 	// find range of pre-scaled values which don't constitute overflow; allows for rounding to 0
 	// or to 255.
@@ -3999,26 +3958,83 @@ static int fill_info_minmax_basics(
 	info->recip_val = recip_val;
 	info->recip_shamt = recip_shamt;
 
-    // all of that is valid for the cases where we don't support any per-channel
-    // scaling. Now take care of the per-channel...
-    // calculation is gain = k * prod_level_size/output_level_size, and scale with 32-recip_shamt
-    // fractional bits.
-
-    if( info->recip != NULL){
-    	if(!info->has_channel_scale && !info->has_weight_scale){	// all the k are 1
-    		// all k are 1; just use the single value we found already
-    		memset_uint32( info->recip, recip_val, info->out_depth_valid);
-    	}else{
-    		float common_scale = flt_ldexp( prod_level_size/output_level_size, (31-recip_shamt));
-    		int odv = info->out_depth_valid;
-
-    		for(int i = 0; i < odv; i++){
-    			unsigned rval = roundf_u32( common_scale * info->k_factor[i] );
-    			info->recip[i] = (rval < 0x7fffffffu)? rval :0x7FFFFFFFu;
-    		}
-    	}
+#if 0
+    if(info->use_v65){
+		for(int i = 0; i < info->out_depth_valid; i++){
+			info->recip[i] = recip_val;
+                }
     }
+#endif
 
+    //if(info->use_v66){
+    if(info->use_v66 || info->use_v65){
+		// do the same calc for different info->weights_level[i]
+		// .. using the same recip_shamt. Since all info->weights_level[i] are >= info->weight_scale_factor
+		// there should be no overflow.
+		int odv = info->out_depth_valid;
+		float weights_level_prev = info->weight_scale_factor;	// likely many duplicates...
+		uint32_t recip_val_prev = recip_val;
+		float common_scale = flt_ldexp( prod_level_size, (31-recip_shamt));
+
+		for(int i = 0; i < odv; i++){
+			uint32_t recip_val_i = recip_val_prev;
+			float weights_level_i =  info->weights_level[i];
+			if( weights_level_i != weights_level_prev ){
+				recip_val_i = roundf_u32( common_scale/(output_level_size * weights_level_i) );
+				if( recip_val_i & 0x80000000u){
+					logmsg(nn,0,"channel recip val %d has overflowed should not happen %08X as channel %f > global %f",i,info->recip[i], weights_level_i, info->weight_scale_factor);
+				}
+				weights_level_prev = weights_level_i;
+				recip_val_prev = recip_val_i;
+			}
+			info->recip[i] = recip_val_i;
+		}
+    }
+#else
+
+	/* Calculate conversion ratio from bias to product space */
+	//float bias_to_prod_ratio = (bias_level_size / prod_level_size);
+	/* What is the value of the output minimum in the product space? */
+	/* We need to add it to the products to move the smallest valid value to zero */
+	//float min_out_prod_offset = -info->out_minval / prod_level_size;
+    int ovf = 0;
+
+	uint64_t maxsum = fast_roundf((info->out_maxval-info->out_minval)*info->weight_scale_factor / prod_level_size);
+	uint32_t recip_shamt = 0;
+	uint64_t recip_val_64 = 0x7F80000000ULL/maxsum;  //255 << 31
+
+	maxsum += 1;
+
+	info->min_valid_val = 0;
+	info->max_valid_val = (info->out_maxval - info->out_minval)*info->weight_scale_factor / prod_level_size;
+
+	info->in_max_float = in_max_float;
+	info->in_min_float = in_min_float;
+
+	info->in_offset = input_offset;
+
+        if(recip_val_64 >= 0x80000000ULL) {
+            logmsg(nn,1,"main recip value overflowed %08X",recip_val_64);
+            ovf = 1;
+        }
+	while (recip_val_64 >= 0x80000000ULL) {
+		recip_shamt++;
+		recip_val_64 = 0x7F80000000ULL / (maxsum << recip_shamt);
+	}
+	info->recip_val = recip_val_64;
+	info->recip_shamt = recip_shamt;
+        //if(info->use_v66 || info->use_v65) for(int i = 0; i < info->out_depth_valid; i++)
+        if(info->use_v66) for(int i = 0; i < info->out_depth_valid; i++)
+        {
+	   //maxsum = fast_roundf((info->out_maxval-info->out_minval)*info->weight_scale_factor*info->weights_level[i] / prod_level_size );
+	   maxsum = fast_roundf((info->out_maxval-info->out_minval)*info->weights_level[i] / prod_level_size );
+	   info->recip[i] = 0x7F80000000ULL / (maxsum << recip_shamt);
+           if(info->recip[i] & 0x80000000 && !ovf)logmsg(nn,0,"channel recip val %d has overflowed should not happen %08X as channel %f > global %f",i,info->recip[i], info->weights_level[i], info->weight_scale_factor);
+        }
+        //prod_level_size /= info->weight_scale_factor;
+	info->prod_level_size = prod_level_size;
+
+#endif
 	return 0;
 }
 
@@ -4042,7 +4058,8 @@ static int fill_bias_buf(
 	float bias_level_size = (bias_max_float - bias_min_float) / bias_denom;
 	const uint8_t *bias8_ptr = bias_tensor->data;
 	const int32_t *bias32_ptr = bias_tensor->data;
-	float prod_level_size = info->prod_level_size;
+        float prod_level_size = info->prod_level_size; // /info->weight_scale_factor;
+        logmsg(nn,1,"fill bias buf %f %f",info->prod_level_size ,info->weight_scale_factor);
 	float bias_to_prod_ratio = (bias_level_size / prod_level_size);
 	float min_out_prod_offset = -info->out_minval / prod_level_size;
 	int32_t bias_depth = bias_tensor->shape.depth;
@@ -4053,18 +4070,17 @@ static int fill_bias_buf(
 	int32_t gemsumb_val;
 	int32_t final;
 	logmsg(nn,3,"in_offset=%d bias_levelsize=%f prod_level_size=%f ratio=%f",info->in_offset,bias_level_size,info->prod_level_size,bias_to_prod_ratio);
-
-	int per_chan_scaling = info->has_channel_scale || info->has_weight_scale;
-
 	for (i = 0; i < info->out_depth_valid; i++) {
 		if (i >= bias_depth) biasval = bias_offset;
 		else if (bias32) biasval = bias32_ptr[i];
 		else biasval = bias8_ptr[i];
 		bias_fval = (biasval - bias_offset) * bias_to_prod_ratio;
 		minout_bias_fval = bias_fval + min_out_prod_offset;
-		if(per_chan_scaling){
-			minout_bias_fval *= info->k_factor_recip[i];
-		}
+                //if(info->use_v66) {
+                if(info->use_v66 || info->use_v65) {
+                   logmsg(nn,3,"channel[%d] = %08x",i,info->weight_scale[i]);
+                   minout_bias_fval *= info->weights_level[i]; //make bigger to match bigger sums
+                }
 		gemsumb_val = info->gemsumb[i];
 		final = -gemsumb_val * info->in_offset + fast_roundf(minout_bias_fval) + extra;
 		logmsg(nn,3,"i=%d biasval%d=%d fval=%f minout_fval=%f gemsumb_val=%d extra=%d final=%d",
@@ -4401,7 +4417,6 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 	info->filt_width = filt_width;
 	info->filt_height = filt_height;
 
-	// Note: this may expand the output range
 	if(  fill_info_minmax_basics(nn,self,info) != 0 )
 		return -1;
 	//fill_info_dim_basics(nn,self,info);
@@ -4424,6 +4439,80 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
         if (!info->use_v65 && filt_height==1 && filt_width==1 && ENABLE_FASTSUMA_1x1) bias_extra = info->in_depth*input_offset*filt_offset;
 	logmsg(nn,2,"in_depth_total=%d input_offset=%d filt_offset=%d bias_extra=%d",in_depth_total,input_offset,filt_offset,bias_extra);
 	fill_bias_buf(nn,self,info,bias32,bias_extra);
+
+#if 0
+	/* Compute bias values */
+	//supernode_biasbuf_recalc(nn,info);
+	int bias32 = (self->node_type == OP_Supernode_8x8p32to8_d32);
+	if (!bias32) {
+		if (bias_max_float > 0x1p30f * prod_level_size) return errlog(nn,"bias mag too big");
+		if (-bias_min_float > 0x1.0p30f * prod_level_size) return errlog(nn,"bias mag too big");
+	} else {
+		bias_offset = 0;
+		bias_to_prod_ratio *= 0x1.0p-24f;
+	}
+	for (i = 0; i < info->out_depth; i++) {
+		int32_t biasval = bias[i];
+		if (bias32) biasval = bias32_ptr[i];
+		float bias_fval = ((biasval - bias_offset) * bias_to_prod_ratio);
+		bias_fval += min_out_prod_offset;
+		if (i >= out_depth) bias_fval = 0.0f;
+		/* If necessary, add GEMSUMB related values here */
+		int32_t gemsumb_val = supernode_gemsumb(
+			filt,
+			filt_height,
+			filt_width,
+			filt_depth,
+			filt_depth_total,
+			filt_batches,
+			input_offset,
+			filt_offset,
+			i);
+		//gemsumb_val += filt_height*filt_width*in_depth*in_offset*filt_offset;
+		logmsg(nn,3,"gemsumb[%d]=%d bias=%f total=%d",i,gemsumb_val,bias_fval,(int32_t)(bias_fval+0.5f-gemsumb_val));
+		/* Add the minimum output value; 0 if followed by relu */
+		//info->biasbuf[i] = -gemsumb_val - bias_fval + 0.5f;
+		tmpval32 = fast_roundf(bias_fval);
+		info->biasbuf[i] = tmpval32-gemsumb_val;
+		//logmsg(nn,1,"biasval @ %d: (%d - %d) * %f --> %d",i,biasval,bias_offset,bias_to_prod_ratio,info->biasbuf[i]);
+		//logmsg(nn,0,"biasbuf[%d]=%d",i,info->biasbuf[i]);
+	}
+#endif
+
+	/* 
+	 * Recompute weights
+	 * The weights need to be arranged so that they are in a depth32 compatible format.
+	 * We keep note that we've rearranged the weights so we only do this once.
+	 * For architectures that support signed weights, we convert weights to signed
+	 * FIXME: maybe we should move this to check time instead of recalculation time
+	 */
+	//FIXME: RECALC / REARRANGE WEIGHTS
+#if 0
+	//if (filt_depth % 32) return errlog(nn,"FIXME: in depth mult 32");
+	//if (filt_batches % 32) return errlog(nn,"FIXME: out depth mult 32");
+	if (info->weights_arranged == 0) {
+		supernode_rearrange_for_d32(
+			info->weights,filt,
+			filt_height,
+			filt_width,
+			filt_depth,
+			filt_depth_total,
+			filt_batches,
+			filt_batches_total,
+			filt_offset);
+		supernode_convert_weights_to_signed(
+			info->weights,
+			filt_height,
+			filt_width,
+			filt_depth_total,
+			filt_batches_total,
+			filt_offset);
+		supernode_cleaninv_weights(
+			info->weights,
+			filt_height*filt_width*filt_depth_total*filt_batches_total);
+		info->weights_arranged = 1;
+	}
+#endif
 
 	/*
 	 * Prepare output tensors
@@ -4872,6 +4961,7 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 		//work.output = out_data_start+b*output_batch_size+start_weights*info->out_next_d32;
 		work.biases = info->biasbuf + start_weights*32;
 		work.recip = info->recip + start_weights*32;
+                work.equalize = info->weight_scale + start_weights*32;
 		work.start_line = start_row;
 		work.stop_line = work.start_line + n_rows;
 		//work.do_conv = &info->semaphores[1];			// sem to wait for, before starting conv
@@ -5302,11 +5392,6 @@ int supernode_recalculate_strategy_v66(struct nn_node *self, struct nn_graph *nn
 	info->filt_width = filt_width;
 	info->filt_height = filt_height;
 
-	// disallow gain > 1.0
-	// since the v66 convs don't support recip_shamt > 0
-	info->recip_shamt_must_be_zero =1;
-
-	// Note: this may expand the output range
 	if (fill_info_minmax_basics(nn,self,info) != 0) return -1;
 	//fill_info_dim_basics(nn,self,info);
 	logmsg(nn,2,"out_maxval=%f in_level_size=%f filt_level_size=%f prod_level_size=%f maxvalid ~= %d",
@@ -5388,12 +5473,11 @@ int supernode_recalculate_strategy_v66(struct nn_node *self, struct nn_graph *nn
 		info->out_left_junk = 0;
 		info->in_left_skip = 0;
 		info->out_width -= out_left_pad;
-		info->skip_col = (4-(out_width & 3))%4;
+		info->skip_col = 0;
 		logmsg(nn,1," valid padding only");
 	} else {
 		//only skip col if oput wdth is over 3 otherwise pipe is not flushed correctly
 		info->skip_col = (((out_width & 3) <= ((4-info->out_left_junk)&3) && (out_width & 3)!=0 && out_width > 4)) ? 4:0;
-                info->skip_col |= ((4-((out_width + info->out_left_junk) & 3)) % 4);
 		info->input_base = tensor_location_d32(in_tensor,0,-required_h_before,-in_left_pad,0);
 		logmsg(nn,1," same or valid (with non mod4 in_left_pad) padding ");
 	}
@@ -5654,7 +5738,9 @@ int supernode_recalculate_strategy_v66(struct nn_node *self, struct nn_graph *nn
 		work.input = info->input_base+b*input_batch_size;
 		work.output = tensor_location_d32(out_tensor,b,0,0,32*ow);
 		work.biases = info->biasbuf + 32 * ow;
-		work.recip = info->recip + 32 * ow;
+                work.equalize = info->weight_scale + 32 * ow;
+                work.recip = info->recip + 32 * ow;
+                work.recip_sh = info->recip_sh + 32 * ow;
 		work.start_line = start_row;
 		work.stop_line = work.start_line + n_rows;
                 work.conv_done = info->semaphores;
@@ -5728,8 +5814,8 @@ static int supernode_execute_strategy(struct nn_node *self, struct nn_graph *nn)
 {
 	struct supernode_info_new *info = self->opaque;
 	info->cycles = 0;
-	info->minval = 1<<24;		// so we need the 'true' min output (when it's > 0)
-	info->maxval = -(1<<24);
+	info->minval = 0;
+	info->maxval = 0;
 	if (0) {
 		return supernode_execute_some_strategy(self,nn,0,info->n_work_items);
 	} else {
@@ -5894,171 +5980,18 @@ static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-// check if 'channelscale' present on input 13.
-// if so, the *fp is set to point to the floats; if not, it's set to NULL.
-// An input with a single value of 1.0 is considered the same as 'absent'.
-// The size of the dimension is checked (error return if it doesn't match).
-// (this is intended to be used by shortin and depthwise, if & when they support ChannelScale)
-static int
-check_channelscale_present(struct nn_graph *nn, struct nn_node *self, int filt_batches, float const **fp){
-
-	*fp = NULL;
-	if( self->n_inputs >= 13){	// looks like we do...
-		const struct tensor *cscale_tensor = self->inputs[12];
-		int n = cscale_tensor->data_size/sizeof(float);
-		if( n == 1 && tensor_get_float(cscale_tensor,0) == 1.0f){
-			// we don't really have channel-scaling; ignore a 1.0 input
-		}else{
-			if( n != filt_batches){
-				return errlog(nn,"expected size %d vector for channel_scale, got %d", (int)filt_batches, n );
-			}
-			*fp = (float const*) cscale_tensor->data;
-		}
-	}
-	return 0;
-}
-
-
-//
-// load the channel scales from float tensor into k_factor
-// As coded this allow values in range 1/32 .. 1.0.
-// any 'padded' values are set to  of 1.0
-// it also sets info->has_channel_scale = 1
-//
-// if channel_scale_flts is NULL, it sets info->has_channelscale  0 and does nothing.
-//
-// (this is intended to be used by shortin and depthwise, if & when they support ChannelScale)
-//
-
-static int
-load_channel_scales(struct nn_graph *nn,struct supernode_info_new *info,
-		float const * channel_scale_flts, int out_depth)
-{
-	if( channel_scale_flts == NULL){
-		info->has_channel_scale = 0;
-		return 0;
-	}
-
-	float * outp = info->k_factor;
-	info->has_channel_scale = 1;
-
-	int out_depth_roundup = (out_depth + 31) & ~31;
-	for( int i =0; i < out_depth; i++){
-		float scval = channel_scale_flts[i];
-		if( !( scval <= 1.0f && scval >= (float)(1./32.))){
-			return errlog(nn,"bad channel scale[%d]= %.8f",i,scval);
-		}
-		outp[i] = scval;
-	}
-	if( out_depth_roundup > out_depth){
-		memset_float( &outp[out_depth], 1.0f, out_depth_roundup - out_depth );
-	}
-	return 0;
-}
-
-//
-// This fills in info->k_factor and info->k_factor_recip
-// (this is intended to be used by shortin and depthwise, if & when they support ChannelScale)
-//
-//
-// Requires:
-//   (1) if info->has_channel_scale = 1, the channels scales are loaded
-//       into info->k_factor (result from calling load_channel_scales)
-//   (2) if info->has_weight_scale, the weight scales have been
-//       loaded into info->k_factor_recip (but as fixed-point numbers
-//        with 32 fractional bits, not as floats). Otherwise no assumption
-//        is made about contents of k_factor_recip.
-//
-//  The arrays are filled as follows:
-//     k_factor[i] = chanscale[i]/weight_scale[i]
-//     k_factor_recip[i] = weight_scale[i]/channel_scale[i];
-//  Also mak_k_factor is set to the largest k_factor encountered
-//  (or 1.0, if all are < 1).
-//
-static int
-find_k_kinv(struct nn_graph *nn, struct supernode_info_new *info, int filt_batches_roundup)
-{
-	int has_channel_scale = info->has_channel_scale;
-	int has_weight_scale= info->has_weight_scale;
-	float * k_wrp = info->k_factor;				// output pointer
-	float * kinv_wrp = info->k_factor_recip;
-	if( !has_weight_scale){
-		if( !has_channel_scale){
-			memset_float( k_wrp, 1.0f, filt_batches_roundup );
-			memset_float( kinv_wrp, 1.0f, filt_batches_roundup );
-		}else{
-			// channel scales (all <=1.0) but no weight scale
-			// Just leave the k alone, find reciprocals -> k_factor_recip.
-			float const *chanscale_rdp = info->k_factor;	// read channel scales
-			for( int i =0; i < filt_batches_roundup; i++){
-				float chsc = chanscale_rdp[i];
-				kinv_wrp[i] = (chsc == 1.0f)? 1.0f : ( 1.0f/chsc);
-			}
-		}
-		info->max_k_factor = 1.0f;
-		return 0;
-	}
-	float const *chanscale_rdp = info->k_factor;	// read channel scales
-	int32_t const *wscale_rp = (int32_t const*) info->k_factor_recip;
-	float max_k = 1.0f;
-	for( int i = 0; i < filt_batches_roundup; i++){
-		float cscale = has_channel_scale? chanscale_rdp[i]: 1.0f;
-		float wsf = (float)wscale_rp[i] * ( float)( 1.0/ (1u<<31));	//
-		float k = cscale;
-		float kinv = wsf;
-		if( cscale!=1.0f) kinv = wsf/cscale;
-		if( wsf != 1.0f) k = cscale/wsf;
-		max_k = fmaxf( max_k, k);
-		k_wrp[i] = k;
-		kinv_wrp[i] = kinv;
-	}
-	info->max_k_factor = max_k;
-	return 0;
-}
-
-//
-// utility to bail out of supernode_check, when there's an error
-// and we need to deallocate any allocated memory
-// If it's due to being unable to allocate "x", call with alloctag = "x"
-// and it will log an error. Or log your own and call with alloctag = NULL.
-//
-static int  __attribute__((noinline,cold))
-supernode_check_error_return (struct nn_graph *nn, struct supernode_info_new *info, char const * alloctag )
-{
-	if(info){
-		if(info->k_factor_recip != NULL) nn_free(info->k_factor_recip);
-		if(info->k_factor != NULL) nn_free(info->k_factor);
-		if(info->recip != NULL) nn_free(info->recip);
-		if(info->conv_slices != NULL) nn_free(info->conv_slices);
-		if(info->gemsumb != NULL) nn_free(info->gemsumb);
-		if(info->semaphores != NULL) nn_free(info->semaphores);
-		if(info->biasbuf != NULL) nn_free(info->biasbuf);
-		if(info->weights != NULL) nn_free(info->weights);
-		if(info->minmax_buf != NULL) nn_free(info->minmax_buf);
-		nn_free(info);
-	}
-	if( alloctag != NULL)
-		errlog(nn,"alloc failed for %s", alloctag);
-	return -1;
-}
-
-
-
 int supernode_check(struct nn_node *self, struct nn_graph *nn)
 {
 	struct supernode_info_new *info = self->opaque;
-
-	// ctor checks that n_inputs = 12 or 13 (13th is ChannelScale
-	// and n_outputs = 3
-
+	if (self->n_inputs != 12) return errlog(nn,"supernode wrong # inputs... now need min/max with inf for self-detecting");
+	if (self->n_outputs != 3) return errlog(nn,"supernode wrong # outputs");
 	const struct tensor *filt_tensor = self->inputs[1];
 	const struct tensor *filt_min_tensor = self->inputs[4];
 	const struct tensor *filt_max_tensor = self->inputs[5];
 	const struct tensor *stride_tensor = self->inputs[6];
 	float filt_max_float = tensor_get_float(filt_max_tensor,0);
 	float filt_min_float = tensor_get_float(filt_min_tensor,0);
-	float filt_level_size;
-	int32_t filt_offset = get_qu8_level_size_zero(filt_min_float,filt_max_float,&filt_level_size);
+	int32_t filt_offset = quantize_uint8(0.0f,filt_min_float,filt_max_float);
 	int32_t filt_batches = filt_tensor->shape.filt_batches;
 	int32_t filt_batches_roundup = (filt_batches + 31) & ~31;
 	int32_t filt_height = filt_tensor->shape.filt_height;
@@ -6075,7 +6008,7 @@ int supernode_check(struct nn_node *self, struct nn_graph *nn)
 	float specified_minval = tensor_get_float(self->inputs[10],0);
 	float specified_maxval = tensor_get_float(self->inputs[11],0);
 	int i;
-	int use_v66 = 0;
+        int use_v66 = 0;
 
 	int circ_buf_est = 2*(filt_height+stride_tensor->shape.height)*filt_depth*(self->output_defs[0].max_sizes[1]*stride_width+8);
 	nn_scratch_grow(nn,circ_buf_est*NUM_THREADS);
@@ -6142,68 +6075,102 @@ int supernode_check(struct nn_node *self, struct nn_graph *nn)
 		logmsg(nn,0,"info was already set up?");
 		return 0;
 	}
-
-	// check if we have a channel-scaling input (#12)
-	float const *channel_scale_flts = NULL;
-	if( check_channelscale_present(nn,self, filt_batches, &channel_scale_flts)!=0)
-		return -1;
-
 	if ((info = nn_calloc(1,sizeof(*info))) == NULL) {
 		return errlog(nn,"couldn't allocate info");
 	}
 	if ((info->minmax_buf = nn_memalign(128,NUM_THREADS*n_weight_batches*64*sizeof(int))) == NULL) {
-		return supernode_check_error_return(nn, info,"minmax");
+		nn_free(info);
+		return errlog(nn,"malloc/memalign");
 	}
 	if ((info->weights = nn_memalign(weights_align,weights_size)) == NULL) {
-		return supernode_check_error_return(nn, info,"weights");
+		nn_free(info->minmax_buf);
+		nn_free(info);
+		return errlog(nn,"alloc weights");
 	}
 	if ((info->biasbuf = nn_memalign(128,out_depth*sizeof(int32_t))) == NULL) {
-		return supernode_check_error_return(nn, info,"biasbuf");
+		nn_free(info->minmax_buf);
+		nn_free(info->weights);
+		nn_free(info);
+		return errlog(nn,"alloc biasbuf");
 	}
 	if ((info->semaphores = nn_calloc(3+n_weight_batches,sizeof(nn_sem_t))) == NULL) {
-		return supernode_check_error_return(nn, info,"semaphores");
+		nn_free(info->biasbuf);
+		nn_free(info->minmax_buf);
+		nn_free(info->weights);
+		nn_free(info);
+		return errlog(nn,"alloc semaphores");
 	}
 	if ((info->gemsumb = nn_memalign(128,out_depth*sizeof(int32_t))) == NULL) {
-		return supernode_check_error_return(nn, info,"gemsumb");
+		nn_free(info->biasbuf);
+		nn_free(info->minmax_buf);
+		nn_free(info->weights);
+		nn_free(info->semaphores);
+		nn_free(info);
+		return errlog(nn,"alloc gemsumb");
 	}
 	if ((info->conv_slices = nn_calloc(total_weight_batches,sizeof(*info->conv_slices))) == NULL) {
-		return supernode_check_error_return(nn, info,"conv_slices");
+		nn_free(info->gemsumb);
+		nn_free(info->biasbuf);
+		nn_free(info->minmax_buf);
+		nn_free(info->weights);
+		nn_free(info->semaphores);
+		nn_free(info);
 	}
-	if ((info->recip = nn_memalign(128,out_depth*sizeof(int32_t))) == NULL) {
-		return supernode_check_error_return(nn, info,"recip");
-	}
-	if ((info->k_factor = nn_memalign(128,out_depth*sizeof(int32_t))) == NULL) {
-		return supernode_check_error_return(nn, info,"k_factor");
-	}
-	if ((info->k_factor_recip = nn_memalign(128,out_depth*sizeof(int32_t))) == NULL) {
-		return supernode_check_error_return(nn, info,"k_factor_recip");
-	}
-	// load channel-scale (if any)
-	if( load_channel_scales(nn,info,channel_scale_flts,filt_batches) != 0 ){
-		return supernode_check_error_return(nn, info,NULL);
-	}
+        if ((info->weights_level = nn_memalign(128,out_depth*sizeof(float))) == NULL) {
+                nn_free(info->gemsumb);
+                nn_free(info->biasbuf);
+                nn_free(info->minmax_buf);
+                nn_free(info->weights);
+                nn_free(info->semaphores);
+                nn_free(info->conv_slices);
+                nn_free(info);
+        }
+        if ((info->weight_scale = nn_memalign(128,out_depth*sizeof(int32_t))) == NULL) {
+                nn_free(info->gemsumb);
+                nn_free(info->biasbuf);
+                nn_free(info->minmax_buf);
+                nn_free(info->weights);
+                nn_free(info->semaphores);
+                nn_free(info->conv_slices);
+                nn_free(info->weights_level);
+                nn_free(info);
+        }
+        if ((info->recip = nn_memalign(128,out_depth*sizeof(int32_t))) == NULL) {
+                nn_free(info->gemsumb);
+                nn_free(info->biasbuf);
+                nn_free(info->minmax_buf);
+                nn_free(info->weights);
+                nn_free(info->semaphores);
+                nn_free(info->conv_slices);
+                nn_free(info->weights_level);
+                nn_free(info->weight_scale);
+                nn_free(info);
+        }
+        if ((info->recip_sh = nn_memalign(128,out_depth*sizeof(int32_t))) == NULL) {
+                nn_free(info->gemsumb);
+                nn_free(info->biasbuf);
+                nn_free(info->minmax_buf);
+                nn_free(info->weights);
+                nn_free(info->semaphores);
+                nn_free(info->conv_slices);
+                nn_free(info->weights_level);
+                nn_free(info->weight_scale);
+                nn_free(info->recip);
+                nn_free(info);
+        }
+
 #if 0
 	for (i = 0; i < total_weight_batches; i++) {
 		nn_checkpoint_init(&info->conv_checkpoints[i],1,note_conv_checkpoint_arrival,(void *)(i));
 	}
 #endif
-	int use_signed_weights = use_v65 | use_v66;
 	info->use_v65 = use_v65;
 	info->use_v66 = use_v66;
-	info->use_signed_weights = use_signed_weights;
         info->num_accs = 8;
 	for (i = 0; i < n_weight_batches+3; i++) {
 		nn_sem_init(&info->semaphores[i],0);
 	}
-	float weight_scalefac = 1.0;	// how much weights were scaled (if at all);  0.5 .. 1
-	// (weight_scalefac is not used, since we look at all the weights & channel scales
-	// and find the largest net scaling factor, max_k_factor)
-	//
-	// weight_scale[d] (as a fixed-point, with 31 fractional bits)
-	// is laid on top of k_factor_recip buffer, until k_factor and k_factor_recip are found
-	//
-	int32_t * weight_scale = (int32_t*) info->k_factor_recip;
-
+	float weight_scalefac = 1.0;	// how much weights were scaled (if at all);  0.5 .. 1.0
 
 #ifdef ENABLE_VECTOR_WEIGHT_ARRANGE
 	// @@@ NOTE @@@
@@ -6213,28 +6180,24 @@ int supernode_check(struct nn_node *self, struct nn_graph *nn)
 	// used to compensate info->weights_level_size
 	//
 	{
-		info->has_weight_scale = use_signed_weights;
 		struct repack_filter_parms rpfparms;
 		rpfparms.out_data = info->weights;
 		rpfparms.filt_tensor = filt_tensor;
 		rpfparms.zero_offset = filt_offset;
-		rpfparms.signed_mode_sel = use_signed_weights;
+		rpfparms.signed_mode_sel = use_v65 | use_v66;
 		rpfparms.gemsumb = info->gemsumb;
-		rpfparms.scalefac_vec = weight_scale;
+                rpfparms.scalefac_vec = info->weight_scale;
 
 		nn_sem_init( & rpfparms.done_sem, 0);
 		// call it directly.
+		int vv = nn_os_vector_acquire();
 		repack_filter_for_d32( nn, &rpfparms);
+		nn_os_vector_release(vv);
 		weight_scalefac = rpfparms.coeffscale;
-		if( weight_scalefac == 1.0f){
-			info->has_weight_scale = 0;	// signed, but no scaling needed
-		}
-		logmsg(nn,2,"weights global scale factor= %f with %d zero",weight_scalefac,filt_offset);
+                logmsg(nn,2,"weights global scale factor= %f with %d zero",weight_scalefac,filt_offset);
 	}
-
-
 #else // ! ENABLE_VECTOR_WEIGHT_ARRANGE
-        if(info->use_signed_weights) {
+        if(info->use_v66 || info->use_v65) {
            weight_scalefac = supernode_rearrange_vector_d32(
                 info->weights,
                 filt_tensor->data,
@@ -6245,7 +6208,7 @@ int supernode_check(struct nn_node *self, struct nn_graph *nn)
                 filt_batches,
                 filt_batches_roundup,
                 filt_offset,
-                weight_scale,
+                info->weight_scale,
                 info->gemsumb);
 #if 0
         } else if(info->use_v65) {
@@ -6276,15 +6239,6 @@ int supernode_check(struct nn_node *self, struct nn_graph *nn)
         }
 #endif// ! ENABLE_VECTOR_WEIGHT_ARRANGE
 
-	//
-	// set up the k_factor and k_factor_recip
-	// In general, we are setting k_factor = k_factor/weight_scale
-	//                            k_factor_inv = weight_scale/k_factor
-	find_k_kinv( nn, info, filt_batches_roundup);
-
-	logmsg(nn,3,"has_channel_scale= %d, has_weight_scale= %d, max_k = %f",
-			info->has_channel_scale, info->has_weight_scale, info->max_k_factor);
-
 	supernode_cleaninv_weights(
 		info->weights,
 		filt_height*filt_width*filt_depth_roundup*filt_batches_roundup);
@@ -6295,25 +6249,56 @@ int supernode_check(struct nn_node *self, struct nn_graph *nn)
 	info->n_weight_batches = n_weight_batches;
         info->in_right_padpad = 8*stride_width; //tack on this to circular buffer to avoid bad max's
 
-        info->weights_offset = use_signed_weights ? 0: filt_offset;
+        //if(info->use_v65) { 
+        //  info->weight_scale_factor = 1.f;   //set to 1.0 for 65 operation
+        //} else {
+          info->weight_scale_factor = weight_scalefac;
+        //}
+        logmsg(nn,1,"scale factor global %f",info->weight_scale_factor);
+        float filt_level_size = (filt_max_float - filt_min_float) / ( 255.0f* weight_scalefac );
+        //if (use_v66) {
+        if (use_v66 || use_v65) {
+              filt_level_size = (filt_max_float - filt_min_float) / 255.f;
+        }
+        if (use_v65 || use_v66) {
+        	info->weights_offset = 0;
+        } else {
+        	info->weights_offset = filt_offset;
+        }
         info->filt_offset = filt_offset;
         info->weights_level_size = filt_level_size;
         logmsg(nn,2,"filt_offset  = %d", filt_offset);
-
+        //if(use_v66) for(i=0; i < filt_batches_roundup; i++) {
+        if(use_v66 || use_v65) for(i=0; i < filt_batches_roundup; i++) {
+              float scale = (float) info->weight_scale[i] / 2147483648.f;  //r0.5 to .999  - local sf
+              info->weight_scale[i]= (int32_t) (1073741824.f / scale);
+              info->weights_level[i] = scale; ///weight_scalefac;   
+              logmsg(nn, 2, "%d	global scale = %f local scale = %f ratio = %08lX",i,weight_scalefac,scale,info->weight_scale[i]);
+        }
+#if 0
+        if(use_v65) for(i=0; i < filt_batches_roundup; i++) {
+              info->weight_scale[i]= 0x7fffffff;
+        }
+    logmsg(nn,0,"%d,%d	%d,%d",filt_height,filt_width,filt_depth_roundup,filt_batches_roundup);
+    if(use_v66) for(i=0; i < filt_batches_roundup/32; i++) {
+          for(j=0; j < 32*filt_height*filt_width*filt_depth_roundup; j++)
+          {
+             logmsg(nn,0,"%d,%d	%d",i,j,info->weights[j+i*32*filt_height*filt_width*filt_depth_roundup]);
+          }
+    }
+#endif
 	logmsg(nn,2,"stride_width=%d in_right_padpad=%d",stride_width,info->in_right_padpad);
 
 	nn_sem_init(&info->alldone_sem,0);
-	if(setup_initial_output_range( nn, info, specified_minval, specified_maxval, 0.0f, 0.5f)) return -1;
+	setup_initial_output_range( info, specified_minval, specified_maxval, 0.0f, 0.5f);
 
 	return 0;
-
 }
 
 
 // this sets up:
 //   info->out_minval, info->out_minval_spec, and info->minval_precalculated
 // .. and the same for 'maxval'.
-//  It also sets minmax_precalc_flags which is both flags in one value.
 //
 // This will always ensure that that (out_minval, out_maxval is a 'proper' range,
 //  e.g -1.0 .. 1.0 may be corrected to -1.0 .. 1.00787
@@ -6324,8 +6309,8 @@ int supernode_check(struct nn_node *self, struct nn_graph *nn)
 // It is assumed that minval_default <=0, maxval_default >=1/128
 // But the range need not be 'proper'.
 //
-static int
-setup_initial_output_range( struct nn_graph *nn, struct supernode_info_new *info,
+static void
+setup_initial_output_range( struct supernode_info_new *info,
 	float specified_minval,		// range specified by inputs
 	float specified_maxval,
 	float minval_default,			// use when specified_minval = -INF
@@ -6334,13 +6319,9 @@ setup_initial_output_range( struct nn_graph *nn, struct supernode_info_new *info
 	// enforce sanity:  min <= 0.0 <= max
 	// and max > min + 1/128
 	//
-	//specified_minval = fminf( specified_minval, 0.0f);
-	//specified_maxval = fmaxf( specified_maxval, 0.f);
-
-	//specified_maxval = fmaxf( fmaxf( specified_maxval, 0.f),
-	//							specified_minval + 0x1.0p-7f);
-	if( specified_minval > 0.0f || specified_maxval < 0.0f || specified_minval >= specified_maxval )
-		return errlog(nn, "supernode: invalid input min/max");
+	specified_minval = fminf( specified_minval, 0.0f);
+	specified_maxval = fmaxf( fmaxf( specified_maxval, 0.f),
+								specified_minval + 0x1.0p-7f);
 
 	info->out_minval_spec = specified_minval;
 	info->out_maxval_spec = specified_maxval;
@@ -6354,10 +6335,7 @@ setup_initial_output_range( struct nn_graph *nn, struct supernode_info_new *info
 	info->minval_precalculated = mnp;
 	info->maxval_precalculated = mxp;
 
-	int corr_code = info->minmax_precalc_flags = 2*mxp + mnp;
-	// unless both min and max are specified, this is considered a 'first guess'
-	info->outrange_firstguess = corr_code !=3 ;
-
+	int corr_code = 2*mxp + mnp;
 	// corr_code:
 	//    bit 0 -> out_min is 'fixed'
 	//    bit 1 -> out_max is 'fixed';
@@ -6366,8 +6344,6 @@ setup_initial_output_range( struct nn_graph *nn, struct supernode_info_new *info
 	if( info->out_minval < 0.0f ){
 		adjust_minmax_for_zero_with_constraints( &info->out_minval, &info->out_maxval, corr_code);
 	}
-
-	return 0;
 }
 
 
@@ -6376,9 +6352,10 @@ static int supernode_dtor(struct nn_node *self, struct nn_graph *nn)
 	struct supernode_info_new *info = self->opaque;
 	if (info != NULL) {
 		supernode_reset_work_items(self,nn,info);
-		nn_free(info->k_factor_recip);
-		nn_free(info->k_factor);
-		nn_free(info->recip);
+                nn_free(info->recip_sh);
+                nn_free(info->recip);
+                nn_free(info->weight_scale);
+                nn_free(info->weights_level);
 		nn_free(info->conv_slices);
 		nn_free(info->gemsumb);
 		nn_free(info->semaphores);
@@ -6421,9 +6398,6 @@ struct nn_node_ops nn_ops_for_Supernode_8x8p8to8_d32 = {
 	.check = supernode_check,
 	.ctor = node_alloc_common,
 	.dtor = supernode_dtor,
-	.n_inputs = NN_IOCOUNT_RANGE(12,13),
-	.n_outputs = NN_IOCOUNT(3),
-
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT | NN_NODE_FLAG_OUTPUT_ACCEPTS_PREPARATION,
 	.earlywork_note_pred = supernode_earlywork_note_pred,
 	.earlywork_register = supernode_earlywork_register,
@@ -6434,9 +6408,6 @@ struct nn_node_ops nn_ops_for_Supernode_8x8p32to8_d32 = {
 	.check = supernode_check,
 	.ctor = node_alloc_common,
 	.dtor = supernode_dtor,
-	.n_inputs = NN_IOCOUNT_RANGE(12,13),
-	.n_outputs = NN_IOCOUNT(3),
-
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT | NN_NODE_FLAG_OUTPUT_ACCEPTS_PREPARATION,
 	.earlywork_note_pred = supernode_earlywork_note_pred,
 	.earlywork_register = supernode_earlywork_register,
@@ -6756,8 +6727,7 @@ static inline int32_t dwise_gemsumb(
   compare how the actual max and min compaes with the preidcted max and min if too small increase
   it until it fits. 
  */
-static int __attribute__((unused))
-dwise_supernode_execute_workitem_check_for_retry(struct workitem *work, struct nn_node *node, struct nn_graph *nn)
+int dwise_supernode_execute_workitem_check_for_retry(struct workitem *work, struct nn_node *node, struct nn_graph *nn)
 {
 
 	/*
@@ -6769,11 +6739,11 @@ dwise_supernode_execute_workitem_check_for_retry(struct workitem *work, struct n
         struct supernode_info_new *info = node->opaque;
 
         int needs_retry = 0;
-        int fixed_flags = info->minmax_precalc_flags;				// for adjust_minmax_for_zero_with_constraints
+        int fixed_flags = 3;				// for adjust_minmax_for_zero_with_constraints
         float ominval = info->out_minval;	// for interpreting minval/maxval
 
 
-        if ((fixed_flags&2)==0) {	// max not fixed
+        if (!info->maxval_precalculated) {
             logmsg(nn,1,"in check for retry max %d ", info->maxval);
             float app_maxval = info->maxval * info->prod_level_size + ominval;
 
@@ -6784,8 +6754,9 @@ dwise_supernode_execute_workitem_check_for_retry(struct workitem *work, struct n
         				info->out_minval,info->out_maxval,info->maxval,app_maxval);
                 needs_retry = 1;
             }
+            fixed_flags &= ~2;	// bit 1->0  (max not fixed)
         }
-        if ((fixed_flags&1)==0) { // min not fixed
+        if (!info->minval_precalculated) {
         	if (info->minval < 0) {		// need to move min
         		float app_minval = info->minval * info->prod_level_size + ominval;
             	info->out_minval = round_up_quarter_octave( fminf(app_minval, -0x1.0p-8f));
@@ -6793,6 +6764,7 @@ dwise_supernode_execute_workitem_check_for_retry(struct workitem *work, struct n
         				info->out_minval,info->out_maxval,info->minval,app_minval);
                 needs_retry = 1;
         	}
+            fixed_flags &= ~1;	// bit 0->0  (min not fixed)
         }
         // correct the endpoints for a proper zero
         if (needs_retry){
@@ -6908,8 +6880,6 @@ static int dwise_supernode_recalculate_strategy(struct nn_node *self, struct nn_
 	info->stride_width = stride_width;
 
 	// find input range, output scaling and limits
-	// Note: may expand the output range
-
 	if( fill_info_minmax_basics(nn,self,info) !=0 ) return -1;
 	logmsg(nn,1,"out_maxval=%f out_minval=%f in_max_float=%f in_min_float=%f in_level_size=%f filt_level_size=%f prod_level_size=%f max_valid_val=%d",
 			info->out_maxval,info->out_minval,info->in_max_float,info->in_min_float,info->prod_level_size/info->weights_level_size,
@@ -7125,27 +7095,21 @@ static int dwise_supernode_execute(struct nn_node *self, struct nn_graph *nn)
         struct tensor *out_min = self->outputs[1];
         struct tensor *out_max = self->outputs[2];
         unsigned long long int total_time;
-        int loopcount = 0;
-        while(1){
-			if (likely(supernode_strategy_valid(self,nn,nodeinfo))) {
-					if (supernode_execute_strategy(self,nn) != 0) {
-							return errlog(nn,"execute strategy failed");
-					}
-			} else {
-					if (dwise_supernode_recalculate_strategy(self,nn) != 0) {
-							return errlog(nn,"recalc strategy failed");
-					}
-					if (supernode_execute_strategy(self,nn) != 0) {
-							return errlog(nn,"execute strategy fail after recalc");
-					}
-			}
-			/* Replay if self-calculated min/max are insufficient */
-			if (!nodeinfo->needs_retry)
-				break;
-			if( ++loopcount > 4){
-				return errlog(nn,"can't find range for depthwise");
-			}
+
+        if (likely(supernode_strategy_valid(self,nn,nodeinfo))) {
+                if (supernode_execute_strategy(self,nn) != 0) {
+                        return errlog(nn,"execute strategy failed");
+                }
+        } else {
+                if (dwise_supernode_recalculate_strategy(self,nn) != 0) {
+                        return errlog(nn,"recalc strategy failed");
+                }
+                if (supernode_execute_strategy(self,nn) != 0) {
+                        return errlog(nn,"execute strategy fail after recalc");
+                }
         }
+        /* Replay if self-calculated min/max are insufficient */
+        if (nodeinfo->needs_retry) return dwise_supernode_execute(self,nn);
         tensor_set_float(out_min,0,nodeinfo->out_minval);
         tensor_set_float(out_max,0,nodeinfo->out_maxval);
         /* Record cycles (divide by # of vector worker threads somehow?) */
@@ -7167,8 +7131,8 @@ static int dwise_supernode_execute(struct nn_node *self, struct nn_graph *nn)
  */
 static int dwise_supernode_check(struct nn_node *self, struct nn_graph *nn)
 {
-	// ctor checks that n_inputs = 12 or 13 (13th is ChannelScale)
-	// and n_outputs = 3
+	if (self->n_inputs != 12) return errlog(nn,"dwise wrong # inputs: %d",self->n_inputs);
+	if (self->n_outputs != 3) return errlog(nn,"dwise wrong # outputs");
 	const struct tensor *filt_tensor = self->inputs[1];
 	const struct tensor *min_filt_tensor = self->inputs[4];
 	const struct tensor *max_filt_tensor = self->inputs[5];
@@ -7196,8 +7160,6 @@ static int dwise_supernode_check(struct nn_node *self, struct nn_graph *nn)
 	if ((info = nn_calloc(1,sizeof(*info))) == NULL) {
 		return errlog(nn,"calloc");
 	}
-	info->is_dwise = 1;
-
 	if ((info->weights = nn_memalign(128,weights_size)) == NULL) {
 		nn_free(info);
 		return errlog(nn,"memalign");
@@ -7231,11 +7193,12 @@ static int dwise_supernode_check(struct nn_node *self, struct nn_graph *nn)
 	info->weights_offset = 0;
 #endif
 	weights_scale = dwise_convert_weights_to_signed(nn,info->weights,weights_size,filt_offset);
-	// NOTE: currently (3/7/19) dwise_convert_weights_to_signed does nothing and returns 1.0
+
 
 
 	info->weights_level_size =  (filt_max_float - filt_min_float) / (255.0f * weights_scale);
- 	logmsg(nn,1,"weights_scale=%f  weights_level_size=%f",weights_scale,info->weights_level_size);
+        info->weight_scale_factor = 1.0;
+	logmsg(nn,1,"weights_scale=%f  weights_level_size=%f",weights_scale,info->weights_level_size);
 
 	for (b = 0; b < filt_batches; b++) {
 		for (i = 0; i < filt_depth_roundup; i++) {
@@ -7247,10 +7210,10 @@ static int dwise_supernode_check(struct nn_node *self, struct nn_graph *nn)
 				i,b);
 		}
 	}
-	info->max_k_factor = 1.0f;
+
 	info->strategy_valid = 0;
 
-	if( setup_initial_output_range( nn, info, specified_minval, specified_maxval, -0.125f, 0.125f) ) return -1;
+	setup_initial_output_range( info, specified_minval, specified_maxval, -0.125f, 0.125f);
 
 	logmsg(nn,1,"during prepare: out_minval=%f out_maxval=%f",info->out_minval,info->out_maxval);
 	return 0;
@@ -7283,8 +7246,6 @@ struct nn_node_ops nn_ops_for_DepthwiseSupernode_8x8p8to8_d32 = {
 	.check = dwise_supernode_check,
 	.ctor = node_alloc_common,
 	.dtor = dwise_supernode_dtor,
-	.n_inputs = NN_IOCOUNT_RANGE(12,13),
-	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };
 
@@ -7293,8 +7254,6 @@ struct nn_node_ops nn_ops_for_DepthwiseSupernode_8x8p32to8_d32 = {
 	.check = dwise_supernode_check,
 	.ctor = node_alloc_common,
 	.dtor = dwise_supernode_dtor,
-	.n_inputs = NN_IOCOUNT_RANGE(12,13),
-	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };
 /* --------------------- end of depthwise stuff ---------------------  */
@@ -7584,7 +7543,7 @@ static void shortin_supernode_execute_hvx_slice(struct nn_graph *nn, void *vwork
     int32_t n_in_rows = (n_lines-1)*stride_height + filt_height; 
 #if 1
     int32_t path223 = (info->stride_width == 2 && stride_height == 2 && info->filt_width == 3);
-    inconv2d_t conv = (info->stride_width == 1) ? &inconv2dbbb_s1_v60_asm :
+    inconv2d_t conv = (info->stride_width == 1) ? &inconv2dbbb_s1_v60_asm : 
                                                   (path223) ? &inconv2dbbb332_v60_asm : &inconv2dbbb_v60_asm;
 #else
     inconv2d_t conv = (info->stride_width == 1) ? &inconv2dbbb_s1_v60_asm : &inconv2dbbb_v60_asm;
@@ -7658,7 +7617,7 @@ static void shortin_supernode_execute_hvx_slice(struct nn_graph *nn, void *vwork
                 shortin_prefetch_input(work, (out_row+proc_rows)*stride_height + pf_offset, next_n_in_rows-pf_offset);
             }
 #if 0
-            logmsg(nn,2,"d=%d input=%p-->%p weights=%p-->%p filter_count=%d output=%p//%p out_next_row=%d biasbuf=%p recip_val=%x num_lines=%d filt_width=%d filt_height=%d in_depth=%d stride=%08x shamt=%d",
+            logmsg(nn,2,"d=%d input=%p-->%p weights=%p-->%p filter_count=%d output=%p//%p out_next_row=%d biasbuf=%p recip_val=%x num_lines=%d filt_width=%d filt_height=%d in_depth=%d stride=%08x",
                 d,
                 work->input,
                 input + info->in_depth*LPAD,
@@ -7666,7 +7625,7 @@ static void shortin_supernode_execute_hvx_slice(struct nn_graph *nn, void *vwork
                 work->weights + d*filter_count,
                 filter_count,
                 output_batch,
-                (char*)0,//output+d*info->out_next_d32/32,
+                output+d*info->out_next_d32/32,
                 info->out_next_row,
                 info->biasbuf + d,
                 info->recip_val,
@@ -7674,8 +7633,7 @@ static void shortin_supernode_execute_hvx_slice(struct nn_graph *nn, void *vwork
                 info->filt_width,
                 info->filt_height,
                 info->in_depth,
-                Q6_R_combine_RlRl(info->stride_height,info->stride_width),
-                info->recip_shamt);
+                Q6_R_combine_RlRl(info->stride_height,info->stride_width));
 
             logmsg(nn,2,"start=%d, suma_buf=%p my_suma_ptr=%p values=%08x %08x %08x %08x",
                 out_row, suma_buf,
@@ -7700,8 +7658,7 @@ static void shortin_supernode_execute_hvx_slice(struct nn_graph *nn, void *vwork
                     info->biasbuf + d,
                     suma_buf + info->suma_start,
                     info->next_suma_off,
-                    Q6_R_combine_RlRl(info->stride_height,info->stride_width),
-                    info->recip_shamt );
+                    Q6_R_combine_RlRl(info->stride_height,info->stride_width));
 
 #if 0
             logmsg(nn,2,"oldmin=%d oldmax=%d found_min=%d found_max=%d",t_min,t_max,minmax.words[32],minmax.words[0]);
@@ -7868,11 +7825,12 @@ static int shortin_supernode_execute_everything(struct nn_graph *nn, void *vself
 	info->suma_start= 1;
 	logmsg(nn,2,"scratch=%p input_base=%p next_in_width=%d in_height=%d required_w_before=%d",in,info->input_base,next_in_width,info->in_height,required_w_before);
 
-	// disallow gain > 1.0 (not any more, shortinv supports it now)
-	//	info->recip_shamt_must_be_zero =1;
+	// disallow gain > 1.0
+	// NOTE: this may cause fill_info_minmax_basics
+	// to expand the output range.
+	info->recip_shamt_must_be_zero =1;
 
 	// find input range, output scaling & range
-	// Note: this may expand the output range
 	if( fill_info_minmax_basics(nn,self,info) != 0) return -1;
 
 	//float bias_to_prod_ratio = (bias_level_size / prod_level_size);
@@ -7994,35 +7952,36 @@ static int shortin_supernode_execute_everything(struct nn_graph *nn, void *vself
 		nn_sem_wait_n_times(&donesem, outer_act_iters);
 	}
 	// check input/output ranges; if needed, adjust range and return 1. If OK, return 0.
-	// shortin conv now does min/max in output units, not sum-of-product units.
 
 	int need_redo = 0;
-	int fixed_flags = info->minmax_precalc_flags;				// parm for adjust_minmax_for_zero_with_constraints
+	int fixed_flags = 3;				// parm for adjust_minmax_for_zero_with_constraints
 	float ominval = info->out_minval;	// for transforming minval,maxval to app range
-	float output_level_size = info->output_level_size;
+	float prod_level_size = info->prod_level_size;
 	
-	if( (fixed_flags&2)==0){	// max not fixed
-		if( info->maxval > 255){
-			float app_maxval = output_level_size*(info->maxval + 0.5f)+ ominval;
+	if( !info->maxval_precalculated){
+		if( info->maxval > info->max_valid_val){
+			float app_maxval = info->maxval * prod_level_size + ominval;
 			info->out_maxval = round_up_quarter_octave( fmaxf( app_maxval, 0x1.0p-4f));
 
-			logmsg(nn,1,"Maxval too small (%x > 255), retrying... output_level_size=%f new outmax = %f (>= %f)",
-					info->maxval,output_level_size,info->out_maxval, app_maxval);
+			logmsg(nn,1,"Maxval too small (%x > %x), retrying... prod_level_size=%f new outmax = %f (>= %f)",
+					info->maxval,info->max_valid_val,prod_level_size,info->out_maxval, app_maxval);
 
 			need_redo = 1;
 		}
+		fixed_flags &= ~2; // bit 1->0  (max not fixed)
 	}
-	if((fixed_flags&1)==0){		// min not fixed
-		if( info->minval < 0){		// i.e. if < 0 ..
-			float app_minval = output_level_size *(info->minval-0.5f) + ominval;
+	if( !info->minval_precalculated){
+		if( info->minval < info->min_valid_val){		// i.e. if < 0 ..
+			float app_minval = info->minval * prod_level_size + ominval;
 			info->out_minval = round_up_quarter_octave( fminf( app_minval, -0x1.0p-8f));
 
-			logmsg(nn,1,"Minval too large (%x < 0), retrying... output_level_size=%f new outmin = %f (<= %f)",
-					info->minval,output_level_size,info->out_minval, app_minval);
+			logmsg(nn,1,"Minval too large (%x < %x), retrying... prod_level_size=%f new outmin = %f (<= %f)",
+					info->minval,info->min_valid_val,prod_level_size,info->out_minval, app_minval);
 
 			need_redo = 1;
 
 		}
+		fixed_flags &= ~1; // bit 0->0  (in not fixed)
 	}
 	if( need_redo ){
 		// restore 'fixed' endpoints to original spec (in case they were tweaked by previous endpoint corrs)
@@ -8030,6 +7989,10 @@ static int shortin_supernode_execute_everything(struct nn_graph *nn, void *vself
 		if( fixed_flags & 2) info->out_maxval = info->out_maxval_spec;
 		adjust_minmax_for_zero_with_constraints( & info->out_minval, &info->out_maxval, fixed_flags);
 		logmsg(nn,1, "adjusted output range: %f ... %f", info->out_minval, info->out_maxval );
+	}else if( info->recip_shamt > 0){
+		// it *seems* we got it right, but the scaling value needed was >=1, so it's out of reach.
+		// Should only be possible with constrained output min/max which are too small for the input ranges.
+		return errlog(nn,"requires final_scale=%.4f, not supported", flt_ldexp( (float)info->recip_val, info->recip_shamt-31));
 	}
 	return need_redo;
 }
@@ -8100,12 +8063,8 @@ static void shortin_filt_sumb(uint8_t * filt_trans, int out_depth, int filter_co
 static int shortin_supernode_check(struct nn_node *self, struct nn_graph *nn)
 {
 	struct supernode_info_new *info = self->opaque;
-	//
-	// shortin supernode may wind up with 13 inputs due to ChannelScale - but by
-	// the time we get to here, it should be dealt with and will be just a scalar [1.0].
-	// so we can ignore it.
-	// inputs = 12 or 13; outputs = 3; checked in ctor
-
+	if (self->n_inputs != 12) return errlog(nn,"supernode wrong # inputs... now need min/max with inf for self-detecting");
+	if (self->n_outputs != 3) return errlog(nn,"supernode wrong # outputs");
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *filt_tensor = self->inputs[1];
 	int32_t filt_batches = filt_tensor->shape.filt_batches;
@@ -8126,8 +8085,8 @@ static int shortin_supernode_check(struct nn_node *self, struct nn_graph *nn)
         uint8_t *filt = filt_tensor->data;
         float filt_max_float = tensor_get_float(max_filt_tensor,0);
         float filt_min_float = tensor_get_float(min_filt_tensor,0);
-        float filt_level_size;
-        int32_t filt_offset = get_qu8_level_size_zero(filt_min_float,filt_max_float, &filt_level_size);
+        int32_t filt_offset = quantize_uint8(0.0f,filt_min_float,filt_max_float);
+        float filt_level_size = (supernode_unsigned_weight_divisor(filt_offset) * (filt_max_float - filt_min_float)) / 255;
 	int32_t out_height_max = self->output_defs[0].max_sizes[1];
 	int32_t out_width_max = self->output_defs[0].max_sizes[2];
 	const struct tensor *stride_tensor = self->inputs[6];
@@ -8179,13 +8138,12 @@ static int shortin_supernode_check(struct nn_node *self, struct nn_graph *nn)
 	logmsg(nn,2,"filt_elements=%d in_depth=%d out_depth=%d filt_batches=%d",
 		filt_elements,in_depth,out_depth,filt_batches);
         shortin_rearrange_weights_Ndto4(filt, filt_elements, in_depth, filt_batches, out_depth, info->weights, filt_offset);
+        info->weight_scale_factor = 1.f;
 	/* Precalculate gemsumb */
         shortin_filt_sumb(info->weights, out_depth, filt_elements, info->gemsumb);
         info->weights_level_size = filt_level_size;
         info->weights_offset = 0;
 	info->filt_offset = filt_offset;
-
-	info->max_k_factor = 1.0f;
 
 #if 0
 	if ((info->semaphores = nn_calloc(n_weight_batches,sizeof(nn_sem_t))) == NULL) {
@@ -8203,7 +8161,7 @@ static int shortin_supernode_check(struct nn_node *self, struct nn_graph *nn)
 	info->weight_batch_size = weight_batch_size;
 	self->opaque = info;
 
-	if(setup_initial_output_range( nn, info, specified_minval, specified_maxval, -1.0f/128, 1.0f/128)) return -1;
+	setup_initial_output_range( info, specified_minval, specified_maxval, -1.0f/128, 1.0f/128);
 
 	return 0;
 }
@@ -8224,19 +8182,12 @@ static int shortin_supernode_dtor(struct nn_node *self, struct nn_graph *nn)
 	return node_free_common(self,nn);
 }
 
-//
-// shortin supernode may wind up with 13 inputs due to ChannelScale - but by
-// the time we get to here, it should be dealt with and will be just a scalar [1.0].
-// so we can ignore it.
-
 struct nn_node_ops nn_ops_for_InputSupernode_8x8p8to8_outd32 = {
 	.execute = shortin_supernode_execute_call,
 	.check = shortin_supernode_check,
 	.ctor = node_alloc_common,
 	.dtor = shortin_supernode_dtor,
 	.flags = NN_NODE_FLAG_D32_OUTPUT,
-	.n_inputs = NN_IOCOUNT_RANGE(12,13),
-	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_InputSupernode_8x8p32to8_outd32 = {
@@ -8245,8 +8196,6 @@ struct nn_node_ops nn_ops_for_InputSupernode_8x8p32to8_outd32 = {
 	.ctor = node_alloc_common,
 	.dtor = shortin_supernode_dtor,
 	.flags = NN_NODE_FLAG_D32_OUTPUT,
-	.n_inputs = NN_IOCOUNT_RANGE(12,13),
-	.n_outputs = NN_IOCOUNT(3),
 };
 
 #endif

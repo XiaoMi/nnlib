@@ -588,7 +588,7 @@ addsub_16_execute(struct nn_node *self,  struct nn_graph *nn )
 	tensor_set_single_float( self->outputs[2], sc.out_max);
 
 	struct elementwise_funcs const *ew_funcs = is_u16 ? &AddSub_u16_funcs : &AddSub_s16_funcs;
-	return nn_elementwise_with_broadcast( self, nn, ew_funcs,NULL, NULL, &sc );
+	return nn_elementwise_with_broadcast( self, nn, ew_funcs, &sc );
 }
 //////////////////////////////////// MULTIPLY //////////////////////////////////////
 //
@@ -1141,7 +1141,7 @@ mul_16_execute(struct nn_node *self,  struct nn_graph *nn )
 	tensor_set_single_float( self->outputs[2], sc.out_max);
 
 	struct elementwise_funcs const *ew_funcs = is_u16 ? &Mul_u16_funcs : &Mul_s16_funcs;
-	return nn_elementwise_with_broadcast( self, nn, ew_funcs,NULL, NULL, &sc );
+	return nn_elementwise_with_broadcast( self, nn, ew_funcs, &sc );
 }
 
 

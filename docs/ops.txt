@@ -235,7 +235,7 @@ QuantizedConv2d_8x8to32/QuantizedConv2d_16x16to32:
 	Quantized Convolution
 
 QuantizedTransposeConv2d_8x8p32to8/QuantizedTransposeConv2d_16x16p32to16:
-	13/14 inputs:
+	13 inputs:
 		0: Input data (quint8/quint16)
 		1: Filter data (quint8/quint16)
 		2: Input min (float)
@@ -249,7 +249,6 @@ QuantizedTransposeConv2d_8x8p32to8/QuantizedTransposeConv2d_16x16p32to16:
 		10: Bias max (float)
 		11: Out min (float)
 		12: Out max (float)
-		13: Channel Scales (float optional) (16 bit variant doesn't support this)
 	3 outputs:
 		0: Output data (quint8/quint16)
 		1: Output min
@@ -264,7 +263,7 @@ QuantizedTransposeConv2d_8x8p32to8/QuantizedTransposeConv2d_16x16p32to16:
     No groups (by extension, no depthwise)
 
 QuantizedGroupedConv2d_8x8p32to8:
-	13/14 inputs:
+	11 inputs:
         0: Input data (quint8)
         1: Filter data (quint8)
         2: Bias data (qint32)
@@ -276,9 +275,6 @@ QuantizedGroupedConv2d_8x8p32to8:
         8: Bias max
         9: Stride shape
         10: Number of groups
-        11: Specified output min
-        12: Specified output max
-	13: Channel Scales (float optional)
     3 outputs:
         0: Output data (quint8)
         1: Output min
@@ -287,7 +283,7 @@ QuantizedGroupedConv2d_8x8p32to8:
     Quantized Grouped Convolution
 
 QuantizedDilatedConv2d_8x8p32to8:
-	13/14 inputs:
+	13 inputs:
 		0: Input data (quint8)
 		1: Filter data (quint8)
 		2: Bias data (quint8)
@@ -980,8 +976,6 @@ QuantizedMaximum:
 		3: input A max (float)
 		4: input B min (float)
 		5: input B max (float)
-		6: (optional) output min (float)
-		7: (optional) output max (float)
 	3 outputs:
 		0: output data (uint8_t)
 		1: output min (float)
@@ -1212,21 +1206,6 @@ QuantizedPad_8:
     or 0.0 if only 4 inputs) and the input min/max values. Note: if the 'pad' value is too far outside the min/max
     range, an error will be raised. If it quantizes to -2 .. 257, it will be clipped to 0..255. Also, padval =  -inf
     or +inf is allowed and will become 0 or 255.
-
-QuantizedPad_V2_8:
-    5 inputs:
-        0 : input tensor, qu8
-        1 : scalar float (input min)
-        2 : scalar float (input max)
-        3 : 'padding' tensor, int32 [1,1,n,2] where n = 1..4  (see input #1 of Pad_f)
-        4 : scalar uint8, value to pad.
-    3 output:
-        0: output tensor, qu8
-        1 : scalar float (output min)
-        2 : scalar float (output max)
-
-    Pad the input tensor on the edges, in any or all dimensions as specified, with specified value. The min & max
-    are copied from the input. The scalar u8 value is used for padding (other pad ops used float). The scalar pad argument is not optional (its optional in other pad ops).
 
 QuantizedPad_u16:
 QuantizedPad_16:
@@ -1653,13 +1632,11 @@ QuantizedSum_8to32 (Reducing Sum):
     to summing all elements in the input tensor.
 
 QuantizedMean_8 (Reducing Mean):
-	4-6 inputs:
+	4 inputs:
 		0   input tensor [b, h, w, d] of quint8
 		1   input min val (scalar float)
 		2   input max val (scalar float)
 		3   axes (list of 1-4 uint32_t representing the axes to reduce)
-		4   output min (optional)
-		5   output max (optional)
 	3 outputs:
 		0   output tensor [b, h, w, d] of quint8
 		1   output min (scalar float)
@@ -1908,22 +1885,19 @@ QuantizedRoiAlignV2_8:
         0   feature tensor        [b,h,w,d] :: quint8
         1   feature tensor min    [1,1,1,1] :: float
         2   feature tensor max    [1,1,1,1] :: float
-        3   RoIs tensor           [1,1,num_rois,4] :: qint16 w/ step=.125, qzero=0
-        4   Batch Index Tensor    [1,1,1,num_rois] :: int32
-        5   output height         [1,1,1,1] :: int32
-        6   output width          [1,1,1,1] :: int32
-        7   spacial scale height  [1,1,1,1] :: float  height of feature map/height of original image
-        8   spacial scale width   [1,1,1,1] :: float  width of feature map/width of original image
-        9   sampling ratio height [1,1,1,1] :: int32  number of sampling points used per output pixel in height dimension
-        10  sampling ratio width  [1,1,1,1] :: int32  number of sampling points used per output pixel in width dimension
-        11  output tensor min     [1,1,1,1] :: float
-        12  output tensor max     [1,1,1,1] :: float
+        3   RoIs tensor           [num_rois,4] :: qint16 w/ step=.125, qzero=0
+        4   Batch Index Tensor    [num_rois] :: int32
+        5   pooled/output height  [1] :: int32
+        6   pooled/output width   [1] :: int32
+        7   spacial scale height  [1] :: float
+        8   spacial scale width   [1] :: float
+        9   sampling ratio height [1] :: int32
+        10  sampling ratio width  [1] :: int32
 
     3 outputs:
-        0   output tensor         [num_rois,output_h,output_w,d] :: quint8
-        1   output tensor min     [1,1,1,1] :: float  same as input[11]
-        2   output tensor max     [1,1,1,1] :: float  same as input[12]
-    Average pool using bilinear interpolation to produce an output with fixed output height and output width. Supports different quantization ranges between input and output feature maps. Sampling ratio height/width can be set to 0 for adaptive value of ceil(roi_width/out_width).
+        0   output tensor         [R,pooled_h,pooled_w,C] :: quint8
+        1   output tensor min     [1,1,1,1] :: float
+        2   output tensor max     [1,1,1,1] :: float
 
 QuantizedEqual_8:
 QuantizedNotEqual_8:
@@ -2005,171 +1979,6 @@ AxisAlignedBBoxTransform_q8q16:
         3   image info          (quint16)
         4   deltas min          (float)
         5   deltas max          (float)
-        6   image info min      (float)
-        7   image info max      (float)
     1 output:
         0   new box dimensions  (quint16)
     Adjusts box dimensions based on the deltas and image info.
-
-QuantizedHashtableLookup_8:
-        5 inputs:
-                0    lookups tensor          [1,1,1,l] :: int32
-                1    keys tensor             [1,1,1,k] :: int32
-                2    values tensor           [k,h,w,d] :: quint8
-                3    values min tensor       [1,1,1,min] :: float
-                4    values max tensor       [1,1,1,max] :: float
-
-        6 outputs:
-                0    output tensor           [l,h,w,d] :: quint8
-                1    output min tensor       [1,1,1,min] :: float
-                2    output max tensor       [1,1,1,max] :: float
-                3    hits tensor             [1,1,1,l] :: quint8
-                4    hits min tensor         [1,1,1,min] :: float
-                5    hits max tensor         [1,1,1,max] :: float
-
-        Returns a subtensor of the values tensor, the selection is done by finding values of lookups tensor in keys tensor, and appending the corresponding values slices.
-
-Proposal_q8q16:
-    18 inputs:
-        0   score tensor [b,feat_h,feat_w,a](uint8) probability score associated with each box
-        1   score_min (scalar float)
-        2   score_max (scalar float)
-        3   deltas tensor [b,feat_h,feat_w,4*a)](uint8) coordinate deltas from the anchors to generate proposals from
-        4   deltas_min (scalar float)
-        5   deltas_max (scalar float)
-        6   anchors [b,1,a,4] (int16) containing constant anchors around which proposals are generated
-        7   anchors_min (scalar float)
-        8   anchors_max (scalar float)
-        9   im_size [b,1,1,2] (uint16) containing image width, image height for each batch
-        10 	im_size_min (scalar float)
-        11  im_size_max (scalar float)
-        12  im_stride_h (scalar float) ratio of image height to feat_h
-        13  im_stride_w (sclar float) ratio of image width to feat_w
-        14  max_proposal_num (scalar int32) maximum number of proposed boxes to filter with nms
-            must be a constant that is greater than 0.
-        15  max_roi_num (scalar int32) maximum number of rois after nms
-        16  threshold (scalar float)  intersection over union threshold for overlap between proposed bboxes
-        17  min bbox size (scalar float) minimum box size to propose
-    7 outputs:
-        0   output score tensor [1,1,1,total_roi_num] (uint8) probability score associated with each roi. total_roi_num is variable. total_roi_num <= b*max_num_roi
-            total_roi_num must be set to 0
-        1   output score min (scalar float) copy of score_min
-        2   output score max (scalar float) copy of score_max
-        3   output roi tensor [1,1,total_roi_num,4] (int16) the coordinates of rois.
-            total_roi_num must be set to 0
-        4   output roi min (scalar float) copy of anchors_min
-        5   output roi max (scalar float) copy of anchors_max
-        6   output num boxes (1,1,1,total_roi_num)  number of output boxes for each image
-            total_roi_num must be set to 0
-    Generates proposed region of interests (rois) based on feature map and deltas, from a given set of anchors. Filters out small boxes and overlapping boxes.
-    Bounding box proposals are generated by applying transformation on a set
-    of predefined anchors with the bounding box deltas from bounding box
-    regression. A final step of hard NMS is applied to limit the number of
-    returned boxes.
-
-BoxWithNmsLimit_f:
-    11 inputs:
-        0   scores             float32     A tensor of scores for each box and class combination. The width must equal
-                                           to the number of boxes and depth must be equal to the number of classes
-        1   boxes              float32     A tensor that specifies the box coordinates per class. If input 10 is 0 then
-                                           the coordinates are specified as [x1, y1, x2, y2] where (x1,y1) is the
-                                           bottom-left vertex and (x2, y2) is the upper-right vertex. In this case the
-                                           width of the tensor must be 4 x number of classes and the depth must be
-                                           equal to the number of boxes.
-                                           If input 10 is 1 then the coordinates are specified as
-                                           [ctr_x, ctr_y, width, height, angle] where (ctr_x, ctr_y) is the center of
-                                           the box, and the angle is the counter-clockwise rotation angle in degrees.
-                                           In this case the width of the tensor must be 5 x number of classes and the
-                                           depth must be equal to the number of boxes.
-        2   batch splits       float32     A 1-D tensor indicating the number of boxes for each batch. The size must be
-                                           equal to number of batches and the sum of all elements must equal to the
-                                           total number of boxes.
-        3   score threshold    float32     1-element tensor containing the score threshold.
-        4   nms threshold      float32     1-element tensor containing the nms threshold.
-        5   detections per     int32       1-element tensor containing the maximum number of detections per image. -1
-            image                          indicates no maximum.
-        6   soft nms enabled   int32       1-element tensor that indicates if soft nms should be used.
-        7   soft nms method    int32       1-element tensor that indicates the soft nms method. 1 = linear, 2 = Gaussian.
-        8   soft nms sigma     float32     1-element tensor containing the sigma value for soft nms algorithm
-        9   soft nms min       float32     1-element tensor containing the minimum score threshold value for soft nms
-            score threshold                algorithm
-       10   rotated            int32       1-element tensor. 0 = boxes in input 1 are specified as [x1, y1, x2, y2]
-                                           where (x1,y1) is the bottom-left vertex and (x2, y2) is the upper-right
-                                           vertex.
-                                           NOT FULLY TESTED: 1 = boxes in input 1 are specified as
-                                           [ctr_x, ctr_y, width, height, angle] where (ctr_x, ctr_y) is the center of
-                                           the box, and the angle is the counter-clockwise rotation angle in degrees.
-    6 outputs:
-	    NOTE: The number of results is dependent on the input values. Since hexagon_nn does not support variable
-        output size some of the output tensor dimensions are set to maximum possible length, which is 
-        (number of classes - 1) x (number of boxes). This length will be denoted as max_length below. The actual
-        output values will be stored at the beginning of the tensor. The length of the actual output can be determined
-        by summing the values in the batch splits output tensor.
-        0   scores          float32     1-D tensor containing scores of selected boxes. The length is equal to max_length.
-        1   boxes           float32     Tensor containing the coordinates of selected boxes. The format is the same as
-                                        the format given in input 1. The width is equal to max_length and the depth is 4 
-                                        if input 10 = 0, 5 if input 10 = 1.
-        2   classes         float32     1-D tensor containing the classes the selected boxes belong to. The length is 
-                                        equal to max_length.
-        3   batch splits    float32     1-D tensor indicating the number of boxes selected for each batch. The sum of
-                                        the elements is equal to the total number of selected boxes.
-        4   keeps           int32       This output is optional and is only available if the number of given outputs is
-                                        greater than 4. 1-D tensor containing the list of indices of selected boxes. The
-                                        length is equal to max_length.
-        5   keeps size      int32       This output is optional and is only available if the number of given outputs is
-                                        greater than 4. Tensor containing the number of boxes per class per batch. Width
-                                        is the number of batches, depth is the number of classes.
-
-    Given a set of boxes with scores for each class, filters the boxes using non-max suppression.
-
-BoxWithNmsLimit_q8q16:
-    13 inputs:
-        0   scores             uint8       A tensor of scores for each box and class combination. The width must equal
-                                           to the number of boxes and depth must be equal to the number of classes
-        1   boxes              uint16      A tensor that specifies the box coordinates per class. The coordinates are
-                                           specified as [x1, y1, x2, y2] where (x1,y1) is the bottom-left vertex and
-                                           (x2, y2) is the upper-right vertex. The width of the tensor must be
-                                           4 x number of classes and the depth must be equal to the number of boxes.
-        2   batch splits       int32       A 1-D tensor indicating the batch index for every box.  Boxes from the same
-                                           batch index are grouped.
-        3   score threshold    float32     1-element tensor containing the score threshold.
-        4   detections per     int32       1-element tensor containing the maximum number of detections per image.
-            image                          must be a constant that is greater than 0.
-        5   soft nms           int32       1-element tensor specifying a flag for soft nms. 0 if hard nms,
-            method                         1 if linear soft nms,2 if gaussian soft nms
-        6   nms threshold      float32     1-element tensor containing the nms threshold.
-        7   sigma              float32     1-element tensor containing the sigma for gaussian soft nms
-        8   score threshold    float32     1-element tensor containing the score threshold for soft nms.
-            for soft nms
-        9   scores min         float32     Minimum for scores.
-        10  scores max         float32     Maximum for scores.
-        11  boxes min          float32     Minimum for boxes.
-        12  boxes max          float32     Maximum for boxes.
-    8 outputs:
-	    NOTE: This op supports variable number of selected boxes.  The maximum is defined by
-	    (num_unique_indices from batch splits) * detection_per_image.  This may affect the size required at the output
-	    of the network.  If the network output buffer is not large enough, execute will fail.
-        0   scores          uint8       1-D tensor containing scores of selected boxes.
-        1   boxes           uint16      Tensor containing the coordinates of selected boxes. The format is the same as
-                                        the format given in input 1.
-        2   classes         int32       1-D tensor containing the classes the selected boxes belong to.
-        3   batch splits    int32       1-D tensor indicating the batch index for every output box.  Boxes from the same batch
-                                        index are grouped.
-        4   scores min      float32     Minimum for scores.
-        5   scores max      float32     Maximum for scores.
-        6   boxes min       float32     Minimum for boxes.
-        7   boxes max       float32     Maximum for boxes.
-
-L2Normalize_8:
-    Independently normalizes each 1-D slice along the given axis. Axis is depth by default
-    for each axis slice, output = x / sqrt(sum(x*x))
-    the op quantizes the output tensor to [-1,1]
-    3..4 inputs:
-        0   input data          (uint8_t)
-        1   input min val       (scalar float)
-        2   input max val       (scalar float)
-        3(optional) input axis index (int32_t)
-    3 output:
-        0   output data         (uint8_t)
-        1   onput min val       (scalar float)
-        2   onput max val       (scalar float)

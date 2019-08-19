@@ -53,163 +53,22 @@
 #define MAX_THREADS 2
 #endif
 
-struct nodeinfo
-{
-	int16_t *alphabuf;
-	int alpha_depth;
-	int shift;					// 0..7
-	float alpha_mult;			// 2**-shift, used to quantize alphas to -128..127
-	float alpha_mag;			// range as a power of 2 (= 2**shift)
-	float alpha_min, alpha_max; // the actual range
-	int32_t prev_num_alphas;
-	int preprocessed_alphas;
-};
-
-//
-// new data path for prelu:
-// (1) read u8, and subtract input offset, to obtain a value in range -255..255;
-//     shift it left 7 bits to get full range of i16
-// (2) pick a scale factor and perform fractional mul. If the result from (1) is >=0,
-//     a common scale factor corresponding to '1.0' is used; if <0, another value (which varies according to
-//     depth) is used.
-// (3)  add an offset, and >>n saturating to u8.
-//
-// The 'common' scale factor in (2), combined with the shift in (3), do unity scaling and thus
-//   adapt to the input vs. output ranges.
-// The 'negative' scale factor in (2) are variable per-depth; these scales need to be cooked from
-//  the alpha inputs and from the in:out ratio (i.e. each one of these is the 'common' ratio multiplied
-//   by the particular alpha; and 'shift' is reduced as needed to keep all of those value in the i16 range.
-//
-// Initally, we scan the alpha floats from the input to find their range, and store them as i16 fractions.
-// There is a 'alphashift' which is used to normalize these (alphashift = 0 means all have abs val <1.0).
-// So, the 'cooking' process for adapting the depth scales to the range, consists of doing a full multiply
-// of the unscaled alpha with the common factor, and then >>alphashift; if the scaling has been done correctly
-// then (ipso facto) the results will fit in i16. In fact, since the common scale factor can be small, it's better to
-// use a version of it with n more fractional bits and then >> the product by n+alphashift.
-// The pre-cooked alpha (before and after scaling) are stored in interleaved order for convenient vector use,
-// with each value stored 4 times:
-//   0,2,4,..28,30, 0,2,4,..28,30, 0,2,4,..28,30,  0,2,4,..28,30  <- first vector
-//   1,3,5 ..29,31, 1,3,5 ..29,31, 1,3,5 .. 29,31, 1,3,5 ..29,31, <- second vector
-//  then each group of 32 stored in 2 vectors in the same way.
-//
 struct scale_parms
 {
+	float in_min;
+	float in_max;
+	float alpha_min;
+	float alpha_max;
+	float out_min;
+	float out_max;
 	int16_t in_qzero;
-	int16_t common_scale; // common scale for vals >= 0
-	int16_t out_offset;   // amount to add in step (3)
-	int16_t final_shift;
-	// parms for scaling the alphas
-	int16_t alpha_prescale;  // mul by this,
-	int16_t alpha_pre_shift; // and >> this.
+	int16_t alpha_qzero;
+	int32_t pos_scale;
+	int32_t neg_scale;
+	int32_t pos_lsh;
+	int32_t neg_lsh;
+	int32_t out_offset;
 };
-static int
-set_scaling(struct nn_graph *nn, struct scale_parms *sp, struct nodeinfo const *info,
-			float in_min, float in_max,
-			float out_min, float out_max)
-{
-	float in_range = in_max - in_min;
-	float out_range = out_max - out_min;
-	int in_qzero = saturate_u8(roundf_i32(-255.0f * in_min / in_range));
-	int out_qzero = saturate_u8(roundf_i32(-255.0f * out_min / out_range));
-
-	sp->in_qzero = in_qzero;
-	// find the 'through' gain.
-	float pos_gain = in_range / out_range;
-	// find the max.abs gain
-	float max_alpha_mag = fmaxf(info->alpha_max, -info->alpha_min);
-	float max_gain = pos_gain * fmaxf(1.0f, max_alpha_mag);
-	// so, max_gain is the biggest in->out gain we need. It will
-	// normally be > 1 and not too large; you can construct scenarios where it's
-	// really large, but the ranging should be set up to avoid these
-	// (e.g by padding the output range).
-	int gain_expo = max_i32(0, flt_getexp(max_gain)); // floor(log2(max_gain))+1
-	int final_rsh = 7 - gain_expo;
-	if (final_rsh < 0)
-		return errlog(nn, "infeasible scaling");
-	// find the scaled through-gain
-	sp->common_scale = saturate_i16(roundf_i32(flt_ldexp(pos_gain, 15 - gain_expo)));
-	sp->final_shift = final_rsh;
-	sp->out_offset = out_qzero << final_rsh;
-
-	// work out how to prescale the alphas. This is done
-	// as (alpha_prescale* alpha) >> alpha_pre_shift
-	// alpha_prescale is the same as common_scale, but maybe with more fractional bits.
-	// alpha_pre_shift takes into account this extra gain...
-	//  - alpha values have 15-alpha_shift frac bits
-	//  - alpha_prescale has 15-g0exp frac bits
-	//  - => prod has 30-alpha_shift-g0exp
-	//   we want 15-gain_expo so >> by (30-alpha_shift-g0exp)-(15_gain_expo)
-	//    = 15 + (gain_expo-g0_exp)- alpha_shift
-	// if we've done everything right, none of these will overflow when scaled
-	// to 15-gain_expo fractional bits.
-	//
-	int g0exp = flt_getexp(pos_gain);	// this is <= gain_expo...
-	int extra_shift = gain_expo - g0exp; // this is>=0
-	int ashift = 15 + extra_shift - info->shift;
-	sp->alpha_pre_shift = ashift;
-	sp->alpha_prescale = saturate_i16(roundf_i32(flt_ldexp(pos_gain, 15 - g0exp)));
-
-	return 0;
-}
-
-static inline HVX_Vector
-hvx_process_relu(HVX_Vector vin, HVX_Vector valpha0, HVX_Vector valpha1,
-				 int in_qzero,
-				 int common_gain,
-				 int outoff,
-				 int final_shift)
-{
-	HVX_Vector vinqz = q6op_Vh_vsplat_R(in_qzero * 128);
-	HVX_Vector vcommon = q6op_Vh_vsplat_R(common_gain);
-	HVX_Vector voutoff = q6op_Vh_vsplat_R(outoff);
-	// widen to h while <<7
-	HVX_VectorPair in_x128 = Q6_Wuh_vmpy_VubRub(vin, 0x80808080);
-	HVX_Vector inx128_0 = Q6_V_lo_W(in_x128);
-	HVX_Vector inx128_1 = Q6_V_hi_W(in_x128);
-
-	// in each path
-	// compare to 128*in_qzero to see if the result is going to be
-	// negative or positive
-	HVX_VectorPred qneg0 = Q6_Q_vcmp_gt_VuhVuh(vinqz, inx128_0);
-	HVX_Vector x_0 = Q6_Vh_vsub_VhVh(inx128_0, vinqz);
-	HVX_Vector gain_0 = Q6_V_vmux_QVV(qneg0, valpha0, vcommon);
-	// frac mul...
-	HVX_Vector prod_0 = Q6_Vh_vmpy_VhVh_s1_rnd_sat(x_0, gain_0);
-	// add outoffs
-	prod_0 = Q6_Vh_vadd_VhVh_sat(prod_0, voutoff);
-
-	HVX_VectorPred qneg1 = Q6_Q_vcmp_gt_VuhVuh(vinqz, inx128_1);
-	HVX_Vector x_1 = Q6_Vh_vsub_VhVh(inx128_1, vinqz);
-	HVX_Vector gain_1 = Q6_V_vmux_QVV(qneg1, valpha1, vcommon);
-	HVX_Vector prod_1 = Q6_Vh_vmpy_VhVh_s1_rnd_sat(x_1, gain_1);
-	prod_1 = Q6_Vh_vadd_VhVh_sat(prod_1, voutoff);
-
-	return Q6_Vub_vasr_VhVhR_rnd_sat(prod_1, prod_0, final_shift);
-}
-
-// this is used to scale the alpha values according to the
-// current input & output ranges.
-static void
-scale_alphas(struct scale_parms const *sp,
-			 int16_t const *inptr,
-			 int16_t *optr,
-			 int nvec) // total # vecs (always even)
-{
-	HVX_Vector const *vinp = (HVX_Vector const *)inptr;
-	HVX_Vector *voutp = (HVX_Vector *)optr;
-	int rscale = Q6_R_combine_RlRl(sp->alpha_prescale, sp->alpha_prescale);
-	int rsh = sp->alpha_pre_shift;
-
-	for (int i = 0; i < nvec; i += 2)
-	{
-		HVX_VectorPair prod0 = Q6_Ww_vmpy_VhRh(vinp[i], rscale);
-		HVX_VectorPair prod1 = Q6_Ww_vmpy_VhRh(vinp[i + 1], rscale);
-		HVX_Vector result0 = Q6_Vh_vasr_VwVwR_rnd_sat(Q6_V_hi_W(prod0), Q6_V_lo_W(prod0), rsh);
-		HVX_Vector result1 = Q6_Vh_vasr_VwVwR_rnd_sat(Q6_V_hi_W(prod1), Q6_V_lo_W(prod1), rsh);
-		voutp[i] = result0;
-		voutp[i + 1] = result1;
-	}
-}
 
 struct tdata
 {
@@ -218,10 +77,6 @@ struct tdata
 	struct tensor_addressing tin;
 	struct tensor_addressing tout;
 	struct scale_parms scaling;
-	// main code launches one thread, and waits for init_done;
-	// it then launches additional threads.
-	// whichever thread gets work unit 0 does the alpha conversion and
-	// posts init_done.
 	nn_sem_t init_done;
 	int work_units;
 	volatile int next_work;
@@ -229,10 +84,188 @@ struct tdata
 	int h_per_slice;	 // # of height units per slice.
 	int slice_per_batch; // # of slices per batch.
 	int16_t *alphabuf;
-	int16_t *scratch;
+	uint8_t *scratch;
 	int32_t d32_iters;
 	nn_sem_t donesem;
 };
+
+struct nodeinfo
+{
+	int16_t *alphabuf;
+	int alpha_depth;
+	float alpha_min, alpha_max; // the actual range
+	int32_t prev_num_alphas;
+	int preprocessed_alphas;
+};
+
+struct alpha_info
+{
+	struct tensor_addressing tin;
+	uint8_t * alphas;
+	float alpha_min;
+	float alpha_max;
+	uint32_t alpha_depth;
+	struct nodeinfo * nodeinfo;
+	nn_sem_t donesem;
+};
+
+//Used to duplicate alpha values
+unsigned char alpha_controls[] __attribute__((aligned(64))) = {
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,
+0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x20,
+0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,
+0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,
+0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,
+0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,0x40,
+};
+
+/*
+* Prelu with quantized alphas works as follows:
+*	1) Subtract alpha_offset from each alpha (result in 16 bits, -255,255, usually done at prep time)
+*	2) Subtract input_offset from each input (result in 16 bits, -255,255)
+*	3) Dependent on input value, mulitply by result from 1) (result in 32 bits)
+*	4) Multiply by a set of 32 bit scale factors which are determined as below.
+*	   Each scale is either a "positive scale" for all inputs that were positive or
+*	   a "negative scale" for inputs that were negative, which takes into account the alpha scale
+*	5) Possibly left shift the result (how we determine this left shift is described below)
+*   6) Add output offset
+*	7) Pack/Saturate to bytes
+*
+* Scaling factors (and shift) are determined as follows:
+*	1) Compute input scale / output scale as a fraction with 31 - lsh fractional bits (positive scale)
+*	2) Compute (input scale / output scale) * alpha scale as a fraction with 31 - lsh fractional bits (negative scale)
+*	3) Each scale factor has an associated left shift, that will be used when we have gain > 1.0
+*
+* The alphas (after subtracted alpha offset) are stored as 2 vectors of i16 per d32 slice.
+*
+*/
+
+static int
+set_scaling(struct nn_graph *nn, struct scale_parms *sp,
+			float in_min, float in_max,
+			float alpha_min, float alpha_max,
+			float out_min, float out_max)
+{
+	float in_scale;
+	float alpha_scale;
+	float out_scale;
+	int in_offset = get_qu8_level_size_zero(in_min, in_max, &in_scale);
+	int alpha_offset = get_qu8_level_size_zero(alpha_min, alpha_max, &alpha_scale);
+	int out_offset = get_qu8_level_size_zero(out_min, out_max, &out_scale);
+	float pos_scale = in_scale / out_scale;
+	float neg_scale = pos_scale * alpha_scale;
+	int pos_lsh = (pos_scale <= 1.0) ? 0 : flt_getexp(pos_scale);
+	int32_t pos_post_scale = roundf_i32(flt_ldexp(pos_scale, 31-pos_lsh));
+	int neg_lsh = (neg_scale <= 1.0) ? 0 : flt_getexp(neg_scale);
+	int neg_post_scale = roundf_i32(flt_ldexp( neg_scale, 31-neg_lsh));
+	sp->in_qzero = in_offset;
+	sp->alpha_qzero = alpha_offset;
+	sp->pos_scale = pos_post_scale;
+	sp->neg_scale = neg_post_scale;
+	sp->pos_lsh = pos_lsh;
+	sp->neg_lsh = neg_lsh;
+	sp->out_offset = out_offset;
+	return 0;
+}
+
+static inline HVX_Vector
+hvx_process_prelu_pos(HVX_Vector vin,
+				 int32_t in_qzero,
+				 int32_t pos_gain,
+				 int32_t out_offset,
+				 int pos_lsh) 
+{
+	HVX_Vector vinqz = q6op_Vh_vsplat_R(in_qzero);
+	HVX_Vector vpos = Q6_V_vsplat_R(pos_gain);
+	HVX_Vector pos_voutoff = Q6_V_vsplat_R(out_offset);
+	HVX_VectorPair in_x128 = Q6_Wuh_vunpack_Vub(vin);
+	HVX_Vector x_0_h_lo = Q6_Vh_vsub_VhVh(Q6_V_lo_W(in_x128), vinqz);
+	HVX_Vector x_0_h_hi = Q6_Vh_vsub_VhVh(Q6_V_hi_W(in_x128), vinqz);
+	HVX_VectorPair x_0_w = Q6_Ww_vunpack_Vh(x_0_h_lo);
+	HVX_VectorPair x_1_w = Q6_Ww_vunpack_Vh(x_0_h_hi);
+		
+	HVX_Vector_x4 result;
+	result.val[0] = Q6_V_lo_W(x_0_w);
+	result.val[1] = Q6_V_hi_W(x_0_w);
+	result.val[2] = Q6_V_lo_W(x_1_w);
+	result.val[3] = Q6_V_hi_W(x_1_w);
+
+	if(pos_lsh > 0) {
+		result.val[0] = Q6_Vw_vasl_VwR(result.val[0], pos_lsh);
+		result.val[1] = Q6_Vw_vasl_VwR(result.val[1], pos_lsh);
+		result.val[2] = Q6_Vw_vasl_VwR(result.val[2], pos_lsh);
+		result.val[3] = Q6_Vw_vasl_VwR(result.val[3], pos_lsh);
+	}
+	result.val[0] = Q6_Vw_vadd_VwVw_sat(q6op_Vw_vmpy_VwVw_s1_rnd_sat(result.val[0], vpos), pos_voutoff);
+	result.val[1] = Q6_Vw_vadd_VwVw_sat(q6op_Vw_vmpy_VwVw_s1_rnd_sat(result.val[1], vpos), pos_voutoff);
+	result.val[2] = Q6_Vw_vadd_VwVw_sat(q6op_Vw_vmpy_VwVw_s1_rnd_sat(result.val[2], vpos), pos_voutoff);
+	result.val[3] = Q6_Vw_vadd_VwVw_sat(q6op_Vw_vmpy_VwVw_s1_rnd_sat(result.val[3], vpos), pos_voutoff);
+
+	result.val[3] = Q6_Vh_vpack_VwVw_sat( result.val[3], result.val[2]);
+	result.val[1] = Q6_Vh_vpack_VwVw_sat( result.val[1], result.val[0]);
+	return Q6_Vub_vpack_VhVh_sat( result.val[3], result.val[1]);	// sat to u8
+}
+
+
+static inline HVX_Vector
+hvx_process_prelu_neg(HVX_Vector vin, HVX_Vector valpha0, HVX_Vector valpha1,
+				 int16_t in_qzero,
+				 int32_t neg_gain,
+				 int32_t out_offset,
+				 int32_t neg_lsh
+				)
+{
+	HVX_Vector vinqz = q6op_Vh_vsplat_R(in_qzero);
+	HVX_Vector vneg = Q6_V_vsplat_R(neg_gain);
+	HVX_Vector neg_voutoff = Q6_V_vsplat_R(out_offset);
+	HVX_VectorPair in_x128 = Q6_Wuh_vunpack_Vub(vin);
+	HVX_Vector x_0_h_lo = Q6_Vh_vsub_VhVh(Q6_V_lo_W(in_x128), vinqz);
+	HVX_Vector x_0_h_hi = Q6_Vh_vsub_VhVh(Q6_V_hi_W(in_x128), vinqz);
+	//Mul alphas in here
+	HVX_VectorPair x_0_w = Q6_Ww_vmpy_VhVh(x_0_h_lo, valpha0);
+	HVX_VectorPair x_1_w = Q6_Ww_vmpy_VhVh(x_0_h_hi, valpha1);
+	x_0_w = Q6_W_vshuff_VVR(Q6_V_hi_W(x_0_w), Q6_V_lo_W(x_0_w), -4);
+	x_1_w = Q6_W_vshuff_VVR(Q6_V_hi_W(x_1_w), Q6_V_lo_W(x_1_w), -4);
+
+	HVX_Vector_x4 result;
+	result.val[0] = Q6_V_lo_W(x_0_w);
+	result.val[1] = Q6_V_hi_W(x_0_w);
+	result.val[2] = Q6_V_lo_W(x_1_w);
+	result.val[3] = Q6_V_hi_W(x_1_w);
+	if(neg_lsh > 0) {
+		result.val[0] = Q6_Vw_vasl_VwR(result.val[0], neg_lsh);
+		result.val[1] = Q6_Vw_vasl_VwR(result.val[1], neg_lsh);
+		result.val[2] = Q6_Vw_vasl_VwR(result.val[2], neg_lsh);
+		result.val[3] = Q6_Vw_vasl_VwR(result.val[3], neg_lsh);
+	}
+	result.val[0] = Q6_Vw_vadd_VwVw_sat(q6op_Vw_vmpy_VwVw_s1_rnd_sat(result.val[0], vneg), neg_voutoff);
+	result.val[1] = Q6_Vw_vadd_VwVw_sat(q6op_Vw_vmpy_VwVw_s1_rnd_sat(result.val[1], vneg), neg_voutoff);
+	result.val[2] = Q6_Vw_vadd_VwVw_sat(q6op_Vw_vmpy_VwVw_s1_rnd_sat(result.val[2], vneg), neg_voutoff);
+	result.val[3] = Q6_Vw_vadd_VwVw_sat(q6op_Vw_vmpy_VwVw_s1_rnd_sat(result.val[3], vneg), neg_voutoff);
+
+	result.val[3] = Q6_Vh_vpack_VwVw_sat( result.val[3], result.val[2]);
+	result.val[1] = Q6_Vh_vpack_VwVw_sat( result.val[1], result.val[0]);
+	return Q6_Vub_vpack_VhVh_sat( result.val[3], result.val[1]);	// sat to u8
+}
+
+static inline HVX_Vector
+hvx_process_prelu(HVX_Vector vin, HVX_Vector valpha0, HVX_Vector valpha1,
+				 int16_t in_qzero,
+				 int32_t pos_gain,
+				 int32_t neg_gain,
+				 int32_t out_offset,
+				 int pos_lsh,
+				 int neg_lsh)
+{
+	HVX_Vector vinqz_b =  q6op_Vb_vsplat_R(in_qzero);
+	HVX_Vector pos_vec = hvx_process_prelu_pos(vin, in_qzero, pos_gain, out_offset, pos_lsh);
+	HVX_Vector neg_vec = hvx_process_prelu_neg(vin, valpha0, valpha1, in_qzero, neg_gain, out_offset, neg_lsh);
+	HVX_VectorPred pred = Q6_Q_vcmp_eq_VbVb(vin, vinqz_b);
+    pred = Q6_Q_vcmp_gtor_QVubVub(pred, vin, vinqz_b);
+	return Q6_V_vmux_QVV(pred, pos_vec, neg_vec);
+}
 
 static void prelu_hvx_work_func(struct nn_graph *nn, void *vinfo)
 {
@@ -240,14 +273,7 @@ static void prelu_hvx_work_func(struct nn_graph *nn, void *vinfo)
 	struct tdata *td = vinfo;
 	int nd32 = td->tin.nd32;
 	int work_unit_index = __sync_fetch_and_add(&td->next_work, 1);
-	if (work_unit_index == 0)
-	{ // we are first thread
-		// two alpha vectors per d32 slice - scale them.
-		scale_alphas(&td->scaling, td->alphabuf, td->scratch, nd32 * 2);
-		nn_sem_post(&td->init_done); // ok to start other threads now
-	}
-
-	HVX_Vector const *alphas = (HVX_Vector const *)td->scratch;
+	HVX_Vector const *alphas = (HVX_Vector const *)td->alphabuf;
 	uint8_t const *inp0 = td->tin.data;
 	uint8_t *outp0 = td->tout.data;
 	int batches = td->opshape.batches;
@@ -262,10 +288,12 @@ static void prelu_hvx_work_func(struct nn_graph *nn, void *vinfo)
 	uint32_t out_height_stride = td->tout.height_stride;
 	uint32_t out_d32_stride = td->tout.d32_stride;
 
-	int in_qzero = td->scaling.in_qzero;
-	int common_gain = td->scaling.common_scale;
-	int outoff = td->scaling.out_offset;
-	int final_shift = td->scaling.final_shift;
+	int16_t in_qzero = td->scaling.in_qzero;
+	int32_t pos_gain = td->scaling.pos_scale;
+	int32_t neg_gain = td->scaling.neg_scale;
+	int32_t out_offset = td->scaling.out_offset;
+	int32_t pos_lsh = td->scaling.pos_lsh;
+	int32_t neg_lsh = td->scaling.neg_lsh;
 	int slice_per_batch = td->slice_per_batch;
 	int h_per_slice = td->h_per_slice;
 
@@ -289,7 +317,6 @@ static void prelu_hvx_work_func(struct nn_graph *nn, void *vinfo)
 		uint8_t const *inp_b = inp0 + b * in_batch_stride + h_base * in_height_stride;
 		l2fetch(inp_b, in_d32_stride, 128 * widvecs, h_count * nd32);
 		uint8_t *outp_b = outp0 + b * out_batch_stride + h_base * out_height_stride;
-
 		for (int h = 0; h < h_count; h++)
 		{
 			uint8_t const *inp = inp_b + h * in_height_stride;
@@ -303,7 +330,7 @@ static void prelu_hvx_work_func(struct nn_graph *nn, void *vinfo)
 				HVX_Vector *voutp = (HVX_Vector *)outp;
 				for (int i = 0; i < widvecs; i++)
 				{
-					voutp[i] = hvx_process_relu(vinp[i], alph0, alph1, in_qzero, common_gain, outoff, final_shift);
+					voutp[i] = hvx_process_prelu(vinp[i], alph0, alph1, in_qzero, pos_gain, neg_gain, out_offset, pos_lsh, neg_lsh);
 				}
 				inp += in_d32_stride;
 				outp += out_d32_stride;
@@ -315,123 +342,95 @@ static void prelu_hvx_work_func(struct nn_graph *nn, void *vinfo)
 done:
 	nn_sem_post(&td->donesem);
 }
-static int process_alphas(struct nn_node *self, struct nn_graph *nn)
+
+static void process_alphas(struct nn_graph *nn, void *vinfo)
 {
-	const struct tensor *in_alpha_tensor = self->inputs[3];
-	struct nodeinfo *nodeinfo = self->opaque;
-	int32_t alpha_depth = in_alpha_tensor->shape.depth;
+	struct alpha_info *info = vinfo;
+	struct tensor_addressing tin = info->tin;
+	const uint8_t * alphas = info->alphas;
+	struct nodeinfo *nodeinfo = info->nodeinfo;
+	int32_t alpha_depth = info->alpha_depth;
 	int32_t alpha_depth_roundup = (alpha_depth + 31) & ~31;
-	const uint8_t *alphas = in_alpha_tensor->data;
 	int16_t *alpha_frac_buf = NULL;
 
-	int i, j, w;
-	float maxmag;
-	float magrecip;
-	int shift;
 	if (nodeinfo == NULL)
 	{
 		if ((nodeinfo = nn_malloc(sizeof(*nodeinfo))) == NULL)
 		{
-			return errlog(nn, "can't alloc nodeinfo");
+			errlog(nn, "can't alloc nodeinfo");
+			return;
 		}
 		if ((alpha_frac_buf = nn_memalign(128, alpha_depth_roundup * 4 * 2)) == NULL)
 		{
 			nn_free(nodeinfo);
-			return errlog(nn, "can't allocate alpha buf");
+			errlog(nn, "can't allocate alpha buf");
+			return;
 		}
 		nodeinfo->alphabuf = alpha_frac_buf;
 		nodeinfo->prev_num_alphas = 0;
 		nodeinfo->preprocessed_alphas = 0;
-		self->opaque = nodeinfo;
 	}
 	else
 	{
 		alpha_frac_buf = nodeinfo->alphabuf;
 	}
-	if (nodeinfo->preprocessed_alphas == 0)
-	{
-		if (nn_scratch_grow(nn, alpha_depth_roundup * 4 * 2))
-		{
-			return errlog(nn, "scratch alloc");
-		}
-	}
-	/*
-	 * Find the maximum magnitude of the alphas 
-	 * We will use this to scale the alpha values down and the output min/max up
-	 * We also need to calculate the shift down of the positive input values
-	 * All this is typically unnecessary, alpha input is likely small.
-	 * Note, the hvx code requires shift <=7 since it does a right-shift by 7-shift.
-	 */
-	nodeinfo->alpha_min = tensor_get_float(self->inputs[4], 0);
-	nodeinfo->alpha_max = tensor_get_float(self->inputs[5], 0);
-	float alpha_maxmag = fmaxf(-nodeinfo->alpha_min, nodeinfo->alpha_max); // mag of range
-	shift = 0;
-	magrecip = maxmag = 1.0f;
-	if (alpha_maxmag > 1.0f)
-	{
-		shift = flt_getexp(alpha_maxmag); // floor(log2(x))+1
-		maxmag = flt_power2(shift);
-		magrecip = flt_power2(-shift);
-		if (shift > 7)
-			return errlog(nn, "magnitude of alphas is too large");
-	}
+	nodeinfo->alpha_min = info->alpha_min;
+	nodeinfo->alpha_max = info->alpha_max;
 
-	//errlog(nn,"alpha range= %f ... %f maxmag=%f shift=%d",nodeinfo->alpha_min,nodeinfo->alpha_max, maxmag,shift);
 	if (0 == nodeinfo->prev_num_alphas)
 	{
 		nodeinfo->prev_num_alphas = alpha_depth;
 	}
 	if (alpha_depth != nodeinfo->prev_num_alphas)
 	{
-		return errlog(nn, "Changing the number of alphas between executes is currently unsupported. ");
+		errlog(nn, "Changing the number of alphas between executes is currently unsupported. ");
+		return;
 	}
 	nodeinfo->prev_num_alphas = alpha_depth;
 	nodeinfo->alpha_depth = alpha_depth;
-	nodeinfo->alpha_mult = magrecip;
-	nodeinfo->alpha_mag = maxmag;
-	nodeinfo->shift = shift;
+	float alpha_scale;
+	int alpha_offset = get_qu8_level_size_zero(nodeinfo->alpha_min, nodeinfo->alpha_max, &alpha_scale);
+	HVX_Vector * outp = (HVX_Vector *)nodeinfo->alphabuf;
+	HVX_Vector alpha_voff = q6op_Vb_vsplat_R(alpha_offset);
+	int d32_slice_depth = min_i32(alpha_depth, 32);
+	HVX_Vector alpha_offset_h = q6op_Vh_vsplat_R(alpha_offset);
 
-	uint8_t alpha0 = alphas[0];
-	float scale = (nodeinfo->alpha_max - nodeinfo->alpha_min) / 255;
-	int offset = 255 * nodeinfo->alpha_min / (nodeinfo->alpha_min - nodeinfo->alpha_max);
-	for (i = 0; i < alpha_depth_roundup; i += 32)
+	HVX_VectorPred depth_mask = Q6_Q_vsetq_R(d32_slice_depth);
+
+	for (int i = 0; i < tin.nd32; i++)
 	{
-		for (j = 0; j < 16; j++)
-		{
-			int ij = i + 2 * j;
-			uint8_t alphaval_0 = alpha0, alphaval_1 = alpha0;
-			if (ij < alpha_depth)
-				alphaval_0 = alphas[ij];
-			if (ij + 1 < alpha_depth)
-				alphaval_1 = alphas[ij + 1];
-			int alphafxp_0 = roundf_i32(32768.0f * scale * magrecip * (alphaval_0 - offset));
-			int alphafxp_1 = roundf_i32(32768.0f * scale * magrecip * (alphaval_1 - offset));
-			alphafxp_0 = min_i32(max_i32(alphafxp_0, -32768), 32767);
-			alphafxp_1 = min_i32(max_i32(alphafxp_1, -32768), 32767);
-
-			int16_t *dstp = &alpha_frac_buf[4 * i + j];
-			//errlog(nn,"alphas[%d+%d] = --> %d",i,2*j,alphafxp_0&0xFFFF);
-			//errlog(nn,"alphas[%d+%d] = --> %d",i,2*j+1,alphafxp_1&0xFFFF);
-			for (w = 0; w < 4; w++)
-			{
-				dstp[w * 16] = alphafxp_0;		// 4 slots in first vector
-				dstp[64 + w * 16] = alphafxp_1; // 4 slots in second vector.
-			}
-		}
+		HVX_Vector valphas = q6op_V_vldu_A((HVX_Vector *)&alphas[i * d32_slice_depth]);
+		HVX_Vector vin = Q6_V_vmux_QVV(depth_mask, valphas, alpha_voff);
+		vin =  Q6_V_vrdelta_VV(vin, *(HVX_Vector const *)alpha_controls);
+		HVX_VectorPair vin_x2 = Q6_Wuh_vunpack_Vub(vin);
+		*outp++ =  Q6_Vh_vsub_VhVh(Q6_V_lo_W(vin_x2), alpha_offset_h);
+		*outp++ =  Q6_Vh_vsub_VhVh(Q6_V_hi_W(vin_x2), alpha_offset_h);
 	}
 	nodeinfo->preprocessed_alphas = 1;
-	return 0;
+	info->nodeinfo = nodeinfo;
+	nn_sem_post(&info->donesem);
 }
+
 static int prelu_opt_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	struct nodeinfo *nodeinfo = self->opaque;
+	const struct tensor *in_tensor = self->inputs[0];
 	if(NULL == nodeinfo || 0 == nodeinfo->preprocessed_alphas)
 	{
-		process_alphas(self, nn);
-		nodeinfo = self->opaque;
+		struct alpha_info info;
+		const struct tensor *in_alpha_tensor = self->inputs[3];
+		info.alphas = in_alpha_tensor->data;
+		info.alpha_depth = in_alpha_tensor->shape.depth;
+		info.alpha_min = tensor_get_float(self->inputs[4], 0);
+		info.alpha_max = tensor_get_float(self->inputs[5], 0);
+		info.tin = tensor_addressing_d32(in_tensor);
+		info.nodeinfo = self->opaque;
+		nn_sem_init(&info.donesem, 0);
+		nn_os_work_for_vector(nn, process_alphas, &info);
+		nn_sem_wait(&info.donesem);
+		nodeinfo = info.nodeinfo;
 		nodeinfo->preprocessed_alphas = 0;
 	}
-	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *in_min_tensor = self->inputs[1];
 	const struct tensor *in_max_tensor = self->inputs[2];
 	struct tensor *out_tensor = self->outputs[0];
@@ -456,10 +455,12 @@ static int prelu_opt_execute(struct nn_node *self, struct nn_graph *nn)
 	int d_total = d + d_pad_before + d_pad_after;
 	if (d != nodeinfo->alpha_depth)
 		return errlog(nn, "depth mismatch : alphas=%d, input = %d", nodeinfo->alpha_depth, d);
-	// find output range.
+	// find output range. If not specified,
 	// out_max must allow for most negative input * most negative alpha
 	// and for most positive input.
 	// out_min just allows for most -ve input and most +ve alpha.
+	float alpha_min = tensor_get_float(self->inputs[4], 0);
+	float alpha_max = tensor_get_float(self->inputs[5], 0);
 	float out_min = in_min * nodeinfo->alpha_max;
 	float out_max = fmaxf(in_max, in_min * nodeinfo->alpha_min);
 	if (self->n_inputs > 6)
@@ -475,10 +476,6 @@ static int prelu_opt_execute(struct nn_node *self, struct nn_graph *nn)
 	adjust_minmax_for_zero(&out_min, &out_max);
 
 	struct tdata td;
-	if (set_scaling(nn, &td.scaling, nodeinfo, in_min, in_max, out_min, out_max))
-	{
-		return -1;
-	}
 	logmsg(nn, 2, "d: %d<%d>%d ==> %d\n", d_pad_before, d, d_pad_after, d_total);
 	if (tensor_out_prepare_padded_d32(
 			out_tensor,
@@ -500,11 +497,18 @@ static int prelu_opt_execute(struct nn_node *self, struct nn_graph *nn)
 	td.tin = tensor_addressing_d32(in_tensor);
 	td.tout = tensor_addressing_d32(out_tensor);
 	td.tin.data -= -32 * (w_pad_before - wskip),
-		td.tout.data -= -32 * (w_pad_before - wskip),
-		td.d32_iters = (w_total - wskip) / 4u,
-		td.alphabuf = nodeinfo->alphabuf;
+	td.tout.data -= -32 * (w_pad_before - wskip),
+	td.d32_iters = (w_total - wskip) / 4u,
+	td.alphabuf = nodeinfo->alphabuf;
 	td.scratch = nn->scratch;
 	td.next_work = 0;
+	td.scaling.in_min = in_min;
+	td.scaling.in_max = in_max;
+	td.scaling.alpha_min = alpha_min;
+	td.scaling.alpha_max = alpha_max;
+	td.scaling.out_min = out_min;
+	td.scaling.out_max = out_max;
+	set_scaling(nn, &td.scaling, in_min, in_max, alpha_min, alpha_max, out_min, out_max);
 
 	nn_sem_init(&td.donesem, 0);
 	nn_sem_init(&td.init_done, 0);
@@ -544,24 +548,16 @@ static int prelu_opt_execute(struct nn_node *self, struct nn_graph *nn)
 
 	// prefetch the alpha table
 	l2fetch(td.alphabuf, 128, 128, 2 * td.tin.nd32);
-	//
-	// first thread prepares the alpha, and posts init_done, so we don't start
-	// any more until that is seen.
-	for (int i = 0; i < nthreads; i++)
-	{
-		if (i == 1)
-			nn_sem_wait(&td.init_done);
-		nn_os_work_for_vector(nn, prelu_hvx_work_func, &td);
+	for( int i =0; i < nthreads; i++){
+		nn_os_work_for_vector(nn,prelu_hvx_work_func,&td);
 	}
+
+	nn_sem_wait_n_times(&td.donesem, nthreads);
 
 	tensor_out_prepare_normal(out_min_tensor, 1, 1, 1, 1, NN_TYPE_FLOAT);
 	tensor_out_prepare_normal(out_max_tensor, 1, 1, 1, 1, NN_TYPE_FLOAT);
-	//tensor_set_float(out_min_tensor,0,nodeinfo->alpha_mag*tensor_get_float(in_min_tensor,0));
-	//tensor_set_float(out_max_tensor,0,nodeinfo->alpha_mag*tensor_get_float(in_max_tensor,0));
 	tensor_set_float(out_min_tensor, 0, out_min);
 	tensor_set_float(out_max_tensor, 0, out_max);
-
-	nn_sem_wait_n_times(&td.donesem, nthreads);
 
 	logmsg(nn, 2, "Prelu %p done", self);
 	return 0;
@@ -571,7 +567,17 @@ static int prelu_check_opt(struct nn_node *self, struct nn_graph *nn)
 {
 	if (find_node_must_be_Const_from_ref(nn, &self->input_refs[3]))
 	{
-		process_alphas(self, nn);
+		struct alpha_info info;
+		const struct tensor *in_tensor = self->inputs[0];
+		const struct tensor *in_alpha_tensor = self->inputs[3];
+		info.alphas = in_alpha_tensor->data;
+		info.alpha_depth = in_alpha_tensor->shape.depth;
+		info.alpha_min = tensor_get_float(self->inputs[4], 0);
+		info.alpha_max = tensor_get_float(self->inputs[5], 0);
+		info.tin = tensor_addressing_d32(in_tensor);
+		info.nodeinfo = self->opaque;
+		process_alphas(nn, &info);
+		self->opaque = info.nodeinfo;
 	}
 	return 0;
 }

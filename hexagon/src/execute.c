@@ -93,6 +93,7 @@ int do_execute(struct nn_graph *nn)
 	int i;
 
 	struct nn_node *start_node = nn->head;
+	struct nn_node *next_node = NULL;
 	int saved_priority;
 	if (nn_os_update_main_thread_priority(nn, &saved_priority)) return errlog(nn, "priority update failed");
 	if (nn->nonconst_head_ptr && *nn->nonconst_head_ptr) start_node = *nn->nonconst_head_ptr;
@@ -111,9 +112,10 @@ int do_execute(struct nn_graph *nn)
 
 	// reset batch sequencing;
 	nn_batchseqstate_before_outer_exec(&nn->batchseq);
+    nn_loopstack_pre_execute( nn, &nn->loopstack);
 	do{
 	//print_tensors(inputs, n_inputs);
-	for (node = start_node; node != NULL; node = node->next) {
+	for (node = start_node; node != NULL; node = next_node) {
 		logmsg(nn,4,"do_execute(): node=%p id=%x, next at %p",node,node->node_id, node->next);
 		//execute_check_src_canaries(nn,node);
 		//execute_set_canaries(nn,node);
@@ -155,6 +157,15 @@ int do_execute(struct nn_graph *nn)
 		node->executions += 1;
 		node->iter_cycles = pcycle_stop - pcycle_node - pcycle_overhead;
 		//print_node_checksum(nn, node);
+		next_node = node->next;
+		if(next_node == NULL){
+			struct nn_loop_end_action endact = nn_loopstack_post_execute( nn, &nn->loopstack);
+			if( endact.errcode !=0){
+				errlog(nn,"loop update error");
+				goto quit;
+			}
+			next_node = endact.rerun_node;	// NULL if all done
+		}
 	} // for node list
 	}while( nn_batchseqstate_loop_update( &nn->batchseq )); // batch seq loop
 	} // for ITERS

@@ -46,6 +46,8 @@ int nn_scratch_grow(struct nn_graph *nn, size_t bytes)
 {
 	void *newscratch;
 	bytes = (bytes + 127) & ~127;
+	nn_mutex_lock(&nn->scratch_mutex);
+
 	if (nn->scratch_size < bytes) {
 		newscratch = nn_memalign(128,bytes);
 		if (newscratch == NULL) return errlog(nn,"can't alloc scretch (req: %d)",bytes);
@@ -53,6 +55,8 @@ int nn_scratch_grow(struct nn_graph *nn, size_t bytes)
 		nn->scratch = newscratch;
 		nn->scratch_size = bytes;
 	}
+	nn_mutex_unlock(&nn->scratch_mutex);
+
 	return 0;
 }
 

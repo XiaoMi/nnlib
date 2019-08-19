@@ -44,6 +44,7 @@
 #include <string.h>
 #include <quantize.h>
 #include "hvx_inlines.h"
+#include "nn_axis.h"
 
 #if defined(__hexagon__)
 #include "hexagon_types.h"
@@ -163,8 +164,8 @@ reduce_single_axis_hvx_template(struct nn_graph *nn, void *vtd, FUNC_PTR reducti
     HVX_Vector cur_result = q6op_Vb_vsplat_R(init_val);
 
     for (int n = 0; n < num_batches; n++) {
-        cur_result = q6op_Vb_vsplat_R(init_val);
         for (xd = 0; xd + 128 <=blob_size; xd +=128) {
+            cur_result = q6op_Vb_vsplat_R(init_val);
             for (int i = 0; i < num_blobs; i++) {
                 cur_result = reduction_func( vmemu(&in_data[i * blob_size + xd]), cur_result);
             }
@@ -232,7 +233,7 @@ static int reduction_execute(struct nn_node *self, struct nn_graph *nn, int redu
     int32_t in_height = in_tensor->shape.height;
     int32_t in_width = in_tensor->shape.width;
     int32_t in_depth = in_tensor->shape.depth;
-    int32_t* axes = (int32_t*)axes_tensor->data;
+    int32_t* axes_ori = (int32_t*)axes_tensor->data;
     int32_t axes_size = axes_tensor->data_size / sizeof(int32_t);
     uint8_t *in_data = in_tensor->data;
     uint8_t *out_data_final = out_tensor->data;
@@ -241,12 +242,36 @@ static int reduction_execute(struct nn_node *self, struct nn_graph *nn, int redu
     //Check that the final reduction dims are sane
     int32_t modified_shape_final[NUM_DIMS] = {in_batches, in_height, in_width, in_depth};
     int32_t modified_data_size = 1;
+
+    // Handle negative axes by re-interpreting them as positive axes
+    if( handle_negative_axes(nn, axes_ori, axes_size)!=0) return -1;
+
+    // Remove duplicate axes
+    int32_t distinctive_axes_size=0;
+    int32_t appeared[] = {0,0,0,0};
     for (int i = 0; i < axes_size; i++) {
-        modified_shape_final[axes[i]] = 1;
+        modified_shape_final[axes_ori[i]] = 1;
+ 	if (appeared[axes_ori[i]]==0){
+	    distinctive_axes_size+=1;
+	    appeared[axes_ori[i]]=1;
+	}
     }
+    int32_t appeared2[] = {0,0,0,0};
+    int32_t axes[distinctive_axes_size];
+    int j=0;
+    for (int i = 0; i < axes_size; i++) {
+ 	if (appeared2[axes_ori[i]]==0){
+	    appeared2[axes_ori[i]]=1;
+	    axes[j] = axes_ori[i];
+	    j++;
+	}
+    }
+    axes_size = distinctive_axes_size;
     for (int i = 0; i < NUM_DIMS; i++) {
         modified_data_size *= modified_shape_final[i];
     }
+    if (axes_size > NUM_DIMS)
+        return errlog(nn, "Number of elements in axes tensor is %d, support a maximum of 4", axes_size);
     int32_t out_batches = out_tensor->shape.batches;
     int32_t out_height = out_tensor->shape.height;
     int32_t out_width = out_tensor->shape.width;
@@ -277,20 +302,21 @@ static int reduction_execute(struct nn_node *self, struct nn_graph *nn, int redu
         nn_sem_wait(&td.donesem);
     }
     else {
+        int32_t modified_shape[NUM_DIMS] = {in_batches, in_height, in_width, in_depth};
         for (int a = 0; a < axes_size; a++) {
             if (a == axes_size - 1) {
                 out_data = out_data_final;
             }
             int32_t axis = axes[a];
-            int32_t modified_shape[NUM_DIMS] = {in_batches, in_height, in_width, in_depth};
             int32_t reduction_batches = 1;
             int32_t blob_size = 1;
             for (int i = 0; i < axis; i++) {
                 reduction_batches *= modified_shape[i];
             }
-            for (int i = axis + 1; i < NUM_DIMS; i++) {
+            for (int i = axis+1; i < NUM_DIMS; i++) {
                 blob_size *= modified_shape[i];
             }
+
             struct tdata td = {
                     .in_data = in_data,
                     .out_data = out_data,
@@ -303,7 +329,8 @@ static int reduction_execute(struct nn_node *self, struct nn_graph *nn, int redu
             nn_os_work_for_vector(nn, reduce_single_axis_fp, &td);
             nn_sem_wait(&td.donesem);
             in_data = out_data;
-
+            // set new shape as the axis is reduced
+            modified_shape[axis] = 1;
         }
     }
 

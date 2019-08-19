@@ -254,8 +254,6 @@ static void cast_int_to_quant8(struct nn_graph *nn, void *vtd){
     int32_t* in_data = td->in_data;
     uint8_t* out_data = td->out_data;
 
-    HVX_Vector mask = Q6_V_vsplat_R(255);
-
     const int num_loops = 1 + ((td->num_elements - 1) / 128);
 
     for (int i=0; i<num_loops; i++) {
@@ -265,19 +263,10 @@ static void cast_int_to_quant8(struct nn_graph *nn, void *vtd){
         HVX_Vector *vin4 = (HVX_Vector *) (in_data + 96);
         HVX_Vector *vout = (HVX_Vector *) out_data;
 
-        HVX_Vector mod1;                                  // vpack saturates so we need to zero out the first 3 bytes first
-        HVX_Vector mod2;
-        HVX_Vector mod3;
-        HVX_Vector mod4;
-        mod1 = Q6_V_vand_VV(*vin1, mask);
-        mod2 = Q6_V_vand_VV(*vin2, mask);
-        mod3 = Q6_V_vand_VV(*vin3, mask);
-        mod4 = Q6_V_vand_VV(*vin4, mask);
-
         HVX_Vector halfwords1;                           // 32-bit to 16-bit
         HVX_Vector halfwords2;
-        halfwords1 = Q6_Vh_vpack_VwVw_sat(mod2, mod1);
-        halfwords2 = Q6_Vh_vpack_VwVw_sat(mod4, mod3);
+        halfwords1 = Q6_Vh_vpack_VwVw_sat(*vin2, *vin1);
+        halfwords2 = Q6_Vh_vpack_VwVw_sat(*vin4, *vin3);
 
         *vout = Q6_Vub_vpack_VhVh_sat(halfwords2, halfwords1);   // 16-bit to 8-bit and store in output
 
@@ -346,18 +335,14 @@ static void cast_float_to_quant8(struct nn_graph *nn, void *vtd)
             ints.val[3] = Q6_V_vxor_VV(tmp, signbit);
         }
 
-        // pack int32 to uint8 (keeping lower 8 bits)
-        *vout = Q6_Vb_vpacke_VhVh(
-        		Q6_Vh_vpacke_VwVw( ints.val[3], ints.val[2]),
-				Q6_Vh_vpacke_VwVw( ints.val[1], ints.val[0]));
-#if 0 // to saturate to u8 instead
+
         HVX_Vector halfwords1;
         HVX_Vector halfwords2;
-        halfwords1 = Q6_Vh_vpack_VwVw_sat(mod2, mod1);
-        halfwords2 = Q6_Vh_vpack_VwVw_sat(mod4, mod3);
+        halfwords1 = Q6_Vh_vpack_VwVw_sat(ints.val[1], ints.val[0]);
+        halfwords2 = Q6_Vh_vpack_VwVw_sat(ints.val[3], ints.val[2]);
 
         *vout = Q6_Vub_vpack_VhVh_sat(halfwords2, halfwords1);
-#endif
+
         in_data += 128;
         out_data += 128;
     }
@@ -530,7 +515,15 @@ static int cast_execute_int32_to_uint8(struct nn_node *self, struct nn_graph *nn
 
     if(elements < NUM_THREADS*128){
         for(int i = 0; i < elements; i++) {
-            out_data[i] = (uint8_t) in_data[i];
+            if(in_data[i] > 255){
+                out_data[i] = 255;
+            }
+            else if(in_data[i] < 0){
+                out_data[i] = 0;
+            }
+            else {
+                out_data[i] = (uint8_t) in_data[i];
+            }
         }
         return 0;
     }
@@ -551,7 +544,15 @@ static int cast_execute_int32_to_uint8(struct nn_node *self, struct nn_graph *nn
         nn_sem_wait(&td[i].donesem);
     }
     for(int i = NUM_THREADS*chunk_size; i < elements; i++) {
-        out_data[i] = (uint8_t)in_data[i];
+        if(in_data[i] > 255){
+            out_data[i] = 255;
+        }
+        else if(in_data[i] < 0){
+            out_data[i] = 0;
+        }
+        else {
+            out_data[i] = (uint8_t) in_data[i];
+        }
     }
 
     return 0;
@@ -593,7 +594,7 @@ static int cast_execute_float32_to_uint8(struct nn_node *self, struct nn_graph *
     }
     for(int i = done_by_vec; i < elements; i++) {
     	float x = in_data[i];
-    	x = fminf(fmaxf(x,-2147483648.0f),2147483520.0f);
+    	x = fminf(fmaxf(x,0.0f),255.0f);
         out_data[i] = (uint8_t) (int)x;
     }
 

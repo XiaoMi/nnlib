@@ -38,370 +38,177 @@
 #include "hvx_inlines.h"
 #include "transpose_conv_procweights.h"
 #include "nn_pad.h"
-
-/*
-* Strategy to process the weights for transposed convolution is as follows:
-* Weights come in as dout, height, width, din
-* Pad weights so that filt_height % stride_h == 0 and filt_width % stride_w == 0
-* Batch to space (a transpose) -> stride_h * stride_w * dout, height / stride_h, width / stride_w, din
-* We now have stride_h * stride_w subkernels
-* Transpose each subkernel to height, width, din, dout
-* Rotate 180 along spatial plane (effectively a vertical + horizontal flip)
-*/
+#include "nn_gentranspose.h" // for strided_copy_2d_1b etc
 
 static int pad_filter(
 	struct nn_graph *nn,
-	const struct tensor * filt_tensor,
-	uint8_t * padded_filt_data,
+	const uint8_t *filt_data,
+	const uint32_t orig_num_filters,
+	const uint32_t orig_filt_height,
+	const uint32_t orig_filt_width,
+	const uint32_t orig_filt_depth,
+	void *padded_filt_data,
 	const uint32_t padded_num_filters,
 	const uint32_t padded_filt_height,
 	const uint32_t padded_filt_width,
 	const uint32_t padded_filt_depth,
-	const uint32_t padval
-	)
-{
-	uint32_t req_padding_num_filters = padded_num_filters - filt_tensor->shape.batches;
-	uint32_t req_padding_filt_height = padded_filt_height - filt_tensor->shape.height;
-	uint32_t req_padding_filt_width = padded_filt_width - filt_tensor->shape.width;
-	uint32_t req_padding_filt_depth = padded_filt_depth - filt_tensor->shape.depth;
-	do_pad(padded_filt_data, filt_tensor->data,
-		  filt_tensor->shape.batches, filt_tensor->shape.height, filt_tensor->shape.width, filt_tensor->shape.depth,
-		  0, req_padding_num_filters,
-		  0, req_padding_filt_height,
-		  0, req_padding_filt_width,
-		  0, req_padding_filt_depth,
-		  sizeof(uint8_t),
-		  (uint8_t )padval
-		  );
-	return 0;
-}
-
-static int space_to_batch(
-	struct nn_graph *nn,
-	const uint8_t *in_data,
-	const uint32_t num_filters,
-	const uint32_t filt_height,
-	const uint32_t filt_width,
-	const uint32_t filt_depth,
-	const uint32_t block_h,
-	uint32_t block_w,
-	uint8_t *out_data
-)
-{
-	if (filt_height % block_h != 0 || filt_width % block_w != 0)
-		return errlog(nn, "Transpose conv filter dims must be divisible by stride h/w");
-
-	uint32_t out_idx = 0;
-
-	for (uint32_t h_start = 0; h_start < block_h; h_start++)
-	{
-		for (uint32_t w_start = 0; w_start < block_w; w_start++)
-		{
-			for (uint32_t b = 0; b < num_filters; b++)
-			{
-				for (uint32_t h = h_start; h < filt_height; h += block_h)
-				{
-					for (uint32_t w = w_start; w < filt_width; w += block_w)
-					{
-						uint32_t in_idx = b * (filt_height * filt_width * filt_depth) + h * (filt_width * filt_depth) + w * (filt_depth);
-						vmemcpy_asm(&out_data[out_idx], &in_data[in_idx], filt_depth);
-						out_idx += filt_depth;
-					}
-				}
-			}
-		}
-	}
-	return 0;
-}
-
-//The transpose here can be thought of as a 2d transpose of  a matrix where the dims are num_filters * (filt_height * filt_width * filt_depth)
-static int transpose_to_hwio(struct nn_graph *nn, uint8_t *in_data,
-	const uint32_t num_filters, const uint32_t filt_height, const uint32_t filt_width, const uint32_t filt_depth,
-	uint8_t *out_data)
-{
-	uint32_t outer_dim = num_filters;
-	uint32_t inner_dim = filt_height * filt_width * filt_depth;
-	for (int i = 0, j = 0, k = 0; i < outer_dim * inner_dim; i++)
-	{
-		out_data[i] = in_data[inner_dim * k + j];
-		if (++k >= outer_dim) {
-			k = 0; // i % outer_dim;
-			j++;   // i / outer_dim;
-		}
-	}
-	return 0;
-}
-
-static int rotate_filter(struct nn_graph *nn, uint8_t *in_data,
-	const uint32_t num_filters, const uint32_t filt_height, const uint32_t filt_width, const uint32_t filt_depth,
-	uint8_t *out_data)
-{
-	uint32_t src_h = filt_height;
-	for (uint32_t h = 0; h < filt_height; h++)
-	{
-		uint8_t *src = &in_data[src_h * (num_filters * filt_width * filt_depth) - num_filters * filt_depth];
-		uint8_t *dst = &out_data[h * (num_filters * filt_width * filt_depth)];
-		vmemcpy_2d_general_asm(num_filters * filt_depth,
-			filt_width,
-			dst,
-			(num_filters * filt_depth),
-			src,
-			-(num_filters * filt_depth));
-		src_h--;
-	}
-	return 0;
-}
-
-int process_tranpose_conv_filter(struct nn_graph *nn, struct transpose_conv_filter_parms *tcfparms)
-{
-	int res = 0;
-	const struct tensor *filt_tensor = tcfparms->filt_tensor;
-	const struct tensor *strides_tensor = tcfparms->strides_tensor;
-	uint32_t num_filters = filt_tensor->shape.batches;
-	uint32_t filt_height = filt_tensor->shape.height;
-	uint32_t filt_width = filt_tensor->shape.width;
-	uint32_t filt_depth = filt_tensor->shape.depth;
-	uint32_t block_h = strides_tensor->shape.height;
-	uint32_t block_w = strides_tensor->shape.width;
-	uint8_t pad_num_filters = (1 < block_h && block_h < 5 && 1 < block_w && block_w < 5) ? 1 : 0;
-
-	//Padded filt stuff
-	uint32_t padded_num_filters = (pad_num_filters) ? roundup(num_filters, 32) : num_filters;
-	uint32_t padded_filt_height = roundup(filt_height, block_h);
-	uint32_t padded_filt_width = roundup(filt_width, block_w);
-	uint32_t padded_filt_depth = filt_depth;
-	uint32_t padded_filt_size = padded_num_filters * padded_filt_height * padded_filt_width * padded_filt_depth;
-	if (padded_filt_size != tcfparms->data_size) {
-		return errlog(nn, "Calculated filter size %d doesn't match allocated filter size %d", padded_filt_size, tcfparms->data_size);
-	}
-
-	uint8_t * padded_filt_data = nn_memalign(sizeof(HVX_Vector), padded_filt_size);
-	uint8_t *s2b_data = nn_memalign(sizeof(HVX_Vector), padded_filt_size);
-	if (!padded_filt_data || !s2b_data) {
-		res = -1;
-		goto done;
-	}
-
-	pad_filter(nn, filt_tensor, padded_filt_data, padded_num_filters, padded_filt_height, padded_filt_width, padded_filt_depth, tcfparms->zero_offset);
-	res = space_to_batch(nn, padded_filt_data, padded_num_filters, padded_filt_height,
-		padded_filt_width, padded_filt_depth, block_h, block_w, s2b_data);
-
-	uint8_t *processed_weights = tcfparms->out_data;
-	uint8_t *transposed_weights_data = padded_filt_data;
-	uint32_t subkernel_size = padded_num_filters * padded_filt_height / block_h * padded_filt_width / block_w * padded_filt_depth;
-	for (int i = 0; i < block_h * block_w; i++)
-	{
-		uint8_t *in_data = &s2b_data[i * subkernel_size];
-		uint8_t *transposed_slice = &transposed_weights_data[i * subkernel_size];
-		uint8_t *out_data = &processed_weights[i * subkernel_size];
-		res = transpose_to_hwio(nn,
-			in_data, padded_num_filters, padded_filt_height / block_h, padded_filt_width / block_w, padded_filt_depth,
-			transposed_slice);
-		if (padded_filt_height / block_h == 1 && padded_filt_width / block_w == 1)
-			vmemcpy_asm(out_data, transposed_slice, subkernel_size);
-		else
-		{
-			res = rotate_filter(nn,
-				transposed_slice, padded_num_filters, padded_filt_height / block_h, padded_filt_width / block_w, padded_filt_depth,
-				out_data);
-		}
-	}
-
-done:
-	nn_free(padded_filt_data);
-	nn_free(s2b_data);
-	return res;
-}
-
-/*======================================================================*/
-// 16b version
-
-static int pad16_filter(
-	struct nn_graph *nn,
-	const struct tensor * filt_tensor,
-	uint16_t * padded_filt_data,
-	const uint32_t padded_num_filters,
-	const uint32_t padded_filt_height,
-	const uint32_t padded_filt_width,
-	const uint32_t padded_filt_depth,
+	unsigned element_size,
 	const uint32_t padval)
 {
-	uint32_t req_padding_num_filters = padded_num_filters - filt_tensor->shape.batches;
-	uint32_t req_padding_filt_height = padded_filt_height - filt_tensor->shape.height;
-	uint32_t req_padding_filt_width = padded_filt_width - filt_tensor->shape.width;
-	uint32_t req_padding_filt_depth = padded_filt_depth - filt_tensor->shape.depth;
-	do_pad16(
-		padded_filt_data,
-		filt_tensor->data,
-		filt_tensor->shape.batches,
-		filt_tensor->shape.height,
-		filt_tensor->shape.width,
-		filt_tensor->shape.depth,
-		0, req_padding_num_filters,
-		0, req_padding_filt_height,
-		0, req_padding_filt_width,
-		0, req_padding_filt_depth,
-		sizeof(uint16_t),
-		(uint16_t)padval
-	);
+	uint32_t req_padding_num_filters = padded_num_filters - orig_num_filters;
+	uint32_t req_padding_filt_height = padded_filt_height - orig_filt_height;
+	uint32_t req_padding_filt_width = padded_filt_width - orig_filt_width;
+	uint32_t req_padding_filt_depth = padded_filt_depth - orig_filt_depth;
+	do_pad(padded_filt_data, filt_data,
+		   orig_num_filters, orig_filt_height, orig_filt_width, orig_filt_depth,
+		   0, req_padding_num_filters,
+		   0, req_padding_filt_height,
+		   0, req_padding_filt_width,
+		   0, req_padding_filt_depth,
+		   element_size,
+		   padval);
 	return 0;
 }
 
-/*
-convert
-[batch, height, width, depth]
-to
-[batch*block_size*block_size, height_pad/block_size, width_pad/block_size,
- depth]
-*/
-static int space_to_batch16(
-	struct nn_graph *nn,
-	const uint16_t *in_data,
-	const uint32_t num_filters,
-	const uint32_t filt_height,
-	const uint32_t filt_width,
-	const uint32_t filt_depth,
-	const uint32_t block_h,
-	uint32_t block_w,
-	uint16_t *out_data
-)
+// given
+//   filt_height * filt_width units,
+//   each of size
+//       num_filters * filt_depth_bytes,
+// reverse the order of the units.
+// I.e. reverse in the height and width dimensions.
+// If filt_height * filt_width=1 it's just a copy
+//
+static void rotate_filter(struct nn_graph *nn, void const *in_data,
+						  const uint32_t num_filters, const uint32_t filt_height, const uint32_t filt_width, const uint32_t filt_depth_bytes,
+						  void *out_data)
 {
-	if (filt_height % block_h != 0 || filt_width % block_w != 0)
-		return errlog(nn, "Transpose conv filter dims must be divisible by stride h/w");
+	int32_t unit_size = num_filters * filt_depth_bytes;
+	int32_t unit_count = filt_height * filt_width;
 
-	uint32_t out_idx = 0;
-
-	for (uint32_t h_start = 0; h_start < block_h; h_start++)
-	{
-		for (uint32_t w_start = 0; w_start < block_w; w_start++)
-		{
-			for (uint32_t b = 0; b < num_filters; b++)
-			{
-				for (uint32_t h = h_start; h < filt_height; h += block_h)
-				{
-					for (uint32_t w = w_start; w < filt_width; w += block_w)
-					{
-						uint32_t in_idx = b * (filt_height * filt_width * filt_depth) + h * (filt_width * filt_depth) + w * (filt_depth);
-						vmemcpy_asm(&out_data[out_idx], &in_data[in_idx], filt_depth*sizeof(uint16_t));
-						out_idx += filt_depth;
-					}
-				}
-			}
-		}
-	}
-	return 0;
+	vmemcpy_2d_general_asm(
+		unit_size,												 // 'width' (copy chunk)
+		unit_count,												 // 'height' (number of units)
+		out_data,												 //  dest pointer
+		unit_size,												 // dest stride
+		(uint8_t const *)in_data + unit_size * (unit_count - 1), // src pointer (start from end)
+		-unit_size);											 // source stride
 }
 
-//The transpose here can be thought of as a 2d transpose of  a matrix where the dims are num_filters * (filt_height * filt_width * filt_depth)
-// convert bhwd to hwdb
-static int transpose_to_hwio16(
-	struct nn_graph *nn,
-	uint16_t *in_data,
-	uint32_t num_filters,
-	uint32_t filt_height,
-	uint32_t filt_width,
-	uint32_t filt_depth,
-	uint16_t *out_data)
-{
-	uint32_t outer_dim = num_filters;
-	uint32_t inner_dim = filt_height * filt_width * filt_depth;
-	for (int i = 0, j = 0, k = 0; i < outer_dim * inner_dim; i++)
-	{
-		out_data[i] = in_data[inner_dim * k + j];
-		if (++k >= outer_dim) {
-			k = 0; // i % outer_dim;
-			j++;   // i / outer_dim;
-		}
-	}
-	return 0;
-}
+//
+// Process a 'transposed convolution':
+//
+// (1) input is filter (Dout, Fh0, Fw0, Din ) and blocksize Bh,Bw
+// (2) Pad the filter to a larger size with its zero value:
+//      Pad Fh0 -> Fh, multiple of Bh;
+//      and Fw0->Fw, multiple of Bw
+//      in some cases (when tcfparms->pad_num_filters != 0) Dout is padded to a multiple of 32 at the same time
+// (3) SpaceToBatch:
+//   ( Dout,Fh,Fw,Din)
+//      -> restate as (Dout, Fsh*Bh, Fsw*Bw, Din)          Fsh,Fsw = subfilter size
+//      -> transpose to ( Bh*Bw * Dout, Fsh, Fsw, Din)
+// (4) Transpose and rotate
+//       -> transpose from (Bh * Bw * Dout,Fsh,Fsw,Din) to ( Fsh, Fsw, Din, Dout * Bh * Bw)
+//       -> reverse along Fsh, Fsw dimensions (rotate 180 degrees spatially)
+//        Result is stored in tcfparms->out_data
+// note, tcfparms->elbytes is 1 or 2, to get 8 or 16-bit processing.
 
-static int rotate_filter16(
-	struct nn_graph *nn,
-	uint16_t *in_data,
-	uint32_t num_filters,
-	uint32_t filt_height,
-	uint32_t filt_width,
-	uint32_t filt_depth,
-	uint16_t *out_data)
-{
-	uint32_t src_h = filt_height;
-	for (uint32_t h = 0; h < filt_height; h++)
-	{
-		uint16_t *src = &in_data[src_h * (num_filters * filt_width * filt_depth) - num_filters * filt_depth];
-		uint16_t *dst = &out_data[h * (num_filters * filt_width * filt_depth)];
-		vmemcpy_2d_general_asm(num_filters * filt_depth * sizeof(uint16_t),
-			filt_width,
-			dst,
-			(num_filters * filt_depth * sizeof(uint16_t)),
-			src,
-			-(num_filters * filt_depth * sizeof(uint16_t)));
-		src_h--;
-	}
-	return 0;
-}
-
-int process_tranpose_conv16_filter(
-	struct nn_graph *nn,
-	struct transpose_conv_filter_parms *tcfparms
-)
+int process_transpose_conv_filter(struct nn_graph *nn, struct transpose_conv_filter_parms *tcfparms)
 {
 	int res = 0;
 	const struct tensor *filt_tensor = tcfparms->filt_tensor;
-	const struct tensor *strides_tensor = tcfparms->strides_tensor;
 	uint32_t num_filters = filt_tensor->shape.batches;
 	uint32_t filt_height = filt_tensor->shape.height;
 	uint32_t filt_width = filt_tensor->shape.width;
 	uint32_t filt_depth = filt_tensor->shape.depth;
-	uint32_t block_h = strides_tensor->shape.height;
-	uint32_t block_w = strides_tensor->shape.width;
-	uint8_t pad_num_filters __attribute__((unused)) = (1 < block_h && block_h < 5 && 1 < block_w && block_w < 5) ? 1 : 0;
+	uint32_t block_h = tcfparms->block_h;
+	uint32_t block_w = tcfparms->block_w;
+
+	int element_size = tcfparms->elbytes; // 1 or 2
 
 	//Padded filt stuff
-	//uint32_t padded_num_filters = (pad_num_filters) ? roundup(num_filters, 32) : num_filters;
-	uint32_t padded_num_filters = num_filters; // TODO
+	uint32_t padded_num_filters = (tcfparms->pad_num_filters) ? roundup(num_filters, 32) : num_filters;
+	uint32_t new_num_filters = padded_num_filters * block_h * block_w;
 	uint32_t padded_filt_height = roundup(filt_height, block_h);
 	uint32_t padded_filt_width = roundup(filt_width, block_w);
+
+	uint32_t new_filt_height = padded_filt_height / block_h;
+	uint32_t new_filt_width = padded_filt_width / block_w;
+
 	uint32_t padded_filt_depth = filt_depth;
-	uint32_t padded_filt_size = padded_num_filters * padded_filt_height * padded_filt_width * padded_filt_depth * sizeof(uint16_t);
-	if (padded_filt_size != tcfparms->data_size) {
-		return errlog(nn, "Calculated filter size %d doesn't match allocated filter size %d", padded_filt_size, tcfparms->data_size);
+	uint32_t new_filt_size = new_num_filters * new_filt_height * new_filt_width * padded_filt_depth * element_size;
+	uint32_t padded_filt_size = padded_num_filters * padded_filt_height * padded_filt_width * padded_filt_depth * element_size;
+	if (new_filt_size != tcfparms->data_size)
+	{
+		return errlog(nn, "Calculated filter size %d doesn't match allocated filter size %d", new_filt_size, tcfparms->data_size);
 	}
 
-	uint16_t * padded_filt_data = nn_memalign(sizeof(HVX_Vector), padded_filt_size);
-	uint16_t *s2b_data = nn_memalign(sizeof(HVX_Vector), padded_filt_size);
-	if (!padded_filt_data || !s2b_data) {
+	int subfilt_1x1 = (new_filt_height == 1 && new_filt_width == 1);
+
+	uint8_t *padded_filt_data = nn_memalign(sizeof(HVX_Vector), padded_filt_size);
+	uint8_t *s2b_data = nn_memalign(sizeof(HVX_Vector), new_filt_size);
+	if (!padded_filt_data || !s2b_data)
+	{
 		res = -1;
 		goto done;
 	}
+	pad_filter(nn, filt_tensor->data, num_filters, filt_height, filt_width, filt_depth, padded_filt_data, padded_num_filters, padded_filt_height, padded_filt_width, padded_filt_depth,
+			   element_size, tcfparms->zero_offset);
 
-	pad16_filter(nn, filt_tensor, padded_filt_data, padded_num_filters, padded_filt_height, padded_filt_width, padded_filt_depth, tcfparms->zero_offset);
-	res = space_to_batch16(nn, padded_filt_data, padded_num_filters, padded_filt_height,
-		padded_filt_width, padded_filt_depth, block_h, block_w, s2b_data);
-
-	uint16_t *processed_weights = (uint16_t *)tcfparms->out_data;
-	uint16_t *transposed_weights_data = padded_filt_data;
-	uint32_t subkernel_size = padded_num_filters * padded_filt_height / block_h * padded_filt_width / block_w * padded_filt_depth;
-	for (int i = 0; i < block_h * block_w; i++)
+	// 'space to batch' transpose:
+	// padded_filt_data -> s2b_data
 	{
-		uint16_t *in_data = &s2b_data[i * subkernel_size];
-		uint16_t *transposed_slice = &transposed_weights_data[i * subkernel_size];
-		uint16_t *out_data = &processed_weights[i * subkernel_size];
-		res = transpose_to_hwio16(nn,
-			in_data, padded_num_filters, padded_filt_height / block_h, padded_filt_width / block_w, padded_filt_depth,
-			transposed_slice);
-		if (padded_filt_height / block_h == 1 && padded_filt_width / block_w == 1)
-			vmemcpy_asm(out_data, transposed_slice, subkernel_size * sizeof(uint16_t));
-		else
+		// transpose     { num_filters, Fsh, block_h, Fsw, block_w, filt_depth }
+		//        to     { block_h, block_w, num_filters, Fsh, Fsw, filt_depth }
+		uint32_t dims_in[5] = {padded_num_filters * padded_filt_height / block_h, block_h, padded_filt_width / block_w, block_w, padded_filt_depth};
+		int32_t perm[5] = {1, 3, 0, 2, 4};
+		res = nn_transpose_operation(NULL, s2b_data, padded_filt_data,
+									 element_size,
+									 perm, 5,
+									 dims_in, 5,
+									 tcfparms->out_data, new_filt_size); // scratch
+		if (res != 0)
+			goto done;
+	}
+	{
+		// transpose { block_h * block_w * num_filters, Fsh, Fsw, filt_depth  }
+		//    to     { Fsh, Fsw, filt_depth, block_h * block_w * num_filters }
+		uint32_t dims_in[4] = {block_h * block_w * padded_num_filters, new_filt_height, new_filt_width, padded_filt_depth};
+		int32_t perm[4] = {1, 2, 3, 0};
+		uint8_t *dest = padded_filt_data;
+		void *scratch = tcfparms->out_data;
+
+		// normally s2b_data ->padded_filt_data;
+		// but if subfilt_height and subfilt_width are both 1, this is the last
+		// step, so write it directly to output area
+		if (subfilt_1x1)
 		{
-			res = rotate_filter16(nn,
-				transposed_slice, padded_num_filters, padded_filt_height / block_h, padded_filt_width / block_w, padded_filt_depth,
-				out_data);
+			dest = tcfparms->out_data;
+			scratch = padded_filt_data;
 		}
+
+		res = nn_transpose_operation(NULL, dest, s2b_data,
+									 element_size,
+									 perm, 4,
+									 dims_in, 4,
+									 scratch, new_filt_size);
+
+		if (res != 0)
+			goto done;
 	}
 
+	if (!subfilt_1x1)
+	{ //rotate filter 180 degrees
+		uint8_t *processed_weights = tcfparms->out_data;
+		uint8_t *out_data = processed_weights;
+		rotate_filter(nn,
+					  padded_filt_data, new_num_filters,
+					  new_filt_height, new_filt_width, padded_filt_depth * element_size,
+					  out_data);
+	}
 done:
-	nn_free(padded_filt_data);
-	nn_free(s2b_data);
+	if (padded_filt_data != NULL)
+		nn_free(padded_filt_data);
+	if (s2b_data != NULL)
+		nn_free(s2b_data);
 	return res;
 }

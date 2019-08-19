@@ -335,6 +335,13 @@ struct avgpool_runstate
 	volatile int32_t reduce1x1_min_not, reduce1x1_max;
 
 
+	// 2x2 are sliced differently: by batches, and then vertically into 1,2 or 4 parts.
+	// so jobs = batches * (1<<slice_shift)
+	volatile int next_job;			// used to select next job
+	int hslice_shift;				// 0,1 or 2 according to how h is sliced
+	int hbreaks[4+1];				// height breaks. hbreaks[0] = 0, hbreaks[1<<hslice_shift]==out.height
+
+
 	struct avgpool_thrinfo thrinfo[AVGPOOL_MAX_THREADS];
 };
 
@@ -348,6 +355,7 @@ struct avgpool_runstate
 static void avgpool_worker_thread( struct nn_graph *nn, void *thrpv );
 static void avgpool_reduce_to_1x1_worker_thread( struct nn_graph *nn, void *thrpv );
 static void avgpool_reduce_to_1x1_post_worker_thread( struct nn_graph *nn, void *rstpv );
+static void avgpool_2x2_worker_thread_func( struct nn_graph * nn, void *rstpv);
 
 static void avgpool_process_slice( struct avgpool_runstate const *ibp,  void * integ_buf, int batch_idx, int d32_idx  );
 static void avgpool_process_slice_hvx( struct avgpool_runstate const *ibp,  void * integ_buf, int batch_idx, int d32_idx  );
@@ -357,6 +365,7 @@ static void avgpool_process_slice_special( struct avgpool_runstate const *ibp,  
 enum avgpool_special_case {
 	avgpool_special_NONE = 0,
 	avgpool_special_3x3_hvx,
+	avgpool_special_2x2_hvx,
 	avgpool_special_reduce_to_1x1
 };
 
@@ -397,10 +406,13 @@ static int avgpool_execute(struct nn_node *self, struct nn_graph *nn)
 		if( use_hvx ){
 			if( ibp->outshape.height == 1 && ibp->outshape.width == 1){
 				special_handler = avgpool_special_reduce_to_1x1;
-			}else if( use_hvx &&  ibp->window_ht ==3 && ibp->window_wid == 3 && ibp->stride_ht == 1 && ibp->stride_wid == 1
+			}else if(ibp->window_ht ==3 && ibp->window_wid == 3 && ibp->stride_ht == 1 && ibp->stride_wid == 1
 				&& ibp->inshape.width >1 && ibp->inshape.height > 1 ){
 				ibp->hvx_specialized_handler = avgpool_slice_hvx_3x3_stride1;
-				special_handler = avgpool_special_3x3_hvx;	// though this is currently the only one
+				special_handler = avgpool_special_3x3_hvx;
+			}else if( ibp->window_ht == 2 && ibp->window_wid == 2 && ibp->stride_wid == 2){
+				// can use specialized 2x2 handler (any stride_h is supported).
+				special_handler = avgpool_special_2x2_hvx;
 			}
 		}
 		ibp->hvx_specialized_handler_code = special_handler;
@@ -451,16 +463,18 @@ static int avgpool_execute(struct nn_node *self, struct nn_graph *nn)
 		}
 	}
 
-	logmsg(nn,2,"avgpool %dx%d s=%dx%d (pad %d) %dx%dx%dx%d %dx%dx%dx%d n_d32=%d special=%d",
+	logmsg(nn,2,"avgpool %dx%d s=%dx%d (pad %d) %dx%dx%dx%d %dx%dx%dx%d n_d32=%d special=%d pad %d:%d:%d:%d",
 			ibp->window_ht, ibp->window_wid,
 			ibp->stride_ht, ibp->stride_wid, self->padding,
 			ibp->inshape.batches, ibp->inshape.height, ibp->inshape.width, ibp->inshape.depth,
 			ibp->outshape.batches, ibp->outshape.height, ibp->outshape.width, ibp->outshape.depth,
-			ibp->tout.nd32 , special_handler);
+			ibp->tout.nd32 , special_handler,
+			ibp->wpad_top, ibp->wpad_bottom, ibp->wpad_left, ibp->wpad_right );
 
 
 	struct avgpool_runstate runstate;
 	runstate.ibp = ibp;
+	runstate.next_job = 0;
 
 	runstate.range_min = tensor_get_float(in_min_tensor,0);
 	runstate.range_max = tensor_get_float(in_max_tensor,0);
@@ -491,10 +505,42 @@ printf("left_padding = %d; right = %d; infeas_w = %d\n",ibp->wpad_left, ibp->wpa
 	void (*avgpool_worker_thread_func)( struct nn_graph *, void *);
 
 	avgpool_worker_thread_func = avgpool_worker_thread;
+	int need_thrinfo = 1;
 
 	if( special_handler == avgpool_special_3x3_hvx){
 		// if using the 3x3 special handler, set up its parms
 		setup_avgpool_asm_parms( &runstate.asmparms, ibp);
+	}else if( special_handler == avgpool_special_2x2_hvx){
+		// need alternate slicing setup; by batches and then height by 1,2 or 4.
+		// no d32 slicing.
+		int hslice_shift = 1;	// assume 2 for now...
+		int oht = ibp->outshape.height;
+		int batches = ibp->outshape.batches;
+		if( oht <2 || batches >= 4*AVGPOOL_MAX_THREADS){	// don't slice at all
+			hslice_shift = 0;
+		}else if( AVGPOOL_MAX_THREADS >=4 && oht >=4 && batches<=3){	// slice into 4
+			hslice_shift = 2;
+		}
+		runstate.jobs = njobs = batches<< hslice_shift;
+		n_threads = min_i32(AVGPOOL_MAX_THREADS, njobs);
+		runstate.hslice_shift = hslice_shift;
+		// set up the 'hbreaks' array
+		runstate.hbreaks[0] = 0;
+		int nh = 1<<hslice_shift;	// 1,2, or 4
+		runstate.hbreaks[nh] = oht;
+		if( hslice_shift > 0){
+			int hmid = (oht+1)>>1;
+			if( hslice_shift < 2){
+				runstate.hbreaks[1] = hmid;
+			}else{
+				runstate.hbreaks[1] = (hmid+1)>>1;
+				runstate.hbreaks[2] = hmid;	// midpoint
+				runstate.hbreaks[3] = (hmid+oht+1)>>1;
+			}
+		}
+		need_thrinfo = 0;
+		avgpool_worker_thread_func = avgpool_2x2_worker_thread_func;
+
 	}else if( special_handler == avgpool_special_reduce_to_1x1){
 		runstate.reduce1x1_min_not = ~0x7fffffff;
 		runstate.reduce1x1_max = ~0x7fffffff;
@@ -511,24 +557,35 @@ printf("left_padding = %d; right = %d; infeas_w = %d\n",ibp->wpad_left, ibp->wpa
 	}else{
 		// else
 		// allocate scratch for the integral buffers
+		
 		integ_buf_bytes = ibp->ibuf_total_bytes;
+		if (nn_scratch_grow(nn, integ_buf_bytes*n_threads)){
+			return errlog(nn, "scratch too small");
+		}
+		nn_scratch_reset(nn);
 		integ_buf = nn_scratch_alloc(nn, integ_buf_bytes*n_threads);
 		if( integ_buf == NULL){
-			return errlog(nn, "could not alloc %d bytes of scratch",integ_buf_bytes*n_threads );
+			return errlog(nn, "could not alloc %d bytes of scratch %d",integ_buf_bytes*n_threads,nn->scratch_size);
 		}
 	}
 	// fill in the 'thrinfo' and launch threads
 	runstate.n_threads = n_threads;
 	nn_sem_init(&runstate.done_sem,0);
 
-	for(int i=0; i < n_threads; i++){
-		runstate.thrinfo[i].job0 = (i*njobs) / n_threads;
-		runstate.thrinfo[i].job_end = ((i+1)*njobs) / n_threads;
-		runstate.thrinfo[i].thr_index = i;
-		runstate.thrinfo[i].rstp = &runstate;
-		runstate.thrinfo[i].integ_buf = integ_buf;
-		integ_buf = (void*)( (char*)integ_buf + integ_buf_bytes );
-		nn_os_work_for_vector(nn, avgpool_worker_thread_func , &runstate.thrinfo[i]);
+	if(need_thrinfo){
+		for(int i=0; i < n_threads; i++){
+			runstate.thrinfo[i].job0 = (i*njobs) / n_threads;
+			runstate.thrinfo[i].job_end = ((i+1)*njobs) / n_threads;
+			runstate.thrinfo[i].thr_index = i;
+			runstate.thrinfo[i].rstp = &runstate;
+			runstate.thrinfo[i].integ_buf = integ_buf;
+			integ_buf = (void*)( (char*)integ_buf + integ_buf_bytes );
+			nn_os_work_for_vector(nn, avgpool_worker_thread_func , &runstate.thrinfo[i]);
+		}
+	}else{
+		for(int i=0; i < n_threads; i++){
+			nn_os_work_for_vector(nn, avgpool_worker_thread_func , &runstate);
+		}
 	}
 	if(!need_post_work) nn_os_vector_call(nn,avgpool_earlywork,ibp);
 
@@ -868,6 +925,273 @@ avgpool_reduce_to_1x1_post_worker_thread( struct nn_graph *nn, void *rstpv )
 	nn_sem_post( &rstp->done_sem);
 }
 
+////////////////////////////////////////////////////////
+// Special case for 2x2 with stride_h = 2
+////////////////////////////////////////////////////////
+
+static void avgpool_2x2_inner_func(	struct integral_buffer_plan const *ibp,
+	int h0, int outht,  int batch );
+
+static void avgpool_2x2_worker_thread_func( struct nn_graph * nn, void *rstpv)
+{
+	struct avgpool_runstate * rstp = (struct avgpool_runstate *)rstpv;
+	struct integral_buffer_plan const *ibp = rstp->ibp;
+
+	int ijob;
+	int njobs = rstp->jobs;
+	int hslice_shift= rstp->hslice_shift;	// 0,1 or 2
+	int hslice_mask = (1<<hslice_shift)-1;	// 0,1 or 3
+
+	while( ijob = __sync_fetch_and_add(&rstp->next_job, 1), ijob < njobs ){
+		int ibatch = ijob >> hslice_shift;		// this is the job #
+		int const * hbrks = &rstp->hbreaks[ ijob & hslice_mask];	// point to 'breaks' table
+		int h0 = hbrks[0];		// first output row we do
+		int oht = hbrks[1] - h0;		// number of rows we do
+		avgpool_2x2_inner_func( ibp, h0, oht, ibatch);
+	}
+	nn_sem_post( &rstp->done_sem);
+}
+
+
+//////////////////////////////////////////////////////////////////////////////
+// code for doing avgpool with 2x2 window, h_stride = 2.
+// The operation does top/bottom/left padding, as needed, on-the-fly;
+// if right-padding is needed, it will zap it into the input buffer
+// prior to starting work (the padding is done by replicating the last col,
+// so the average works out properly). Most uses of this operation
+// don't need padding.
+//
+// If left padding is needed, we operate as if the padding had been done,
+// and then actually do it using a vdelta op to copy bytes within
+// the first vector.
+// So, the (padded) input width is always even, and the output width is
+// always half as much.
+//
+// Procedure is:
+//  - read 2 input rows, via a 'vlalign' operation, so that we start by
+//    reading the first 4 pixels in each vector (include 'padding' if applicable).
+//  - widen-add the vectors from the two rows; result is two vecs of 16 bit
+//  - shuffle these, and add together to add the even and odd w slices
+//  Result is a vector with 64 sums, 32 for even 32 for odd output w.
+//  given 2 of these, we reduce-asr to 8 bit, and then 'deal' the result
+//  to get one output vector.
+//
+//   h  | w1 w0 d4 d3 d2 d1 d0  // inputs
+//   d0 | w1 w0 d4 d3 d2 d1 --  // widening add
+//   w0 | w1 d4 d3 s2 d1 d0 --  // shuffle n = 62
+//   -  | w1 d4 d3 s2 d1 d0 --  // add together
+//
+// Combining two results:
+//   -  | w1 d4 d3 s2 d1 d0 w2  // reducing >>2 with rnd/sat to u8
+//      | w2 w1 d4 d3 d2 d1 d0  // byte deal
+//
+static inline
+HVX_Vector avgpool_2x2s2_stage1( HVX_Vector vin0, HVX_Vector vin1 )
+{
+	HVX_VectorPair vsum = Q6_Wh_vadd_VubVub( vin1, vin0 );	// vertical add
+	HVX_VectorPair vshuf = Q6_W_vshuff_VVR( Q6_V_hi_W(vsum),Q6_V_lo_W(vsum),64-2);
+	return Q6_Vh_vadd_VhVh( Q6_V_hi_W(vshuf),Q6_V_lo_W(vshuf));
+}
+// take two results from stage1; round, pack, reorder for the output.
+// Each input vector contains the results for two output pixels.
+static inline
+HVX_Vector avgpool_2x2s2_stage2( HVX_Vector vin23, HVX_Vector vin01 )
+{
+	HVX_Vector rounded = Q6_Vub_vasr_VhVhR_rnd_sat( vin23, vin01, 2);	// >>2 and pack
+	// but pixels 0,1 are in even bytes, and 2,3 in odd, so...
+	return Q6_Vb_vdeal_Vb( rounded);
+}
+
+// process one batch of the work, starting at output row h0, for 'outht'
+// output rows.
+
+static void avgpool_2x2_inner_func(	struct integral_buffer_plan const *ibp,
+	int h0, int outht,  int batch )
+{
+	int margin_left = ibp->wpad_left;	// 0 or 1 only!
+	int margin_top = ibp->wpad_top;		// 0 or 1 only!
+	int stride_h = ibp->stride_ht;		// >= 1
+	int nd32 = ibp->tin.nd32;
+
+	int in_height_stride = ibp->tin.height_stride;
+	int in_d32_stride = ibp->tin.d32_stride;
+
+	uint8_t const * in_batch = ibp->tin.data + batch * ibp->tin.batch_stride;
+
+	// work out the actual range of input rows need to cover this output span
+	// (used for l2 prefetch).
+	int hbase = h0*stride_h-margin_top;  // start row (may be -1, if margin_top = 1)
+	int h_begin = max_i32(hbase,0);	// first actual input row we need
+	int h_end = min_i32(hbase+stride_h*(outht-1)+2, ibp->inshape.height); //last+1
+	int h_inrows = h_end - h_begin;	// # of input rows we need, starting at hbegin
+
+	// work out the end-of-row, for top row, for l2 prefetch calc.
+	// (doesn't include right padding .. yet)
+	uint8_t const *in_batch_endrow = in_batch + ibp->inshape.width*32;
+
+	if( ibp->wpad_right>0){	// ok we need to do right padding....
+		// do all the input rows needed for this output span. when stride =1
+		// there will be overlap with other extents, but that should be ok.
+		uint8_t * posn = // dest position
+				(uint8_t*)in_batch_endrow
+				                   + h_begin * in_height_stride;
+		vmemcpy_2d_asm( 32, nd32*h_inrows,	// wid, height
+				posn, in_d32_stride,			// dest, stride
+				posn-32, in_d32_stride );		// ht, stride;
+		in_batch_endrow += 32;	// since we'll need to read that
+	}
+	int wout = ibp->outshape.width;  //output wid
+	int out_height_stride = ibp->tout.height_stride;
+	int out_d32_stride = ibp->tout.d32_stride;
+
+	uint8_t * out_batch = ibp->tout.data + batch * ibp->tout.batch_stride;
+
+	//
+	// figure out how to align the data.
+	// using a vlalign will bring the first input to the start of vector.
+	// if a 'preload' is needed on each row, the pointer will be bumped
+	// so the preload is the previous vector.
+	in_batch -= margin_left*32;	// adjust as if we need to read margin
+	unsigned lalign = (size_t) in_batch & 0x60;	// intra-vector offset.
+	int valamt = 0;
+	int need_preload = 0;	// do we need to preload 'previous'?
+	if( lalign != 0){ // preload is needed, unless valamt=0x20 and margin_left=1
+		valamt = 128-lalign;		// 0x20,0x40,0x60
+		if( valamt > 32*margin_left){	// we need preload
+			need_preload = 1;
+		}
+		in_batch += valamt;		// first 'non-preload' read.
+	}
+
+	uint8_t* out_pos0 = out_batch + h0 * out_height_stride;		// output starts here.
+
+	// determine the start for first
+	// pass across: stride_h*h0-margin_top rows down. When h0=0 and margin_top =1,
+	// this will be one row above the input; we make an adjustment later.
+	uint8_t const * in_pos0 = in_batch + in_height_stride*hbase;
+	// the start of the last row, for bottom margin
+	uint8_t const* in_pos_last = in_batch + in_height_stride*(ibp->inshape.height-1);
+
+
+	// prefetch: point to the first thing we need.
+	uint8_t const *pf_ptr = in_batch - 128*need_preload;	// first vec we need
+	unsigned pf_width = min_u32( in_d32_stride, in_batch_endrow - pf_ptr);			// bytes we need to read
+	pf_ptr += h_begin*in_height_stride;						// adjust for start position.
+
+	// we initially issue a certain # of prefetch rows; then, before starting each row,
+	// issue enough to cover stride_h more rows.
+	int pf_rows_issued = (in_height_stride >=16384 )? 2: (1 << (Q6_R_cl0_R(in_height_stride)-16));
+	pf_rows_issued = min_i32( pf_rows_issued, h_inrows);		// max is the whole thing
+
+	l2fetch( pf_ptr, in_d32_stride, pf_width, nd32*pf_rows_issued);
+	pf_ptr += pf_rows_issued*in_height_stride;
+
+	// lpad_ctl is all zero, unless we need 'margin_left' in which case it is 32 in the
+	// first 32 bytes.
+	HVX_Vector lpad_ctl = Q6_V_vand_QR( Q6_Q_vsetq_R( margin_left?32:0), 0x20202020);
+	// # if input vectors to process (after alignment,counting margins)
+	// int winvecs = (wout+1)>>1;   // >=1
+	// int in_vecs_even = (winvecs&1)==0;	// used in loop
+	int in_vecs_even = ((wout-1)&2)!=0;
+	// # of times to run the w vector loop (one vector out per loop)
+	int wloopcnt = (wout-1)>>2;		// >= 0
+
+	//wout  winvecs in_vecs_even wloopcnt
+	//    1     1         0         0
+	//    2     1         0         0
+	//    3     2         1         0
+	//    4     2         1         0
+	//    5     3         0         1
+	//    6     3         0         1
+	//    7     4         1         1
+	//    8     4         1         1
+	//    9     5         0         2
+
+	HVX_Vector vin0_prev = Q6_V_vzero();
+	HVX_Vector vin1_prev = Q6_V_vzero();
+
+	for(int ih =0; ih < outht; ih++){
+		// prefetch?
+		if( pf_rows_issued < h_inrows){
+			int pf_next = min_i32( pf_rows_issued+stride_h, h_inrows);
+			int pf_now = pf_next-pf_rows_issued;
+			l2fetch( pf_ptr, in_d32_stride, pf_width, nd32*pf_now);
+			pf_ptr += pf_now*in_height_stride;
+			pf_rows_issued = pf_next;
+		}
+
+		uint8_t * outp = out_pos0 + ih * out_height_stride;
+		// set up two input pointers, to adjacent rows (usually)
+		uint8_t const * inp0 = in_pos0+ ih*stride_h*in_height_stride;
+		uint8_t const * inp1 = inp0 + in_height_stride;
+		// don't fall off the top
+		if(inp0 < in_batch)inp0 = inp1;
+		// don't fall off the bottom.
+		if(inp1 > in_pos_last) inp1 = inp0;
+				// row_delta is either in_height_stride, or 0; it is used so
+		// we don't need to keep updating inp1
+		uint32_t row_delta = inp1-inp0;
+
+		// d32 loop.
+		for(int id32 = 0; id32 < nd32; id32++){
+			HVX_Vector const * vinp0 = (HVX_Vector const * )inp0;
+			HVX_Vector const * vinp1 = (HVX_Vector const * )(inp0 + row_delta);
+			HVX_Vector * voutp = (HVX_Vector *)outp;
+			inp0 += in_d32_stride;
+			outp += out_d32_stride;
+
+			// prepare for w loop
+			if( need_preload){
+				vin0_prev = vinp0[-1];
+				vin1_prev = vinp1[-1];
+			}
+			// the inner loop reads 2 vectors from 2 rows and writes one.
+			// But it is unpeeled, so the 'prolog' reads one vector from each row,
+			// and passes a half-result (2 output pixels) to the loop;
+			// In some cases the loop has 0 iterations.
+			HVX_Vector vin0 = *vinp0++;
+			HVX_Vector vin1 = *vinp1++;
+			HVX_Vector va0 = Q6_V_vlalign_VVR( vin0,vin0_prev,valamt);
+			HVX_Vector va1 = Q6_V_vlalign_VVR( vin1,vin1_prev,valamt);
+			// if 'left padding' is needed, this replaces the first 32
+			// with a copy of the second 32. (if not, lpad_ctl=0).
+			va0 = Q6_V_vdelta_VV( va0, lpad_ctl);
+			va1 = Q6_V_vdelta_VV( va1, lpad_ctl);
+			HVX_Vector vsum01 = avgpool_2x2s2_stage1( va0,va1);
+			vin0_prev = vin0;
+			vin1_prev = vin1;
+
+			for( int i = 0; i < wloopcnt; i++){  // generate one out vec per loop.
+				HVX_Vector vin0r = *vinp0++;
+				HVX_Vector vin1r = *vinp1++;
+				va0 = Q6_V_vlalign_VVR( vin0r,vin0_prev,valamt);
+				va1 = Q6_V_vlalign_VVR( vin1r,vin1_prev,valamt);
+				HVX_Vector vsum23 = avgpool_2x2s2_stage1( va0,va1);
+				vin0 = *vinp0++;
+				vin1 = *vinp1++;
+				// OK we have vsum01 (from prev iter) and vsum23, so
+				// make an output...
+				*voutp++ = avgpool_2x2s2_stage2( vsum23, vsum01);
+
+				va0 = Q6_V_vlalign_VVR( vin0,vin0r,valamt);
+				va1 = Q6_V_vlalign_VVR( vin1,vin1r,valamt);
+				vin0_prev = vin0;
+				vin1_prev = vin1;
+				vsum01 = avgpool_2x2s2_stage1( va0,va1);
+			}
+			// vsum01 will always be a valid partial result here; if the
+			// # input vectors is even, we need to complete it
+			// with one more vector read
+			HVX_Vector vsumlast=vsum01;
+			if(in_vecs_even){
+				va0 = Q6_V_vlalign_VVR( *vinp0,vin0_prev,valamt);
+				va1 = Q6_V_vlalign_VVR( *vinp1,vin1_prev,valamt);
+				vsumlast = avgpool_2x2s2_stage1( va0,va1);
+			}
+			*voutp++ = avgpool_2x2s2_stage2( vsumlast, vsum01);
+		} // d32 loop;
+	}// h loop
+}
 
 ////////////////////////////////////////////////////////
 //

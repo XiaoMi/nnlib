@@ -69,6 +69,7 @@ gvconv2db2b2b2_d32_asm:
 #define ptr_zei               r3    //results aligned 128
 #define ptr_zoi               r4    //results aligned 128
 #define in_width              r5    //(pad_l+in_width+pad_r) => 4 %4
+#define out_width             in_width
 
 #define out_width_depth       r4    //0 value in bytes to get to next full out row
 #define col_count             r25   //1 out_width_pad
@@ -253,6 +254,10 @@ gvconv2db2b2b2_d32_asm:
        } {
            scratch0 = add(scratch0, #128)             //align stack to next 128b
            out_width_depth = memw(sp+#(SPVEC+16)<<2)  //read width of activations
+#if !defined(SPLIT_OUTPUT)
+           out_align = mux(p3,#0,#64)                 //
+           out_width = add(col_count,#-4)             //
+#endif
        }
 /*=============================================================================*/
    .balign 64
@@ -365,14 +370,22 @@ gvconv2db2b2b2_d32_asm:
 #endif
            ptr_xij = add(ptr_xij, next_outputs)       //[Post-Width]reset data ptr to next 4
            sk = #0                                    //
+#if defined(SPLIT_OUTPUT)
            y32.uh = vpack(y3.w, y2.w):sat             //[Post-Width-P]pack low 16bits together
+#else
+           x3210o.uh = vpack(y3.w, y2.w):sat          //[Post-Width]pack low 16bits together
+#endif
        } {
+#if defined(SPLIT_OUTPUT)
            x3210e.b = vpacke(y32.h, y10.h)            //[Post-Width-P]
+#endif
            if (q0) s0.w += wsum.w                     //[Post-Width]
            s1.w = vadd(s1.w, wsum.w)                  //[Post-Width]
            s2.w = vadd(s2.w, wsum.w)                  //[Post-Width]
        } {
+#if defined(SPLIT_OUTPUT)
            x3210o.b = vpacko(y32.h, y10.h)            //[Post-Width-P]
+#endif
            p0 = cmp.ge(col_count,#2)                  //
            p1 = cmp.ge(col_count,#3)                  //
            col_count=add(col_count,#-4)               //[Post-Width]count -=4 ptr_z += 128
@@ -385,7 +398,11 @@ gvconv2db2b2b2_d32_asm:
            if (p0) sk = s1                            //
            p0 = cmp.ge(col_count,#(4-4))              //
            s1.w = vasl(s1.w, recip_shift)             //[Post-Width]
+#if defined(SPLIT_OUTPUT)
            xout = vlalign(x3210e,x3210e_prev,out_align)//[Post-Width-P]
+#else
+           xout = vlalign(x3210e,x3210o_prev,out_align)//[Post-Width-P]
+#endif
        } {
            maxe.w = vmax(maxe.w, sk.w)                //[Post-Width]
            mine.w = vmin(mine.w, sk.w)                //[Post-Width]see if z0 is max
@@ -400,9 +417,15 @@ gvconv2db2b2b2_d32_asm:
            maxe.w = vmax(maxe.w, sk.w)                //[Post-Width]
            mine.w = vmin(mine.w, sk.w)                //[Post-Width]see if z0 is max
            s3.w = vasl(s3.w, recip_shift)             //[Post-Width]
-           p1 = cmp.gt(col_count, #0)                 //[Post-Width]compare for branch
+#if !defined(SPLIT_OUTPUT)
+           p0 = cmp.eq(col_count,out_width)
+#endif
        } {
+#if defined(SPLIT_OUTPUT)
            xout = vlalign(x3210o,x3210o_prev,out_align)//[Post-Width-P]align old and new data
+#else
+           xout = vlalign(x3210o,x3210e,out_align)    //[Post-Width]
+#endif
            y0.w = vmpye(s0.w, recipvec.uh)            //[Post-Width](s2 * recip + rnd)>>31
 #if defined(FAST_16B_CONV)
            ptr_w_ptr_x0 = memd(sp+#64)                //[Pre-Width]initialize filter pointer & activation offset
@@ -421,7 +444,11 @@ gvconv2db2b2b2_d32_asm:
 #endif
            s0 = vcrnd                                 //[Pre-Width]accumulator 0
        } {
+#if defined(SPLIT_OUTPUT)
            if(p2)vmem(ptr_z1++#1):nt = xout           //[Post-Width-P]store 2nd 32bytes
+#else
+           if(!p0)vmem(ptr_z0++#1):nt = xout          //[Post-Width-P]store 2nd 32bytes
+#endif
            x3210e_prev = x3210e                       //[Post-Width-P]save data for next output align
            y1.w = vmpye(s1.w, recipvec.uh)            //[Post-Width](s2 * recip + rnd)>>31
            ptr_x2 = and(ptr_x0, #-128)                //[Pre-Width]make loads aligned to 128 zero out bits 0-6
@@ -436,17 +463,22 @@ gvconv2db2b2b2_d32_asm:
            ptr_x1 = add(ptr_x0, stride_w)             //[Pre-Width]setup initial pointer
            scratch = scratch0                         //[Pre-Width]temp accumuator buffer
        } {
+#if defined(SPLIT_OUTPUT)
            y10.uh = vpack(y1.w, y0.w):sat             //[Post-Width]pack low 16bits together
+#else
+           x3210e.uh = vpack(y1.w, y0.w):sat          //[Post-Width]pack low 16bits together
+#endif
            y2.w+= vmpyo(s2.w, recipvec.h):RSS         //[Post-Width]<<1:rnd:sat:shift
-           s2 = vcrnd                                 //[Pre-Width]accumulator 2]
            ptr_x0 = add(ptr_x0, in_width_32)          //[Pre-Width], 0]move to next even line of filter activations
+           p1 = cmp.gt(col_count, #0)                 //[Post-Width]compare for branch
        } {
            x3210o_prev = x3210o                       //[Post-Width-P]save data for next output align
            y3.w = vmpye(s3.w, recipvec.uh)            //[Post-Width](s2 * recip + rnd)>>31
-           p3 = cmp.eq(r0, r0)                        //[Post-Width]set to true
            q0 = vcmp.eq(x3210o.w,x3210o.w)            //
+           p3 = cmp.eq(r0, r0)                        //[Post-Width]set to true
        } {
            y3.w+= vmpyo(s3.w, recipvec.h):RSS         //[Post-Width]<<1:rnd:sat:shift
+           s2 = vcrnd                                 //[Pre-Width]accumulator 2]
            s3 = vcrnd                                 //[Pre-Width]accumulator 3]
            if(p1) jump:t .L_width                     //[Post-Width]
        } //cols per line kernel loop width
@@ -456,30 +488,57 @@ gvconv2db2b2b2_d32_asm:
            p3 = cmp.gt(out_align, #0)                 //
            out_height = add(out_height, #-1)          //
        } {
+#if defined(SPLIT_OUTPUT)
            y32.uh = vpack(y3.w, y2.w):sat             //[Post-Width]pack low 16bits together
+#else
+           x3210o.uh = vpack(y3.w, y2.w):sat          //[Post-Width]pack low 16bits together
+#endif
            memw(sp+#96) += out_width_depth            //[Height]ptr_zi = add(ptr_zi, out_width_depth)
            p0 = or(p0, p3)                            //
        } {
+#if defined(SPLIT_OUTPUT)
            memw(sp+#100) += out_width_depth           //[Height]ptr_zi = add(ptr_zi, out_width_depth)
+#else
+           memw(sp+#96) += out_width_depth            //[Height]ptr_zi = add(ptr_zi, out_width_depth)
+#endif
            col_count = memw(sp+#(SPVEC+17)<<2)        //read width of activations
        } {
+#if defined(SPLIT_OUTPUT)
            x3210e.b = vpacke(y32.h, y10.h)            //[Post-Width]
+#endif
            q0 = or(q1, q1)                            //
        } {
+#if defined(SPLIT_OUTPUT)
            x3210o.b = vpacko(y32.h, y10.h)            //[Post-Width]
+#endif
            p1 = cmp.eq(out_height, #0)                //[Height]
        } {
+#if defined(SPLIT_OUTPUT)
            xout = vlalign(x3210e,x3210e_prev,out_align)//[Post-Width]
+#else
+           xout = vlalign(x3210e,x3210o_prev,out_align)//[Post-Width]
+#endif
            if (p2) vmem(ptr_z0++#1):nt = xout.new      //[Post-Width]store 2nd 32bytes
        } {
+#if defined(SPLIT_OUTPUT)
            xout = vlalign(x3210o,x3210o_prev,out_align)//[Post-Width]
            if (p2) vmem(ptr_z1++#1):nt = xout.new      //[Post-Width]store 2nd 32bytes
+#else
+           xout = vlalign(x3210o,x3210e,out_align)     //[Post-Width]
+           vmem(ptr_z0++#1):nt = xout.new              //[Post-Width]store 2nd 32bytes
+           p0 = cmp.eq(out_align, #0)                 //if no alignment enable store
+#endif
        } {
+#if defined(SPLIT_OUTPUT)
            xout = vlalign(x3210e, x3210e, out_align)  //[Height]
            if( p0) vmem(ptr_z0+#0):nt = xout.new      //[Height]store 2nd 32bytes
        } {
            xout = vlalign(x3210o, x3210o, out_align)  //[Height]
            if( p0) vmem(ptr_z1+#0):nt = xout.new      //[Height]store 2nd 32bytes
+#else
+           xout = vlalign(x3210o,x3210o,out_align)    //[Post-Width]
+           if(!p0) vmem(ptr_z0+#0):nt = xout.new      //[Height]store 2nd 32bytes
+#endif
            if(!p1) jump:t .L_height                   //[Height]
        }//end lines per block
 /*=============================================================================*/
@@ -502,4 +561,3 @@ gvconv2db2b2b2_d32_asm:
 /*=============================================================================*/
       .size gvconv2db2b2b2_d32_asm, .L_end-gvconv2db2b2b2_d32_asm
 /*=============================================================================*/
-	

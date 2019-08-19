@@ -44,6 +44,7 @@
 #include <nn_graph.h>
 #include <string.h>
 #include "nn_gentranspose.h"
+#include "quantize.h"
 
 #define MASK_UPDATE_RANGE(BIT, DIM) \
 { \
@@ -58,8 +59,8 @@
 
 #define HANDLE_NEGATIVE_INDEX(DIM) \
 { \
-    if(DIM##_start < 0) DIM##_start = (int) fmax(0, DIM##_start + DIM##_in); \
-    if(DIM##_stop < 0) DIM##_stop = (int) fmax(-1, DIM##_stop + DIM##_in); \
+    if(DIM##_start < 0) DIM##_start = max_i32(0, DIM##_start + DIM##_in); \
+    if(DIM##_stop < 0) DIM##_stop = max_i32(-1, DIM##_stop + DIM##_in); \
 }
 
 // find the output size. It will be 0 (invalid) if stop-start is 0 or

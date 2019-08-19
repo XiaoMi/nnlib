@@ -101,7 +101,7 @@ static int quantize32_execute(struct nn_node *self, struct nn_graph *nn)
 }
 
 
-static int quantize_execute(struct nn_node *self, struct nn_graph *nn)
+static int quantize_execute_ref(struct nn_node *self, struct nn_graph *nn)
 {
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *min_tensor = self->inputs[1];
@@ -305,12 +305,11 @@ find_scaling_for_hvx_quant ( float const minmax[2], struct hvx_quant_parms *out)
 	uint32_t rangemant;
 	uint32_t rangeexp;
 	uint32_t scaling;
-
 	if( !flt_isfinite(minmax[0]) || !flt_isfinite(minmax[1])) return -1;
 
 
 	float minv = -minmax[0];
-	float maxv = fmaxf( minv+1e-5f, minmax[1]);
+	float maxv = fmaxf(minv+1e-18f, minmax[1]);
 
 	if( minv < 0.0f)	// make sure the 'zero' is an integer
 		adjust_minmax_for_zero( & minv , & maxv);
@@ -345,11 +344,81 @@ find_scaling_for_hvx_quant ( float const minmax[2], struct hvx_quant_parms *out)
 	out->maxval = maxv;
 	return 0;
 }
+
 struct autoquant_info {
 	struct nn_node * self;
 	nn_sem_t done_sem;
 	volatile int err_flag;
 };
+struct autoquantminmax_info {
+	struct nn_node * self;
+	nn_sem_t done_sem;
+	volatile int err_flag;
+	struct hvx_quant_parms* qparms;
+	const float * in;
+	uint8_t * out;
+	int32_t elements;
+
+};
+void quantize_opt(struct nn_graph* nn, void* vinfo){
+	struct autoquantminmax_info* info = (struct autoquantminmax_info*) vinfo;
+	struct hvx_quant_parms* qparms = info->qparms;
+	int32_t elements = info->elements;
+	const float* in = info->in;
+	uint8_t* out = info->out;
+	// 	/* Quantize! */
+	quantize_floats_to_8b_asm(in,out, elements, qparms->min_offset, qparms->common_exp, qparms->scaling);
+	nn_sem_post(& info->done_sem);
+}
+static int quantize_execute_opt(struct nn_node *self, struct nn_graph *nn)
+{
+	const struct tensor *in_tensor = self->inputs[0];
+	const struct tensor *min_tensor = self->inputs[1];
+	const struct tensor *max_tensor = self->inputs[2];
+	struct tensor *out_tensor = self->outputs[0];
+	struct tensor *out_min_tensor = self->outputs[1];
+	struct tensor *out_max_tensor = self->outputs[2];
+	float min_in = tensor_get_float(min_tensor,0);
+	float max_in = tensor_get_float(max_tensor,0);
+
+	float batches = in_tensor->shape.batches;
+	float height = in_tensor->shape.height;
+	float width = in_tensor->shape.width;
+	float depth = in_tensor->shape.depth;
+	const float *in = in_tensor->data;
+	uint8_t *out = out_tensor->data;
+	int out_bytes = batches*height*width*depth;
+	logmsg(nn,2,"quantize execute. self=%p ",self);
+	struct hvx_quant_parms qparms;
+
+	if( tensor_out_prepare_normal( out_tensor, batches,height,width,depth, NN_TYPE_QUINT8)!= 0 ){
+		return errlog(nn,"out too small for node %d (%p) %d < %d",
+			      self->node_id, out_tensor, out_tensor->max_size,out_bytes);
+	}
+
+	float minmaxbuf[2] = {-min_in,max_in};
+	if( find_scaling_for_hvx_quant(minmaxbuf, &qparms) !=0 ){
+		return errlog(nn,"inf or NaN input, to autoquantize");
+	}
+	logmsg(nn,2,"minval=%f maxval=%f range=%f scaling = %d, common_exp = %d min_offset=%x",
+		qparms.minval,qparms.maxval, qparms.maxval-qparms.minval, qparms.scaling, qparms.common_exp, qparms.min_offset);
+
+	struct autoquantminmax_info aqinfo;
+	aqinfo.self = self;
+	aqinfo.err_flag = 0;
+	aqinfo.elements = out_bytes;
+	aqinfo.in = in;
+	aqinfo.out = out;
+	aqinfo.qparms = &qparms;
+
+	nn_sem_init(&aqinfo.done_sem,0);
+	nn_os_work_for_vector(nn,quantize_opt,&aqinfo);
+	nn_sem_wait(&aqinfo.done_sem);
+
+	tensor_set_single_float(out_min_tensor, qparms.minval);
+	tensor_set_single_float(out_max_tensor, qparms.maxval);
+	return 0;
+}
 #if 0
 static void autoquantize_hvx(struct nn_graph *nn, void *infov)
 {
@@ -471,6 +540,8 @@ static void autoquantize_hvx(struct nn_graph *nn, void *infov)
 	}
 	nn_sem_post(& info->done_sem);
 }
+
+
 #endif
 
 //
@@ -1103,7 +1174,7 @@ static int dequantize_execute(struct nn_node *self, struct nn_graph *nn)
 	struct tensor *out_tensor = self->outputs[0];
 	float minval = tensor_get_float(min_tensor,0);
 	float maxval = tensor_get_float(max_tensor,0);
-	float range = fmaxf(0.0001f,maxval-minval);
+	float range = fmaxf(1e-18f, maxval-minval);
 	float stepsize = flt_div_255(range);
 	float batches = in_tensor->shape.batches;
 	float height = in_tensor->shape.height;
@@ -1356,7 +1427,7 @@ static int dequantize_i32_execute(struct nn_node *self, struct nn_graph *nn)
 	struct tensor *out_tensor = self->outputs[0];
 	float minval = tensor_get_float(min_tensor,0);
 	float maxval = tensor_get_float(max_tensor,0);
-	float range = fmaxf(0.0001f,maxval-minval);
+	float range = fmaxf(1e-18f, maxval-minval);
 	float stepsize = range/4294967296.0f/*0x1.0p32f*/;
 	float batches = in_tensor->shape.batches;
 	float height = in_tensor->shape.height;
@@ -1392,7 +1463,7 @@ static int dequantize_i32_execute(struct nn_node *self, struct nn_graph *nn)
 
 
 struct nn_node_ops nn_ops_for_Quantize = {
-	.execute = quantize_execute,
+	.execute = quantize_execute_opt,
 	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
@@ -1402,7 +1473,7 @@ struct nn_node_ops nn_ops_for_Quantize = {
 };
 
 struct nn_node_ops nn_ops_for_Quantize_ref = {
-	.execute = quantize_execute,
+	.execute = quantize_execute_ref,
 	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
@@ -1756,7 +1827,7 @@ static int output_dequantize_execute_opt(struct nn_node *self, struct nn_graph *
         // set min/maxes
         minval = tensor_get_float(in_min_tensor, 0);
         maxval = tensor_get_float(in_max_tensor, 0);
-		float range = fmaxf(0.0001f,maxval-minval);
+		float range = fmaxf(1e-18f, maxval-minval);
 		float stepsize = flt_div_255(range);
 		// the hvx code will quietly generate nonsense if stepsize is infeasible...
 		// it must be in range 2**-126 <= step < 2**120 to ensure results are

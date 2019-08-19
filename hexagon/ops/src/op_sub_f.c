@@ -43,11 +43,11 @@
 
 // subtract vector from vector
 #define OPERATOR_SUB(X,Y) ((X)-(Y))
-BROADCAST_STRIDE_11_FUNC(sub_f_stride_11, float, OPERATOR_SUB)
+BROADCAST_STRIDE_11_FUNC(sub_f_stride_11, float, float, OPERATOR_SUB)
 // subtract scalar from vector
-BROADCAST_STRIDE_10_FUNC(sub_f_stride_10, float, OPERATOR_SUB)
+BROADCAST_STRIDE_10_FUNC(sub_f_stride_10, float, float, OPERATOR_SUB)
 // subtract vector from scalar
-BROADCAST_REV_STRIDE_01_FUNC(sub_f_rev_stride_01, float, OPERATOR_SUB)
+BROADCAST_REV_STRIDE_01_FUNC(sub_f_rev_stride_01, float, float, OPERATOR_SUB)
 
 
 static const struct elementwise_funcs Sub_f_funcs = {
@@ -61,16 +61,16 @@ static const struct elementwise_funcs Sub_f_funcs = {
 
 static int sub_f_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return nn_elementwise_with_broadcast( self, nn, &Sub_f_funcs, NULL );
+	return nn_elementwise_with_broadcast( self, nn, &Sub_f_funcs,NULL,NULL, NULL );
 }
 
 
 
-BROADCAST_STRIDE_11_FUNC(sub_int32_stride_11, int32_t, OPERATOR_SUB)
+BROADCAST_STRIDE_11_FUNC(sub_int32_stride_11, int32_t, int32_t, OPERATOR_SUB)
 // subtract scalar from vector
-BROADCAST_STRIDE_10_FUNC(sub_int32_stride_10, int32_t, OPERATOR_SUB)
+BROADCAST_STRIDE_10_FUNC(sub_int32_stride_10, int32_t, int32_t, OPERATOR_SUB)
 // subtract vector from scalar
-BROADCAST_REV_STRIDE_01_FUNC(sub_int32_rev_stride_01, int32_t, OPERATOR_SUB)
+BROADCAST_REV_STRIDE_01_FUNC(sub_int32_rev_stride_01, int32_t, int32_t, OPERATOR_SUB)
 
 static const struct elementwise_funcs Sub_int32_funcs = {
 	.op_stride_11 = sub_int32_stride_11,
@@ -83,7 +83,7 @@ static const struct elementwise_funcs Sub_int32_funcs = {
 
 static int sub_int32_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return nn_elementwise_with_broadcast( self, nn, &Sub_int32_funcs, NULL );
+	return nn_elementwise_with_broadcast( self, nn, &Sub_int32_funcs,NULL,NULL, NULL );
 }
 
 

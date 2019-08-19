@@ -41,6 +41,7 @@
  */
 
 #include <hexagon_nn.h>
+#include <hexnn_graph_wrapper_interface.h>
 #include <nn_graph.h>
 #include <string.h>
 #include <stdio.h>
@@ -62,10 +63,12 @@
 #else // defined(USE_OS_QURT)
 #define AEE_EBADCLASS 10
 typedef void* remote_handle64;
-#endif // defined(USE_OS_QURT)
+#endif
 
 #define UNUSED_PARAM(x) (void)(x)
-#define NN_VERSION 0x00020903
+#define NN_VERSION 0x00020F00
+
+#define ROUNDUP_8BYTES(X)   ((X+7)&(~7))
 
 // TODO - Move these from globals to a graph property
 extern int Num_Vector_Threads;
@@ -222,7 +225,7 @@ int hexagon_nn_get_dsp_offset(uint32_t *libhexagon_addr, uint32_t *fastrpc_shell
 #else // defined(USE_OS_QURT)
 	*fastrpc_shell_addr = 0;
 	*libhexagon_addr    = 0;
-#endif // defined(USE_OS_QURT)
+#endif
 	return retVal;
 }
 
@@ -549,6 +552,7 @@ int hexagon_nn_domains_populate_const_node(
 }
 
 
+
 /*
  * FIXME: hexagon_nn_tensordef will no longer be compatible with struct tensor
  * as we make it more complex.
@@ -608,6 +612,8 @@ int hexagon_nn_execute_new(
 		int elementsize = in->data_valid_len / (in->batches * in->height * in->width * in->depth);
 		if (elementsize == 4) {
 			t->format.type = NN_TYPE_FLOAT; // Just a best guess
+		} else if (elementsize == 2) {
+			t->format.type = NN_TYPE_QINT16; // Just a best guess
 		} else {
 			t->format.type = NN_TYPE_QUINT8; // Just a best guess
 		}
@@ -636,8 +642,37 @@ int hexagon_nn_execute_new(
 	pcycle_stop = nn_os_get_cycles(graph);
 	graph->execution_total_cycles = pcycle_stop - pcycle_start;
 	graph->multi_execution_total_cycles += graph->execution_total_cycles;
-	if (ret) return errlog(graph,"fail in execute_new()");
+	if (ret) errlog(graph,"fail in execute_new()");
 	return ret;
+}
+
+int hexagon_nn_execute_with_info(
+	nn_id_t id,
+	const hexagon_nn_tensordef *inputs,
+	uint32_t n_inputs,
+	hexagon_nn_tensordef *outputs,
+	uint32_t n_outputs,
+	hexagon_nn_execute_info *execute_info) {
+
+    /* Prototype implementation just wraps hexagon_execute_new.
+       Eventually it should be the other way around */
+	int result = hexagon_nn_execute_new(id, inputs, n_inputs, outputs, n_outputs);
+
+    /* initialize extra info to 0 */
+    if(execute_info->extraInfo != NULL|| execute_info->extraInfoLen != 0){
+       memset(execute_info->extraInfo,0, execute_info->extraInfoLen);
+	}
+    /* Set the returned extraInfoValidLen to 0. */
+    execute_info->extraInfoValidLen = 0;
+    /* Just handle basic errors right now */
+    if (result == 0) {
+        execute_info->result = NN_EXECUTE_SUCCESS;
+    } else if(result == -1) {
+        execute_info->result = NN_EXECUTE_ERROR;
+    } else{
+    	execute_info->result = result;
+    }
+	return 0;
 }
 
 int hexagon_nn_domains_execute_new(
@@ -650,6 +685,18 @@ int hexagon_nn_domains_execute_new(
 {
 	UNUSED_PARAM(h);
 	return hexagon_nn_execute_new(id, inputs, n_inputs, outputs, n_outputs);
+}
+
+int hexagon_nn_domains_execute_with_info(
+        remote_handle64 h,
+	nn_id_t id,
+	const hexagon_nn_tensordef *inputs,
+	uint32_t n_inputs,
+	hexagon_nn_tensordef *outputs,
+        uint32_t n_outputs,
+        hexagon_nn_execute_info *execute_info) {
+        UNUSED_PARAM(h);
+        return hexagon_nn_execute_with_info(id, inputs, n_inputs, outputs, n_outputs, execute_info);
 }
 
 int hexagon_nn_execute(
@@ -668,6 +715,7 @@ int hexagon_nn_execute(
 	uint32_t data_out_max,
 	uint32_t *data_out_size)
 {
+
 	hexagon_nn_tensordef in;
 	hexagon_nn_tensordef out = {0}; // klocwork
 	int ret;
@@ -1191,7 +1239,7 @@ int hexagon_nn_set_powersave_details(hexagon_nn_corner_type corner, hexagon_nn_d
     return HAP_power_set(NULL, &request);
 }
 
-#else // (__HEXAGON_ARCH__ >= 62)
+#else
 static int hexagon_nn_vote(unsigned int level)
 {
     HAP_power_request_t request;
@@ -1304,7 +1352,7 @@ int hexagon_nn_set_powersave_details(hexagon_nn_corner_type corner, hexagon_nn_d
     return HAP_power_set(NULL, &request);
 }
 
-#endif //(__HEXAGON_ARCH__ >= 62)
+#endif
 
 
 int hexagon_nn_set_powersave_level(unsigned int level)
@@ -1321,6 +1369,7 @@ int hexagon_nn_graph_config(
 	uint32_t num_string_options
 	)
 {
+
 	struct nn_graph *graph;
 	if ((graph = nn_id_to_graph(id)) == NULL) {
 		return errlog(NULL,"nn id %x not found",id);
@@ -1457,7 +1506,7 @@ int hexagon_nn_config()
 }
 
 
-#else // defined(USE_OS_QURT)
+#else
 int hexagon_nn_set_powersave_level(unsigned int level) { return 0; }
 int hexagon_nn_set_powersave_details(hexagon_nn_corner_type corner, hexagon_nn_dcvs_type dcvs, unsigned int latency) { return 0; }
 int hexagon_nn_disable_dcvs() { return 0; }
@@ -1494,14 +1543,14 @@ int hexagon_nn_config() {
 	pmu_init();
 	return 0;
 }
-#else // !defined(USE_OS_H2)
+#else
 int hexagon_nn_config() {
 
 	return 0;
 }
-#endif // !defined(USE_OS_H2)
+#endif
 
-#endif // defined(USE_OS_QURT)
+#endif
 
 int hexagon_nn_domains_config(remote_handle64 h)
 {
@@ -1564,7 +1613,7 @@ int hexagon_nn_domains_set_powersave_details(remote_handle64 h,
 int hexagon_nn_domains_open (const char* uri, remote_handle64* handle)
 {
 	if(handle == NULL) {
-        FARF(ERROR, "Null domain handle");
+        errlog(NULL,"DEBUG:Null domain handle");
         return 0;
     }
     /* can be any value or ignored, rpc layer doesn't care
@@ -1579,4 +1628,125 @@ int hexagon_nn_domains_open (const char* uri, remote_handle64* handle)
 int hexagon_nn_domains_close(remote_handle64 h)
 {
 	return 0;
+}
+
+int hexagon_nn_populate_graph(nn_id_t id,
+        const unsigned char* graph_data, int graph_dataLen)
+{
+    int sts = 0;
+
+    flat_batch_ops_params *fbo_poi;
+
+    fbo_poi = (flat_batch_ops_params *)graph_data;
+
+	unsigned long size = 0;
+
+	while (size < graph_dataLen && sts == 0)
+    {
+		hexagon_nn_input *inputs;
+		unsigned long inputsLen;
+
+		hexagon_nn_output *outputs;
+		unsigned long outputsLen;
+
+		unsigned char *data;
+		unsigned long dataLen;
+
+		size += sizeof(flat_batch_ops_params)-sizeof(unsigned char);
+
+        switch (fbo_poi->op) {
+            case HEXNN_BATCH_OP_APPEND_NODE:
+				inputs = (hexagon_nn_input *)fbo_poi->c;
+				inputsLen = fbo_poi->U.an_params.inputsLen/sizeof(hexagon_nn_input);
+
+				outputs = (hexagon_nn_output *)(fbo_poi->c + ROUNDUP_8BYTES(fbo_poi->U.an_params.inputsLen));
+				outputsLen = fbo_poi->U.an_params.outputsLen/sizeof(hexagon_nn_output);
+
+                sts = hexagon_nn_append_node(id, fbo_poi->U.an_params.node_id,
+                        fbo_poi->U.an_params.operation, fbo_poi->U.an_params.padding,
+                        inputs, inputsLen,
+                        outputs, outputsLen);
+                if(sts !=0 ) {
+                    errlog(NULL,"DEBUG:batched op error at HEXNN_BATCH_OP_APPEND_NODE, node_id = %d, sts = %d", fbo_poi->U.an_params.node_id, sts);
+                }
+
+                size += (ROUNDUP_8BYTES(fbo_poi->U.an_params.inputsLen) + ROUNDUP_8BYTES(fbo_poi->U.an_params.outputsLen));
+
+                break;
+
+            case HEXNN_BATCH_OP_APPEND_CONST_NODE:
+				data = fbo_poi->c;
+				dataLen = fbo_poi->U.acn_params.dataLen/sizeof(unsigned char);
+
+                sts = hexagon_nn_append_const_node(id, fbo_poi->U.acn_params.node_id,
+                        fbo_poi->U.acn_params.batches, fbo_poi->U.acn_params.height,
+                        fbo_poi->U.acn_params.width, fbo_poi->U.acn_params.depth, 
+						data, dataLen);
+                if(sts !=0 ) {
+                    errlog(NULL,"DEBUG:batched op error at HEXNN_BATCH_OP_APPEND_CONST_NODE, node_id = %d, sts = %d", fbo_poi->U.acn_params.node_id, sts);
+
+                }
+
+				size += ROUNDUP_8BYTES(fbo_poi->U.acn_params.dataLen);
+
+                break;
+
+            case HEXNN_BATCH_OP_APPEND_EMPTY_CONST_NODE:
+                sts = hexagon_nn_append_empty_const_node(id, fbo_poi->U.aecn_params.node_id,
+                        fbo_poi->U.aecn_params.batches, fbo_poi->U.aecn_params.height,
+                        fbo_poi->U.aecn_params.width, fbo_poi->U.aecn_params.depth,
+                        fbo_poi->U.aecn_params.size);
+                if(sts !=0 ) {
+                    errlog(NULL,"DEBUG:batched op error at HEXNN_BATCH_OP_APPEND_EMPTY_CONST_NODE, node_id = %d, sts = %d", fbo_poi->U.aecn_params.node_id, sts);
+                }
+
+				size += ROUNDUP_8BYTES(8);
+
+                break;
+
+            case HEXNN_BATCH_OP_POPULATE_CONST_NODE:
+				data = fbo_poi->c;
+				dataLen = fbo_poi->U.pcn_params.dataLen/sizeof(unsigned char);
+
+                sts = hexagon_nn_populate_const_node(id, fbo_poi->U.pcn_params.node_id,
+                        data, dataLen,
+                        fbo_poi->U.pcn_params.target_offset);
+                if(sts !=0 ) {
+                    errlog(NULL,"DEBUG:batched op error at HEXNN_BATCH_OP_POPULATE_CONST_NODE, node_id = %d, sts = %d", fbo_poi->U.pcn_params.node_id, sts);
+                }
+
+				size += ROUNDUP_8BYTES(fbo_poi->U.pcn_params.dataLen);
+
+                break;
+
+            default:
+                // error, should not reach here
+                sts = -1;
+                break;
+        }
+
+        if(sts != 0){
+            break;
+        }
+        else
+		{
+			fbo_poi = (flat_batch_ops_params *)(graph_data+size);
+		}
+    }
+
+    if (sts == 0)
+    {
+        sts = hexagon_nn_prepare(id);
+        if(sts !=0 ) {
+            errlog(NULL,"DEBUG:batched op error at  hexagon_nn_prepare(), sts = %d", sts);
+        }
+    }
+
+    return sts;
+}
+
+int hexagon_nn_domains_populate_graph(remote_handle64 h, nn_id_t id,
+        const unsigned char* data, int dataLen)
+{
+    return hexagon_nn_populate_graph(id, data, dataLen);
 }

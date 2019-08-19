@@ -88,6 +88,20 @@ static void input_execute_worker(struct nn_graph *nn, void *vself)
 #endif
 static int input_execute_multibatch(struct nn_node *self, struct nn_graph *nn);
 
+// is endptr[delt-1] in a different page from endptr[-1],
+// where 'page' is defined by pagesize (which must be a power of 2)?
+//
+static inline int
+page_cross_check( void const *endptr, int delt, unsigned pagesize)
+{
+	uint8_t const *p =endptr;
+	size_t pos0 = (size_t)(p-1);
+	size_t pos1 = (size_t)(p-1+delt);
+	return ((pos0^pos1) &~(size_t)(pagesize-1))!=0;
+}
+
+
+
 static int input_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	/* OPTIMIZE FAST PATH */
@@ -97,7 +111,10 @@ static int input_execute(struct nn_node *self, struct nn_graph *nn)
 		(nn->n_inputs == self->n_outputs)
 		&& (self->n_outputs == 1)
 		&& nn->batchseq.graph_batches == 0
-		&& ((((long)(nn->inputs[0].data)) & 127) == 0))) {
+		&& ((((size_t)(nn->inputs[0].data)) & 127) == 0)
+		&& !page_cross_check( (uint8_t const*)nn->inputs[0].data+nn->inputs[0].data_size,
+				256, 0x1000)
+	  )) {
 		self->outputs[0]->shape = nn->inputs[0].shape;
 		self->outputs[0]->format = nn->inputs[0].format;
 		self->outputs[0]->data = nn->inputs[0].data;
@@ -322,9 +339,6 @@ static int input_execute_multibatch(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-
-
-
 static int input_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking input node %p",self);
@@ -342,7 +356,14 @@ static int input_check(struct nn_node *self, struct nn_graph *nn)
 	}
 	nn_sem_init(&info->donesem,0);
 	self->opaque = info;
-	info->allocated_output = self->outputs[0]->data;
+
+	if(self->outputs) { //n_ouputs > 0
+		info->allocated_output = self->outputs[0]->data;
+	}
+	else {
+		info->allocated_output = NULL;
+	}
+
 	logmsg(nn,2,"input node %p check OK",self);
 	return 0;
 }

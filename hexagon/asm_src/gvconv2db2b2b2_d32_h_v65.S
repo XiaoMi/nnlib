@@ -77,8 +77,7 @@ gvconv2db2b2b2_d32_v65_asm:
 #define out_bufo_out_bufe      r3:2
 #define weights                r4
 #define in_width               r5
-#define c_1w                   r7
-#define c8w                    c_1w
+#define c8w                    r7
 #define xl03x00                r8
 #define xh03x00                xl03x00
 #define xl23x20                xl03x00
@@ -134,9 +133,11 @@ gvconv2db2b2b2_d32_v65_asm:
 #define filt_wid               r18
 #define filt_ht                r19
 #define suma                   r20
+#define fetch_ptrh0            r20
 #define stride_w               r21
 #define ptr_ze                 r22
 #define ptr_zo                 r23
+#define fetch_ptrl0            ptr_zo
 #define ptr_zo_ptr_ze          r23:22
 #define out_y                  r24
 #define out_x4                 r25
@@ -267,7 +268,7 @@ gvconv2db2b2b2_d32_v65_asm:
     { memd(r29+#off_recip) = r7:6                       //
       ptr_wh = mpyi(ptr_wh,r11)                         // filt_width*filt_height*in_depth
       next_outputs = mpyi(filt_ht,in_width_4)           //
-      suma = memw(r29+#APTR+32)                         // recip|ptr_minmax
+      nop                                               //
     }
     { ptr_wh = addasl(weights,ptr_wh,#3)                //
       next_outputs += mpyi(stride_w4,#-2)               // -2*(stride_w4*2)
@@ -275,28 +276,9 @@ gvconv2db2b2b2_d32_v65_asm:
     }
     { memw(r29+#off_ptr_wh) = ptr_wh                    //
       m0 = stride_w4                                    // stride_w4*2
-      r22 = neg(stride_w4)                              // -2*stride_w4
-//      suma0 = memw(suma+#0)                             //
-    }
-    { r22 = add(r22,#+8)                                // -2*tsride_w4+8
-      vsuma0 = #0 //vsplat(suma0)                            //
-//      suma1 = memw(suma+stride_w<<#0)                   //
-//      suma2 = memw(suma+stride_w<<#1)                   //
+      r22 = sub(#8,stride_w4)                           // -2*stride_w4
     }
     { m1 = r22                                          // -2*tsride_w4+8
-      shh0.w = vadd(wsum.w,vsuma0.w)                    //
-      suma += mpyi(stride_w,#3)                         //
-    }
-    { vsuma1 = #0 //vsplat(suma1)                            //
-      vsuma2 = #0 //vsplat(suma2)                            //
-//      suma3 = memw(suma+#0)                             //
-      suma = add(suma,stride_w)                         //
-    }
-    { shh1.w = vadd(wsum.w,vsuma1.w)                    //
-      shh2.w = vadd(wsum.w,vsuma2.w)                    //
-      vsuma3 = #0 //vsplat(suma3)                            //
-    }
-    { shh3.w = vadd(wsum.w,vsuma3.w)                    //
       out_y = memw(r29+#APTR+24)                        // out_height
       c8w = #8                                          //
       stride_w4 = asr(stride_w4,#1)                     //
@@ -311,17 +293,18 @@ gvconv2db2b2b2_d32_v65_asm:
     }
     { in_bufet = add(ptr_xl0,in_width_stride_depth)     //
       in_bufot = add(ptr_xh0,in_width_stride_depth)     //
-      ptr_zo_ptr_ze = memd(r29+#off_out_bufe)           //
       sumainc_sumat = memd(r29+#APTR+32)                //
+      p2 = cmp.gt(r0,r0)                                //
     }
-    { memd(r29+#off_in_bufe) = in_bufoet                //
-      out_bufet = add(ptr_ze,next_out_width)            //
-      out_bufot = add(ptr_zo,next_out_width)            //
+    { ptr_zo_ptr_ze = memd(r29+#off_out_bufe)           //
+      memd(r29+#off_in_bufe) = in_bufoet                //
       sumat = add(sumat,sumainc)                        //
+      loop1(.L_filt_height,filt_ht)                     //[p2]
     }
     { out_x4 = memw(r29+#APTR+4)                        //
       if (!p0) memw(r29+#APTR+32) = sumat               //
-      loop1(.L_filt_height,filt_ht)                     //[p2]
+      out_bufet = addasl(ptr_ze,next_out_width,#1)      //
+      out_bufot = add(ptr_zo,next_out_width)            //
     }
     { memd(r29+#off_out_bufe) = out_bufoet              //
       out_x4 = add(out_x4,#-4)                          //[p2]
@@ -332,6 +315,16 @@ gvconv2db2b2b2_d32_v65_asm:
 /* ---------------------------------------------------------------------------- */
         .balign 32
 .L_width:
+    { y0.uh = vpack(y1.w,y0.w):sat                      //
+      if (p2) vmem(ptr_ze++#1) = y0.new                 //
+      shh0 = wsum                                       //
+      shh1 = wsum                                       //
+    }
+    { y1.uh = vpack(y3.w,y2.w):sat                      //
+      if (p2) vmem(ptr_ze++#1) = y1.new                 //
+      shh2 = wsum                                       //
+      shh3 = wsum                                       //
+    }
 .L_filt_height:
     { xl07x04_xl03x00 = memd(ptr_xl0+#0)                //[p0]
       xl17x14_xl13x10 = memd(ptr_xl0+stride_w4<<#0)     //[p0]
@@ -349,10 +342,37 @@ gvconv2db2b2b2_d32_v65_asm:
     { wh0.cur = vmem(ptr_wh++#1)                        //
       shl1_shl0.w += vrmpy(wh0.b,xl13x10_xl03x00.ub)    //
       xl37x34_xl33x30 = memd(ptr_xl1+stride_w4<<#0)     //
+      if (!p3) fetch_ptrh0 = ptr_xh0
+    }
+    { dcfetch(fetch_ptrh0+#0)                           //
+      fetch_ptrh0 = add(fetch_ptrh0,#64)                //
+      if (!p3) fetch_ptrl0 = add(ptr_xl0,in_width_4)    //
       if (!p3) ptr_xl0 = add(ptr_xl0,in_width_4)        //
     }
+#define FAST_16B_CONV 1
+#if defined(FAST_16B_CONV)
+    { wh1.cur = vmem(ptr_wh++#1)                        //
+      shl1_shl0.w += vrmpy(wh1.b,xl17x14_xl07x04.ub)    //
+      xl27x24_xl23x20 = memd(ptr_xl1++M1)               //
+    }
+    { wl0 = vmem(ptr_wl++#1)                            //
+      dcfetch(fetch_ptrl0+#0)                           //
+      xl27x24 = xl33x30                                 //
+      xl33x30 = xl27x24                                 //
+    }
+    { shl3_shl2.w += vrmpy(wh0.b,xl33x30_xl23x20.ub)    //
+      xh07x04_xh03x00 = memd(ptr_xh1++M0)               //
+      xh17x14_xh13x10 = memd(ptr_xh1+stride_w4<<#0)     //
+      fetch_ptrl0 = add(fetch_ptrl0,#64)                //
+    }
+    { wl1 = vmem(ptr_wl++#1)                            //
+      shl3_shl2.w += vrmpy(wh1.b,xl37x34_xl27x24.ub)    //
+      xh07x04 = xh13x10                                 //
+      xh13x10 = xh07x04                                 //
+    }
+#else
     { wl0.cur = vmem(ptr_wl++#1)                        //
-      sll1_sll0.w += vrmpy(wl0.b,xl13x10_xl03x00.ub)    //
+      sll1_sll0.w += vrmpy(wl0.b,xl13x10_xl03x00.ub)    //L*L
       xl27x24_xl23x20 = memd(ptr_xl1++M1)               //
     }
     { wh1.cur = vmem(ptr_wh++#1)                        //
@@ -361,18 +381,21 @@ gvconv2db2b2b2_d32_v65_asm:
       xl33x30 = xl27x24                                 //
     }
     { wl1.cur = vmem(ptr_wl++#1)                        //
-      sll1_sll0.w += vrmpy(wl1.b,xl17x14_xl07x04.ub)    //
+      sll1_sll0.w += vrmpy(wl1.b,xl17x14_xl07x04.ub)    //L*L
+      dcfetch(fetch_ptrl0+#0)                           //
+      fetch_ptrl0 = add(fetch_ptrl0,#64)                //
     }
     { shl3_shl2.w += vrmpy(wh0.b,xl33x30_xl23x20.ub)    //
-      sll3_sll2.w += vrmpy(wl0.b,xl33x30_xl23x20.ub)    //
+      sll3_sll2.w += vrmpy(wl0.b,xl33x30_xl23x20.ub)    //L*L
       xh07x04_xh03x00 = memd(ptr_xh1++M0)               //
       xh17x14_xh13x10 = memd(ptr_xh1+stride_w4<<#0)     //
     }
     { shl3_shl2.w += vrmpy(wh1.b,xl37x34_xl27x24.ub)    //
-      sll3_sll2.w += vrmpy(wl1.b,xl37x34_xl27x24.ub)    //
+      sll3_sll2.w += vrmpy(wl1.b,xl37x34_xl27x24.ub)    //L*L
       xh07x04 = xh13x10                                 //
       xh13x10 = xh07x04                                 //
     }
+#endif
     { shl1_shl0.w += vrmpy(wl0.b,xh13x10_xh03x00.ub)    //
       shh1_shh0.w += vrmpy(wh0.b,xh13x10_xh03x00.ub)    //
       xh27x24_xh23x20 = memd(ptr_xh1++M1)               //
@@ -396,17 +419,15 @@ gvconv2db2b2b2_d32_v65_asm:
     { shl0.w += vasr(sll0.w,c8w)                        //
       recipshiftval_recip_shift = memd(r29+#off_recip)  //
       sll0 = #0                                         //
-      sumabuf = memw(r29+#APTR+32)                      //
     }
     { shl1.w += vasr(sll1.w,c8w)                        //
       ptr_xl0 = sub(ptr_xl0,next_outputs)               //
       ptr_xh0 = sub(ptr_xh0,next_outputs)               //
-      if (!p1) suma = sumabuf                           //
+      sll1 = #0                                         //
     }
     { shh0.w += vasr(shl0.w,c8w)                        //
       loop1(.L_filt_height,filt_ht)                     //[p2]
       shl0 = constw80                                   //
-      //suma0 = memw(suma+#0)                             //
     }
     { shh1.w += vasr(shl1.w,c8w)                        //
       min_val.w = vmin(min_val.w,shh0.w)                //
@@ -421,7 +442,6 @@ gvconv2db2b2b2_d32_v65_asm:
     { if (p2) sk = shh1                                 //
       s1.w = vmpyi(shh1.w,recipshiftval.h)              //s1=Q6_Vw_vasl_VwR(shh1.h,recip_shift)
       shl3.w += vasr(sll3.w,c8w)                        //
-      //suma1 = memw(suma+stride_w<<#0)                   //
     }
     { shh2.w += vasr(shl2.w,c8w)                        //
       y0.w = vmpye(s0.w,recipvec.uh)                    //
@@ -431,63 +451,45 @@ gvconv2db2b2b2_d32_v65_asm:
     { shh3.w += vasr(shl3.w,c8w)                        //
       y0.w += vmpyo(s0.w,recipvec.h):<<1:rnd:sat:shift  //
       max_val.w = vmax(max_val.w,sk.w)                  //
-      //suma2 = memw(suma+stride_w<<#1)                   //
     }
-    { s2.w = VASL(shh2.w,recip_shift)                   //
+    { s2.w = vasl(shh2.w,recip_shift)                   //
       y1.w = vmpye(s1.w,recipvec.uh)                    //
       if (p2) sk = shh2                                 //
       p2 = cmp.gt(out_x4,#3-4)                          //should s3 be included ?
     }
-    { s3.w = VASL(shh3.w,recip_shift)                   //
+    { s3.w = vasl(shh3.w,recip_shift)                   //
       y1.w += vmpyo(s1.w,recipvec.h):<<1:rnd:sat:shift  //
       min_val.w = vmin(min_val.w,sk.w)                  //
-      suma += mpyi(stride_w,#3)                         //
+      out_x4 = add(out_x4,#-4)                          //[p2]
     }
     { y2.w = vmpye(s2.w,recipvec.uh)                    //
       max_val.w = vmax(max_val.w,sk.w)                  //
       if (p2) sk = shh3                                 //
-      //suma3 = memw(suma+#0)                             //
+      ptr_wh_wl = memd(r29+#off_ptr_wl)                 //[p2]
     }
     { y2.w += vmpyo(s2.w,recipvec.h):<<1:rnd:sat:shift  //
       min_val.w = vmin(min_val.w,sk.w)                  //
       max_val.w = vmax(max_val.w,sk.w)                  //
-      suma = add(suma,stride_w)                         //
+      p2 = p1                                           //
     }
     { y3.w = vmpye(s3.w,recipvec.uh)                    //
       sll2 = #0                                         //
       sll3 = #0                                         //
-      c_1w = #-1                                        //
+      p1 = cmp.gt(out_x4,#0)                            //[p2] last iteration
     }
     { y3.w += vmpyo(s3.w,recipvec.h):<<1:rnd:sat:shift  //
       shl2 = constw80                                   //
       shl3 = constw80                                   //
-      ptr_wh_wl = memd(r29+#off_ptr_wl)                 //[p2]
+      if (p2) jump:t .L_width                           //
     }
-    { y1.uh = vpack(y1.w,y0.w):sat                      //
-      vsuma0 = #0//vsplat(suma0)                            //
-      vsuma1 = #0//vsplat(suma1)                            //
-      sll1 = #0                                         //
-    }
-    { y3.uh = vpack(y3.w,y2.w):sat                      //
-      shh0.w = vadd(wsum.w,vsuma0.w)                    //
-      vsuma2 = #0//vsplat(suma2)                            //
-      vsuma3 = #0//vsplat(suma3)                            //
-    }
-    { shh1.w = vadd(wsum.w,vsuma1.w)                    //
-      shh2.w = vadd(wsum.w,vsuma2.w)                    //
-      shh3.w = vadd(wsum.w,vsuma3.w)                    //
-    }
-    { y1y0 = vdeal(y3,y1,c_1w)                          //
-      vmem(ptr_ze++#1) = y0.new                         //
-      c8w = #8                                          //
-    }
-    { vmem(ptr_zo++#1) = y1                             //
-      if (p1) jump:t .L_width                           //
-      out_x4 = add(out_x4,#-4)                          //[p2]
-      p1 = cmp.gt(out_x4,#4)                            //[p2] last iteration
-    }                                                   //end cols per line
 /* ---------------------------------------------------------------------------- */
-    { p0 = cmp.eq(out_y, #0)                            //
+    { y0.uh = vpack(y1.w,y0.w):sat                      //
+      shh0 = wsum                                       //
+      vmem(ptr_ze++#1) = y0.new                         //
+    }
+    { y1.uh = vpack(y3.w,y2.w):sat                      //
+      vmem(ptr_ze++#1) = y1.new                         //
+      p0 = cmp.eq(out_y, #0)                            //
       if(!p0.new) jump:t .L_height                      //
     }                                                   //end lines per block
 /* ---------------------------------------------------------------------------- */

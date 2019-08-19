@@ -63,6 +63,8 @@
 #define ROI_LENGTH 4
 #define HVX_BOXES_CHUNK_SIZE 256
 
+#define BOX_DIM_STEP 0.125f
+
 
 /**
  * Box descriptor that uses lower-left and upper-right vertex coordinates to
@@ -596,6 +598,12 @@ static void axis_aligned_bbox_transform_execute_hvx(struct nn_graph *nn, void *v
     nn_sem_post(&td->donesem);
 }
 
+uint16_t requantize(uint16_t value, float min, float max){
+    float step = (max - min) / 65536.f;
+    float float_val = min + value * step;
+    return (uint16_t)(float_val / BOX_DIM_STEP);
+}
+
 static int axis_aligned_bbox_transform_execute(struct nn_node *self, struct nn_graph *nn)
 {
     logmsg(nn,2,"axis_aligned_bbox_transform execute. self=%p ",self);
@@ -613,6 +621,8 @@ static int axis_aligned_bbox_transform_execute(struct nn_node *self, struct nn_g
     uint16_t *image_info = image_info_input_tensor->data;
     float deltas_min = tensor_get_float(self->inputs[4], 0);
     float deltas_max = tensor_get_float(self->inputs[5], 0);
+    float image_info_min = tensor_get_float(self->inputs[6], 0);
+    float image_info_max = tensor_get_float(self->inputs[7], 0);
 
     uint16_t *boxes_output = boxes_output_tensor->data;
 
@@ -629,7 +639,7 @@ static int axis_aligned_bbox_transform_execute(struct nn_node *self, struct nn_g
     uint32_t roiIndex = 0;
 
     // if there are less than 4 HVX vector's worth of box data then there is not enough of it to use HVX
-    if(boxes_input_tensor->shape.width < HVX_BOXES_CHUNK_SIZE){
+    if(num_boxes < HVX_BOXES_CHUNK_SIZE){
         int result = axis_aligned_bbox_transform_execute_ref(nn, boxes, deltas_min, deltas_max, num_classes, boxes_data_end, deltas, out_data);
 
         if(result) return result;
@@ -663,6 +673,12 @@ static int axis_aligned_bbox_transform_execute(struct nn_node *self, struct nn_g
         uint16_t imageHeight = imageInfoBase[0];
         uint16_t imageWidth = imageInfoBase[1];
 
+        // only re-quantize if the image_info quantization was different from the boxes
+        if(image_info_min != 0.f || image_info_max != 8192.f) {
+            imageHeight = requantize(imageInfoBase[0], image_info_min, image_info_max);
+            imageWidth = requantize(imageInfoBase[1], image_info_min, image_info_max);
+        }
+
         for (uint32_t i = 0; i < num_classes; i++) {
 
             out_data[0] = min_i32(out_data[0], imageWidth);
@@ -683,7 +699,7 @@ struct nn_node_ops nn_ops_for_AxisAlignedBBoxTransform_q8q16 = {
         .check = NULL,
         .ctor = node_alloc_common,
         .dtor = node_free_common,
-        .n_inputs = NN_IOCOUNT(6),
+        .n_inputs = NN_IOCOUNT(8),
         .n_outputs = NN_IOCOUNT(1),
 };
 

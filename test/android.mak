@@ -1,11 +1,18 @@
+# SMART WRAPPER FLAG to turn on GRAPH_WRAPPER
+ifeq ($(SMART_WRAPPER), 1)
+        GRAPH_WRAPPER = 1
+endif
+
 # stand-alone executable
 BUILD_EXES+=graph_app
 graph_app_QAICIDLS += interface/hexagon_nn \
-                        $(MAKE_D_DSPCV_INCDIR)/dspCV
 
 #GRAPHINIT=test/graphinit_small
 COMPILE_GRAPHINIT := $(GRAPHINIT:.c=)
 
+ifeq ($(GRAPH_WRAPPER), 1)
+    INCDIRS += interface
+endif
 
 graph_app_C_SRCS += \
     test/graph_app \
@@ -15,10 +22,29 @@ graph_app_C_SRCS += \
     test/imagenet_info \
     test/append_const_node_large_array \
     $(COMPILE_GRAPHINIT) \
-    $(V)/hexagon_nn_stub \
-    $(V)/dspCV_stub
+
+ifeq ($(GRAPH_WRAPPER), 1)
+    graph_app_C_SRCS += hexagon/host/hexnn_dsp_api_impl
+    graph_app_CPP_SRCS += hexagon/host/hexnn_graph_wrapper
+
+    ifeq ($(SMART_WRAPPER), 1)
+        graph_app_C_SRCS += hexagon/host/hexnn_dsp_smart_wrapper_api hexagon/host/hexnn_dsp_domains_api_impl
+    else
+        graph_app_C_SRCS += hexagon/host/hexnn_dsp_api
+    endif
+else
+    graph_app_C_SRCS += $V/hexagon_nn_stub
+endif
 
 graph_app_C_SRCS += $(TESTDATA:.c=)
+
+ifeq ($(GRAPH_WRAPPER), 1)
+ifeq ($(V_aarch64), 1)
+    graph_app_DLLS += $(ANDROID_GLIBSTDC_DIR)/libs/arm64-v8a/libgnustl_shared
+else
+    graph_app_DLLS += $(ANDROID_GLIBSTDC_DIR)/libs/armeabi-v7a/libgnustl_shared
+endif
+endif
 
 graph_app_LIBS += rpcmem
 ifeq ($(CDSP_FLAG), 1)

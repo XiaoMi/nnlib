@@ -43,6 +43,68 @@
 
 #endif
 
+#define OPERATOR_EQUAL(X,Y) ((X)==(Y))
+BROADCAST_STRIDE_11_FUNC( equal_f_stride_11, float, uint8_t, OPERATOR_EQUAL)
+// add vector to scalar
+BROADCAST_STRIDE_10_FUNC( equal_f_stride_10, float, uint8_t, OPERATOR_EQUAL)
+BROADCAST_REV_STRIDE_01_FUNC(equal_f_rev_stride_01, float, uint8_t, OPERATOR_EQUAL)
+BROADCAST_STRIDE_11_FUNC( equal_qu8_stride_11, uint8_t, uint8_t, OPERATOR_EQUAL)
+// add vector to scalar
+BROADCAST_STRIDE_10_FUNC( equal_qu8_stride_10, uint8_t, uint8_t, OPERATOR_EQUAL)
+BROADCAST_REV_STRIDE_01_FUNC(equal_qu8_rev_stride_01, uint8_t, uint8_t, OPERATOR_EQUAL)
+
+
+#define OPERATOR_NOT_EQUAL(X,Y) ((X)!=(Y))
+BROADCAST_STRIDE_11_FUNC( not_equal_f_stride_11, float, uint8_t, OPERATOR_NOT_EQUAL)
+// add vector to scalar
+BROADCAST_STRIDE_10_FUNC( not_equal_f_stride_10, float, uint8_t, OPERATOR_NOT_EQUAL)
+BROADCAST_REV_STRIDE_01_FUNC(not_equal_f_rev_stride_01, float, uint8_t, OPERATOR_NOT_EQUAL)
+BROADCAST_STRIDE_11_FUNC( not_equal_qu8_stride_11, uint8_t, uint8_t, OPERATOR_NOT_EQUAL)
+// add vector to scalar
+BROADCAST_STRIDE_10_FUNC( not_equal_qu8_stride_10, uint8_t, uint8_t, OPERATOR_NOT_EQUAL)
+BROADCAST_REV_STRIDE_01_FUNC(not_equal_qu8_rev_stride_01, uint8_t, uint8_t, OPERATOR_NOT_EQUAL)
+
+
+#define OPERATOR_LESS(X,Y) ((X)<(Y))
+BROADCAST_STRIDE_11_FUNC( less_f_stride_11, float, uint8_t, OPERATOR_LESS)
+// add vector to scalar
+BROADCAST_STRIDE_10_FUNC( less_f_stride_10, float, uint8_t, OPERATOR_LESS)
+BROADCAST_REV_STRIDE_01_FUNC(less_f_rev_stride_01, float, uint8_t, OPERATOR_LESS)
+BROADCAST_STRIDE_11_FUNC( less_qu8_stride_11, uint8_t, uint8_t, OPERATOR_LESS)
+// add vector to scalar
+BROADCAST_STRIDE_10_FUNC( less_qu8_stride_10, uint8_t, uint8_t, OPERATOR_LESS)
+BROADCAST_REV_STRIDE_01_FUNC(less_qu8_rev_stride_01, uint8_t, uint8_t, OPERATOR_LESS)
+
+#define OPERATOR_LESS_EQUAL(X,Y) ((X)<=(Y))
+BROADCAST_STRIDE_11_FUNC( less_equal_f_stride_11, float, uint8_t, OPERATOR_LESS_EQUAL)
+// add vector to scalar
+BROADCAST_STRIDE_10_FUNC( less_equal_f_stride_10, float, uint8_t, OPERATOR_LESS_EQUAL)
+BROADCAST_REV_STRIDE_01_FUNC(less_equal_f_rev_stride_01, float, uint8_t, OPERATOR_LESS_EQUAL)
+BROADCAST_STRIDE_11_FUNC( less_equal_qu8_stride_11, uint8_t, uint8_t, OPERATOR_LESS_EQUAL)
+// add vector to scalar
+BROADCAST_STRIDE_10_FUNC( less_equal_qu8_stride_10, uint8_t, uint8_t, OPERATOR_LESS_EQUAL)
+BROADCAST_REV_STRIDE_01_FUNC(less_equal_qu8_rev_stride_01, uint8_t, uint8_t, OPERATOR_LESS_EQUAL)
+
+#define OPERATOR_GREATER(X,Y) ((X)>(Y))
+BROADCAST_STRIDE_11_FUNC( greater_f_stride_11, float, uint8_t, OPERATOR_GREATER)
+// add vector to scalar
+BROADCAST_STRIDE_10_FUNC( greater_f_stride_10, float, uint8_t, OPERATOR_GREATER)
+BROADCAST_REV_STRIDE_01_FUNC(greater_f_rev_stride_01, float, uint8_t, OPERATOR_GREATER)
+BROADCAST_STRIDE_11_FUNC( greater_qu8_stride_11, uint8_t, uint8_t, OPERATOR_GREATER)
+// add vector to scalar
+BROADCAST_STRIDE_10_FUNC( greater_qu8_stride_10, uint8_t, uint8_t, OPERATOR_GREATER)
+BROADCAST_REV_STRIDE_01_FUNC(greater_qu8_rev_stride_01, uint8_t, uint8_t, OPERATOR_GREATER)
+
+#define OPERATOR_GREATER_EQUAL(X,Y) ((X)>=(Y))
+BROADCAST_STRIDE_11_FUNC( greater_equal_f_stride_11, float, uint8_t, OPERATOR_GREATER_EQUAL)
+// add vector to scalar
+BROADCAST_STRIDE_10_FUNC( greater_equal_f_stride_10, float, uint8_t, OPERATOR_GREATER_EQUAL)
+BROADCAST_REV_STRIDE_01_FUNC(greater_equal_f_rev_stride_01, float, uint8_t, OPERATOR_GREATER_EQUAL)
+BROADCAST_STRIDE_11_FUNC( greater_equal_qu8_stride_11, uint8_t, uint8_t, OPERATOR_GREATER_EQUAL)
+// add vector to scalar
+BROADCAST_STRIDE_10_FUNC( greater_equal_qu8_stride_10, uint8_t, uint8_t, OPERATOR_GREATER_EQUAL)
+BROADCAST_REV_STRIDE_01_FUNC(greater_equal_qu8_rev_stride_01, uint8_t, uint8_t, OPERATOR_GREATER_EQUAL)
+
 /*
  * 
  * Now that that's out of the way, let's get to the good stuff.
@@ -58,11 +120,13 @@ typedef struct compare_info
     int a_const_value;
     int b_const_value;
     uint32_t elem;
+    uint32_t a_tensor_size;
     uint32_t b_tensor_size;
     float a_min_float;
     float a_max_float;
     float b_min_float;
     float b_max_float;
+    float *a_tensor_intermed_buffer;
     float *b_tensor_intermed_buffer;
 } compare_info;
 
@@ -75,9 +139,11 @@ struct compare_tdata
     const struct tensor * b_tensor;
     struct tensor *out_tensor;
     int opt_flag;
+    int op;
     struct compare_info *info;
     EXEC_FUNC compare_fp;
     nn_sem_t donesem;
+    int mode;
 };
 
 enum CompareOp
@@ -129,30 +195,109 @@ static inline void compare_hvx_template(struct nn_graph *nn, void *vtd, FUNC_PTR
     }
 }
 
-static inline uint8_t q8_equal_helper(uint8_t a, uint8_t b, void *info)
-{
-    return (uint8_t)(a == b);
-}
-static inline uint8_t q8_not_equal_helper(uint8_t a, uint8_t b, void *info)
-{
-    return (uint8_t)(a != b);
-}
-static inline uint8_t q8_less_helper(uint8_t a, uint8_t b, void *info)
-{
-    return (uint8_t)(a < b);
-}
-static inline uint8_t q8_less_equal_helper(uint8_t a, uint8_t b, void *info)
-{
-    return (uint8_t)(a <= b);
-}
-static inline uint8_t q8_greater_helper(uint8_t a, uint8_t b, void *info)
-{
-    return (uint8_t)(a > b);
-}
-static inline uint8_t q8_greater_equal_helper(uint8_t a, uint8_t b, void *info)
-{
-    return (uint8_t)(a >= b);
-}
+static const struct elementwise_funcs equal_qu8_funcs = {
+	.op_stride_11 = equal_qu8_stride_11,
+	.op_stride_10 = equal_qu8_stride_10,
+	.op_rev_stride_01 = equal_qu8_rev_stride_01,
+	.in_elbytes = 1,
+	.out_elbytes = 1,
+	.out_typecode =  NN_TYPE_QUINT8
+};
+
+static const struct elementwise_funcs equal_f_funcs = {
+	.op_stride_11 = equal_f_stride_11,
+	.op_stride_10 = equal_f_stride_10,
+	.op_rev_stride_01 = equal_f_rev_stride_01,
+	.in_elbytes = 4,
+	.out_elbytes = 1,
+	.out_typecode =  NN_TYPE_QUINT8
+};
+
+static const struct elementwise_funcs not_equal_qu8_funcs = {
+	.op_stride_11 = not_equal_qu8_stride_11,
+	.op_stride_10 = not_equal_qu8_stride_10,
+	.op_rev_stride_01 = not_equal_qu8_rev_stride_01,
+	.in_elbytes = 1,
+	.out_elbytes = 1,
+	.out_typecode =  NN_TYPE_QUINT8
+};
+
+static const struct elementwise_funcs not_equal_f_funcs = {
+	.op_stride_11 = not_equal_f_stride_11,
+	.op_stride_10 = not_equal_f_stride_10,
+	.op_rev_stride_01 = not_equal_f_rev_stride_01,
+	.in_elbytes = 4,
+	.out_elbytes = 1,
+	.out_typecode =  NN_TYPE_QUINT8
+};
+static const struct elementwise_funcs less_qu8_funcs = {
+	.op_stride_11 = less_qu8_stride_11,
+	.op_stride_10 = less_qu8_stride_10,
+	.op_rev_stride_01 = less_qu8_rev_stride_01,
+	.in_elbytes = 1,
+	.out_elbytes = 1,
+	.out_typecode =  NN_TYPE_QUINT8
+};
+
+static const struct elementwise_funcs less_f_funcs = {
+	.op_stride_11 = less_f_stride_11,
+	.op_stride_10 = less_f_stride_10,
+	.op_rev_stride_01 = less_f_rev_stride_01,
+	.in_elbytes = 4,
+	.out_elbytes = 1,
+	.out_typecode =  NN_TYPE_QUINT8
+};
+static const struct elementwise_funcs less_equal_qu8_funcs = {
+	.op_stride_11 = less_equal_qu8_stride_11,
+	.op_stride_10 = less_equal_qu8_stride_10,
+	.op_rev_stride_01 = less_equal_qu8_rev_stride_01,
+	.in_elbytes = 1,
+	.out_elbytes = 1,
+	.out_typecode =  NN_TYPE_QUINT8
+};
+
+static const struct elementwise_funcs less_equal_f_funcs = {
+	.op_stride_11 = less_equal_f_stride_11,
+	.op_stride_10 = less_equal_f_stride_10,
+	.op_rev_stride_01 = less_equal_f_rev_stride_01,
+	.in_elbytes = 4,
+	.out_elbytes = 1,
+	.out_typecode =  NN_TYPE_QUINT8
+};
+static const struct elementwise_funcs greater_qu8_funcs = {
+	.op_stride_11 = greater_qu8_stride_11,
+	.op_stride_10 = greater_qu8_stride_10,
+	.op_rev_stride_01 = greater_qu8_rev_stride_01,
+	.in_elbytes = 1,
+	.out_elbytes = 1,
+	.out_typecode =  NN_TYPE_QUINT8
+};
+
+static const struct elementwise_funcs greater_f_funcs = {
+	.op_stride_11 = greater_f_stride_11,
+	.op_stride_10 = greater_f_stride_10,
+	.op_rev_stride_01 = greater_f_rev_stride_01,
+	.in_elbytes = 4,
+	.out_elbytes = 1,
+	.out_typecode =  NN_TYPE_QUINT8
+};
+static const struct elementwise_funcs greater_equal_qu8_funcs = {
+	.op_stride_11 = greater_equal_qu8_stride_11,
+	.op_stride_10 = greater_equal_qu8_stride_10,
+	.op_rev_stride_01 = greater_equal_qu8_rev_stride_01,
+	.in_elbytes = 1,
+	.out_elbytes = 1,
+	.out_typecode =  NN_TYPE_QUINT8
+};
+
+static const struct elementwise_funcs greater_equal_f_funcs = {
+	.op_stride_11 = greater_equal_f_stride_11,
+	.op_stride_10 = greater_equal_f_stride_10,
+	.op_rev_stride_01 = greater_equal_f_rev_stride_01,
+	.in_elbytes = 4,
+	.out_elbytes = 1,
+	.out_typecode =  NN_TYPE_QUINT8
+};
 
 static inline HVX_Vector  __attribute__((always_inline))
 eltwise_vec_equal(HVX_Vector v1, HVX_Vector v2)
@@ -242,34 +387,35 @@ static void qcompare_thread_process(struct nn_graph *nn, void *vtdata)
     struct compare_info *info = td->info;
     uint8_t *a_data_pad;
     uint8_t *b_data_pad;
+    float a_step = fmaxf(0.0001f, flt_div_255(info->a_max_float - info->a_min_float));
+    int a_offset = saturate_u8(roundf_i32(-info->a_min_float/a_step));
     float b_step = fmaxf(0.0001f, flt_div_255(info->b_max_float - info->b_min_float));
     int b_offset = saturate_u8(roundf_i32(-info->b_min_float/b_step));
 
-    //If a and b are using different scales, we requantize b into the range of a, so that we can avoid any rounding errors that might impact the comparison
+    //If a and b are using different scales, take the SLOW (but accurate) path
     if(info->a_min_float != info->b_min_float || info->a_max_float != info->b_max_float)
     {
+        td->mode = NN_TYPE_FLOAT;
+        l2fetch( a_data, 128,128, (info->a_tensor_size+127)/128u);
+        hvx_do_dequantize(a_data, info->a_tensor_intermed_buffer, info->a_tensor_size, a_offset, a_step);
         l2fetch( b_data, 128,128, (info->b_tensor_size+127)/128u);
         hvx_do_dequantize(b_data, info->b_tensor_intermed_buffer, info->b_tensor_size, b_offset, b_step);
-
-        struct hvx_quant_parms qparms;
-        float fbuf[2];
-        fbuf[0] = -info->a_min_float;
-        fbuf[1] = info->a_max_float;
-        if( find_scaling_for_hvx_quant(fbuf, &qparms) !=0 ){
-		    errlog(nn,"inf or NaN input, to compare quantize");
-        }
-        quantize_floats_to_8b_asm(info->b_tensor_intermed_buffer, (uint8_t*)b_data, info->b_tensor_size, qparms.min_offset, qparms.common_exp, qparms.scaling);
+        td->opt_flag = check_prepare_hvx_opt(nn, a_tensor, b_tensor, out_tensor, a_data, b_data, &opt_info);
+    }
+    else
+    {
+        td->mode = NN_TYPE_QUINT8;
+        td->opt_flag = check_prepare_hvx_opt(nn, a_tensor, b_tensor, out_tensor, a_data, b_data, &opt_info);
     }
 
     // Look for patterns to use HVX intrinsics version of the code and broadcast/prepare the data
-    td->opt_flag = check_prepare_hvx_opt(nn, a_tensor, b_tensor, out_tensor, a_data, b_data, &opt_info);
     a_data_pad = opt_info.a_data_pad;
     b_data_pad = opt_info.b_data_pad;
     elements = opt_info.elements;
     a_const_value = opt_info.a_const_value;
     b_const_value = opt_info.b_const_value;
     td->info->elem = elements;
-    if (td->opt_flag == 1)
+    if (td->opt_flag == 1 && td->mode == NN_TYPE_QUINT8)
     {
         td->a = a_data_pad;
         td->b = b_data_pad;
@@ -323,15 +469,11 @@ static int compare_execute(struct nn_node *self, struct nn_graph *nn, int op)
     info.a_max_float = tensor_get_float(a_max_tensor, 0);
     info.b_min_float = tensor_get_float(b_min_tensor, 0);
     info.b_max_float = tensor_get_float(b_max_tensor, 0);
+
+    info.a_tensor_size = a_tensor->shape.batches * a_tensor->shape.height * a_tensor->shape.width * a_tensor->shape.depth;
     info.b_tensor_size = b_tensor->shape.batches * b_tensor->shape.height * b_tensor->shape.width * b_tensor->shape.depth;
-    if (nn_scratch_grow(nn, info.b_tensor_size*sizeof(float)))
-    {
-        errlog(nn, "Failed to grow scratch for temporary comparison buffer");
-    }
-    else
-    {
-        info.b_tensor_intermed_buffer = nn->scratch;
-    }
+    info.a_tensor_intermed_buffer = nn_memalign(128, (info.a_tensor_size + 32) * sizeof(float));
+    info.b_tensor_intermed_buffer = nn_memalign(128, (info.b_tensor_size + 32) * sizeof(float));
 
 
     struct compare_tdata td = {
@@ -340,6 +482,7 @@ static int compare_execute(struct nn_node *self, struct nn_graph *nn, int op)
         .b_tensor = b_tensor,
         .out_tensor = out_tensor,
         .opt_flag = 0,
+        .op = op,
         .info = &info,
         .compare_fp = compare_fp,
     };
@@ -362,7 +505,7 @@ static int compare_execute(struct nn_node *self, struct nn_graph *nn, int op)
         return -1;
     }
 
-    if (td.opt_flag == 1)
+    if (td.opt_flag == 1 && td.mode == NN_TYPE_QUINT8)
     {
         retval = 0;
     }
@@ -370,34 +513,80 @@ static int compare_execute(struct nn_node *self, struct nn_graph *nn, int op)
     {
         if (op == EQUAL)
         {
-            retval = broadcast_elementwise_execute_quint8(self, nn, q8_equal_helper, &info);
+            
+            if (td.mode == NN_TYPE_QUINT8)
+            {
+                retval = nn_elementwise_with_broadcast( self, nn, &equal_qu8_funcs,NULL, NULL, NULL );
+            }
+            else
+            {
+                retval = nn_elementwise_with_broadcast( self, nn, &equal_f_funcs,info.a_tensor_intermed_buffer, info.b_tensor_intermed_buffer, NULL );
+            }
         }
         else if (op == NOT_EQUAL)
         {
-            retval = broadcast_elementwise_execute_quint8(self, nn, q8_not_equal_helper, &info);
+            if (td.mode == NN_TYPE_QUINT8)
+            {
+                retval = nn_elementwise_with_broadcast( self, nn, &not_equal_qu8_funcs,NULL, NULL, NULL );
+            }
+            else
+            {
+                retval = nn_elementwise_with_broadcast( self, nn, &not_equal_f_funcs,info.a_tensor_intermed_buffer, info.b_tensor_intermed_buffer, NULL );
+            }
         }
         else if (op == LESS)
         {
-            retval = broadcast_elementwise_execute_quint8(self, nn, q8_less_helper, &info);
+            if (td.mode == NN_TYPE_QUINT8)
+            {
+                retval = nn_elementwise_with_broadcast( self, nn, &less_qu8_funcs,NULL, NULL, NULL );
+            }
+            else
+            {
+                retval = nn_elementwise_with_broadcast(self, nn, &less_f_funcs,info.a_tensor_intermed_buffer, info.b_tensor_intermed_buffer, NULL);
+            }
         }
         else if (op == LESS_EQUAL)
         {
-            retval = broadcast_elementwise_execute_quint8(self, nn, q8_less_equal_helper, &info);
+            if (td.mode == NN_TYPE_QUINT8)
+            {
+                retval = nn_elementwise_with_broadcast( self, nn, &less_equal_qu8_funcs,NULL, NULL, NULL );
+            }
+            else
+            {
+                retval = nn_elementwise_with_broadcast(self, nn, &less_equal_f_funcs, info.a_tensor_intermed_buffer, info.b_tensor_intermed_buffer, NULL);
+            }
         }
         else if (op == GREATER)
         {
-            retval = broadcast_elementwise_execute_quint8(self, nn, q8_greater_helper, &info);
+            if (td.mode == NN_TYPE_QUINT8)
+            {
+                retval = nn_elementwise_with_broadcast( self, nn, &greater_qu8_funcs,NULL, NULL, NULL );
+            }
+            else
+            {
+                retval = nn_elementwise_with_broadcast( self, nn, &greater_f_funcs,info.a_tensor_intermed_buffer, info.b_tensor_intermed_buffer, NULL );
+            }
         }
         else if (op == GREATER_EQUAL)
         {
-            retval = broadcast_elementwise_execute_quint8(self, nn, q8_greater_equal_helper, &info);
+            if (td.mode == NN_TYPE_QUINT8)
+            {
+                retval = nn_elementwise_with_broadcast( self, nn, &greater_equal_qu8_funcs,NULL, NULL, NULL );
+            }
+            else
+            {
+                retval = nn_elementwise_with_broadcast( self, nn, &greater_equal_f_funcs,info.a_tensor_intermed_buffer, info.b_tensor_intermed_buffer, NULL );
+            }
         }
         else
         {
             retval = errlog(nn, "Unsupported compare op %d", op);
         }
     }
-
+    if (info.a_tensor_intermed_buffer)
+        nn_free(info.a_tensor_intermed_buffer);
+    if (info.b_tensor_intermed_buffer)
+        nn_free(info.b_tensor_intermed_buffer);
     return retval;
 }
 

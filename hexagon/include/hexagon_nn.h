@@ -44,6 +44,7 @@ typedef struct initinfo hexagon_nn_initinfo;
 
 typedef int32_t hexagon_nn_nn_id;
 typedef int32_t hexagon_nn_padding_type;
+typedef int32_t hexagon_nn_execute_result;
 
 #ifndef HEXAGON_NN_NO_RUNTIME
 #include <nn_graph.h>

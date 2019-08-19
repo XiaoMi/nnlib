@@ -42,7 +42,7 @@
 #include <stdbool.h>
 
 #define OPERATOR_AND(X,Y) ((X)&(Y))
-BROADCAST_STRIDE_11_FUNC( and_int32_stride_11, int32_t, OPERATOR_AND)
+BROADCAST_STRIDE_11_FUNC( and_int32_stride_11, int32_t, int32_t, OPERATOR_AND)
 
 static void  and_int32_stride_10( void *out, void const *in1, void const *in2, int n, void *opaque)
 {
@@ -69,11 +69,11 @@ static const struct elementwise_funcs And_int32_funcs = {
 
 static int and_int32_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return nn_elementwise_with_broadcast( self, nn, &And_int32_funcs, NULL );
+	return nn_elementwise_with_broadcast( self, nn, &And_int32_funcs,NULL, NULL, NULL );
 }
 
 #define OPERATOR_IOR(X,Y) ((X)|(Y))
-BROADCAST_STRIDE_11_FUNC( ior_int32_stride_11, int32_t, OPERATOR_IOR)
+BROADCAST_STRIDE_11_FUNC( ior_int32_stride_11, int32_t, int32_t, OPERATOR_IOR)
 
 static void  ior_int32_stride_10( void *out, void const *in1, void const *in2, int n, void *opaque)
 {
@@ -100,10 +100,10 @@ static const struct elementwise_funcs Ior_int32_funcs = {
 
 static int ior_int32_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return nn_elementwise_with_broadcast( self, nn, &Ior_int32_funcs, NULL );
+	return nn_elementwise_with_broadcast( self, nn, &Ior_int32_funcs,NULL, NULL, NULL );
 }
 #define OPERATOR_XOR(X,Y) ((X)^(Y))
-BROADCAST_STRIDE_11_FUNC( xor_int32_stride_11, int32_t, OPERATOR_XOR)
+BROADCAST_STRIDE_11_FUNC( xor_int32_stride_11, int32_t, int32_t, OPERATOR_XOR)
 
 static void  xor_int32_stride_10( void *out, void const *in1, void const *in2, int n, void *opaque)
 {
@@ -129,7 +129,7 @@ static const struct elementwise_funcs Xor_int32_funcs = {
 
 static int xor_int32_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return nn_elementwise_with_broadcast( self, nn, &Xor_int32_funcs, NULL );
+	return nn_elementwise_with_broadcast( self, nn, &Xor_int32_funcs,NULL,NULL, NULL );
 }
 
 

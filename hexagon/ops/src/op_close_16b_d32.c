@@ -132,7 +132,7 @@ static int close_16b_d32_execute(struct nn_node *self, struct nn_graph *nn)
 	int is_u16 = self->node_type == OP_Close_u16b_d32;
 	float qscale = 32768.0f/fmaxf(dut_max_float, -dut_min_float);
 	if (is_u16) qscale = 65536.0f / (dut_max_float - dut_min_float);
-	int offset = 0;
+	float offset = 0;
 	if (is_u16) offset = dut_min_float;
 	// check constraints (also catch NaN and inf)
 	if ( !( (dut_max_float >= 0.0f)		 // catches max <0  and NaN
@@ -216,7 +216,7 @@ static int close_16b_d32_execute(struct nn_node *self, struct nn_graph *nn)
 	logmsg(nn,loglev,"Out of %d points: mean err = %.3f, rms err = %.3f; largest excess err = %.3f (%d are nonzero)",
 			errstatC.ncount, mean_error, rms_error, errstatC.max_excerr, errstatC.ncount_excerr );
 	if( errstatC.ncount_notsat >= 16){
-		errstats_find_correlation( nn , loglev, &errstatC, 0,128,255);
+		errstats_find_correlation( nn , loglev, &errstatC, -32767, 0, 32767);
 	}
 	if( ! acceptable ){
 		int count = batches * height * width * depth;

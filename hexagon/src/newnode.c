@@ -490,12 +490,12 @@ int do_teardown(struct nn_graph *nn)
 	}
 	allocator_teardown(nn);
 	find_node_teardown(nn);
-	nn_free(nn->scratch);
-	nn_free(nn->logbuf);
 	if (nn->fake_vtcm_ptr) nn_free(nn->fake_vtcm_ptr);
 	if (nn->inputs) nn_free((void *)nn->inputs);
 	if (nn->outputs) nn_free(nn->outputs);
 	nn_batchseqstate_free( & nn->batchseq );
+	nn_free(nn->scratch);
+	nn_free(nn->logbuf);
 	nn_free(nn);
 	return 0;
 }

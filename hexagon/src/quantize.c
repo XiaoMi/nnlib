@@ -144,6 +144,73 @@ int adjust_minmax_for_zero_16b(float *min_p, float *max_p)
 	}
 }
 
+int adjust_minmax_for_zero_with_constraints_16b( float *min_p, float *max_p , int constraint )
+{
+        float mn = *min_p;
+        float mx = *max_p;
+        float dif = mx-mn;
+        if( !(dif >= 1e-6f)) return -1; // check valid min,max_p
+        if( mn == 0.0f) return 0;               // common case
+        float z = (-65536.f)*mn / dif;          // current 'zero point'
+        float zi = floorf(z);
+        float zf = z - zi;
+        // if within 2^-6 of an integer, call it close enough
+        // (don't accept z outside 0.. 65535 though)
+        if ((zf <= 0.015625f || zf >= 0.984375f ) && z >=-0.02f && z <= 65535.02f)
+                return 0;
+        // choose which end to move
+        // Avoid divide by 0.
+        //
+
+        float mnk = (zf-1.0f) * mn;
+        float mxk =  zf *mx;
+        float zirnd = (zf >=0.5f)? (zi+1.0f): zi;
+
+        switch( constraint &3 ){
+         default:
+         case 0:
+                // move whichever requires least change.
+                if( zi >= 1.0f && ( zi >= 65535.0f || mnk >= mxk ))
+                        goto move_max_out;
+                goto move_min_out;
+         case 1:                // min is fixed; max is free
+                // skew decision to 'move max out'
+                if( zi >= 1.0f && (z >= 49152.25f ||  mnk * 8.0f > mxk) )
+                        goto move_max_out;
+                goto move_min_nearest;
+         case 2:
+                // skew decision to 'move min out'
+                if( z >= 16383.75f && ( zi >= 65535.0f || mnk > mxk * 8.0f ))
+                        goto move_max_nearest;
+                goto move_min_out;
+         case 3:
+                // move single endpoint if range is skewed at least 3:1; otherwise both.
+                if( z <= 16383.75f ) goto move_min_nearest;
+                if( z >= 49152.25f) goto move_max_nearest;
+                // shift zero to zirnd, by moving both ends.
+                float adj = (z-zirnd)*dif * (float)(1./65536.);
+                *min_p = mn + adj;
+                *max_p = mx + adj;
+                return 3;
+        }
+        /* NOTREACHED*/
+
+   move_max_nearest:   // move max, change z to nearest
+     zi = zirnd;
+   move_max_out:                // move max, change z to zi
+        *max_p = mn - 65536.0f*mn/zi;
+        return 2;
+
+   move_min_out:   // move min; change z to zi+1
+         zirnd = zi+1.0f;
+   move_min_nearest:    // move min, change z to nearest
+        *min_p = mx*zirnd/(zirnd-65536.0f);
+         printf(" djusted min max = %f %f \n",*min_p, *max_p);
+        return 1;
+}
+
+
+
 //
 // This is like adjust_minmax_for_zero except that it accepts a 'constraint'
 // parameter which indicates which endpoints are (nominally) fixed:
@@ -177,7 +244,7 @@ int adjust_minmax_for_zero_with_constraints( float *min_p, float *max_p , int co
 	float mn = *min_p;
 	float mx = *max_p;
 	float dif = mx-mn;
-	if( !(dif >= 1e-6f)) return -1;	// check valid min,max_p
+	if(!(dif > 0.0f)) return -1;
 	if( mn == 0.0f) return 0;		// common case
 	float z = (-255.0f)*mn / dif;		// current 'zero point'
 	float zi = floorf(z);
@@ -246,6 +313,12 @@ int quantize_adjust_range_and_check( float *out_min, float *out_max, float *out_
 ///////////////////////////////////////
 static void scalar_requantize_i32_to_qu8(int32_t const * inp, int offseto, int gaini, uint8_t *outp, int n);
 static void fallback_requantize_i32_to_qu8(int32_t const * inp, float offset, float gain, uint8_t *outp, int n);
+inline HVX_Vector __attribute__((always_inline))
+hvx_requantize_vector_8to8(HVX_Vector const* vinp, int32_t gaini, HVX_VectorPair vvin_off_i16, HVX_Vector vout_off_i16);
+inline HVX_Vector __attribute__((always_inline))
+hvx_requantize_vector_8to8_hi_gain(HVX_Vector const* vinp, int32_t gaini, int32_t prod_rsh, HVX_VectorPair vvin_off_i16, HVX_Vector vout_off_i16);
+inline HVX_Vector __attribute__((always_inline))
+hvx_requantize_vector_8to8_uniform_gain(HVX_Vector const* vinp, HVX_VectorPair vvtot_off_i16);
 
 //
 // requantize n 32-bit numbers to u8; equiv to
@@ -393,4 +466,149 @@ hvx_quantize_32_to_8(
 	}
 }
 
+// Requantizes 8-bit input to a new quantization range. Supports any gain value 
+// with magnitude less than 2^15. Order of operations is:
+// output = (gain) * (input - in_offset) + out_offset
+void nn_requantize_qu8_to_qu8_hvx(uint8_t *outp, uint8_t const* inp, unsigned n, float gain, int32_t in_offset, int32_t out_offset)
+{
+    int nloop = n / 128u;
+    int nextra = n % 128;
 
+    HVX_Vector vin_off_i16 = q6op_Vh_vsplat_R(saturate_i16(in_offset));
+    HVX_VectorPair vvin_off_i16 = Q6_W_vcombine_VV(vin_off_i16, vin_off_i16);
+    HVX_Vector vout_off_i16 = q6op_Vh_vsplat_R(saturate_i16(out_offset));
+
+    HVX_Vector const *vinp = (HVX_Vector const*) inp;
+
+    if(fabsf(gain - 1.0f) < 6.1035156e-05f)
+    {
+        HVX_Vector vtot_off_i16 = Q6_Vh_vsub_VhVh_sat(vout_off_i16, vin_off_i16);
+        HVX_VectorPair vvtot_off_i16 = Q6_W_vcombine_VV(vtot_off_i16, vtot_off_i16);
+
+        for(int i = 0; i < nloop; i++)
+        {
+            q6op_vstu_AV((HVX_Vector *)outp, hvx_requantize_vector_8to8_uniform_gain(vinp, vvtot_off_i16));
+            vinp += 1;
+            outp += 128;
+        }
+
+        if(nextra != 0)
+        {
+            q6op_vstu_variable_ARV(outp, nextra, hvx_requantize_vector_8to8_uniform_gain(vinp, vvtot_off_i16));
+        }
+    }
+    else if(gain > 1.0f)
+    {
+        float gain_coef = flt_getfrac(gain);
+        int32_t gaini = saturate_i16(roundf_i32(gain_coef * (float)(1u << 15)));
+        int32_t prod_rsh = 15 - flt_getexp(gain);
+
+        for(int i = 0; i < nloop; i++)
+        {
+            q6op_vstu_AV((HVX_Vector *)outp, hvx_requantize_vector_8to8_hi_gain(vinp, gaini, prod_rsh, vvin_off_i16, vout_off_i16));
+            vinp += 1;
+            outp += 128;
+        }
+
+        if(nextra != 0)
+        {
+            q6op_vstu_variable_ARV(outp, nextra, hvx_requantize_vector_8to8_hi_gain(vinp, gaini, prod_rsh, vvin_off_i16, vout_off_i16));
+        }
+    }
+    else
+    {
+        int32_t gaini = saturate_i16(roundf_i32(gain * (float)(1u << 15)));
+
+        for(int i = 0; i < nloop; i++)
+        {
+            q6op_vstu_AV((HVX_Vector *)outp, hvx_requantize_vector_8to8(vinp, gaini, vvin_off_i16, vout_off_i16));
+            vinp += 1;
+            outp += 128;
+        }
+
+        if(nextra != 0)
+        {
+            q6op_vstu_variable_ARV(outp, nextra, hvx_requantize_vector_8to8(vinp, gaini, vvin_off_i16, vout_off_i16));
+        }
+    } //if gain > 1.0f
+}
+
+// handles cases where gain <= 1.0f
+inline HVX_Vector  __attribute__((always_inline))
+hvx_requantize_vector_8to8(
+    HVX_Vector const* vinp,
+    int32_t gaini,
+    HVX_VectorPair vvin_off_i16,
+    HVX_Vector vout_off_i16 )
+{
+    // cast uint8 input to 16 bits
+    HVX_VectorPair vvinput_i16 = Q6_Wuh_vunpack_Vub(*vinp);
+    gaini |= gaini << 16;
+
+    // subtract input offset
+    HVX_VectorPair vvdiff_i16 = Q6_Wh_vsub_WhWh(vvinput_i16, vvin_off_i16);
+    HVX_Vector vdiff_i16_0 = Q6_V_lo_W(vvdiff_i16);
+    HVX_Vector vdiff_i16_1 = Q6_V_hi_W(vvdiff_i16);
+
+    // multiply by gain
+    HVX_Vector vprod_i16_0 = Q6_Vh_vmpy_VhRh_s1_rnd_sat(vdiff_i16_0, gaini);
+    HVX_Vector vprod_i16_1 = Q6_Vh_vmpy_VhRh_s1_rnd_sat(vdiff_i16_1, gaini);
+
+    // add output offset
+    HVX_Vector vsum_i16_0 = Q6_Vh_vadd_VhVh_sat(vprod_i16_0, vout_off_i16);
+    HVX_Vector vsum_i16_1 = Q6_Vh_vadd_VhVh_sat(vprod_i16_1, vout_off_i16);
+
+    // saturate to 8 bits
+    HVX_Vector vres_u8 = Q6_Vub_vpack_VhVh_sat(vsum_i16_1, vsum_i16_0);
+
+    return vres_u8;
+}
+
+// handles cases where gain > 1.0f
+inline HVX_Vector  __attribute__((always_inline))
+hvx_requantize_vector_8to8_hi_gain(
+    HVX_Vector const* vinp,
+    int32_t gaini,
+    int32_t prod_rsh,
+    HVX_VectorPair vvin_off_i16,
+    HVX_Vector vout_off_i16 )
+{
+    // cast uint8 input to 16 bits
+    HVX_VectorPair vvinput_i16 = Q6_Wuh_vunpack_Vub(*vinp);
+    gaini |= gaini << 16;
+
+    // subtract input offset
+    HVX_VectorPair vvdiff_i16 = Q6_Wh_vsub_WhWh(vvinput_i16, vvin_off_i16);
+    HVX_Vector vdiff_i16_0 = Q6_V_lo_W(vvdiff_i16);
+    HVX_Vector vdiff_i16_1 = Q6_V_hi_W(vvdiff_i16);
+
+    // multiply by gain, 32-bit accumulators
+    HVX_VectorPair vvprod_i32_0 = Q6_Ww_vmpy_VhRh(vdiff_i16_0, gaini);
+    HVX_VectorPair vvprod_i32_1 = Q6_Ww_vmpy_VhRh(vdiff_i16_1, gaini);
+
+    // shift to halfword by (15 - gain_lsh) 
+    HVX_Vector vprod_i16_0 = Q6_Vh_vasr_VwVwR_rnd_sat(Q6_V_hi_W(vvprod_i32_0), Q6_V_lo_W(vvprod_i32_0), prod_rsh);
+    HVX_Vector vprod_i16_1 = Q6_Vh_vasr_VwVwR_rnd_sat(Q6_V_hi_W(vvprod_i32_1), Q6_V_lo_W(vvprod_i32_1), prod_rsh);
+
+    // add output offset
+    HVX_Vector vsum_i16_0 = Q6_Vh_vadd_VhVh_sat(vprod_i16_0, vout_off_i16);
+    HVX_Vector vsum_i16_1 = Q6_Vh_vadd_VhVh_sat(vprod_i16_1, vout_off_i16);
+
+    // saturate to 8 bits
+    HVX_Vector vres_u8 = Q6_Vub_vpack_VhVh_sat(vsum_i16_1, vsum_i16_0);
+
+    return vres_u8;
+}
+
+inline HVX_Vector __attribute__((always_inline))
+hvx_requantize_vector_8to8_uniform_gain(
+    HVX_Vector const* vinp,
+    HVX_VectorPair vvtot_off_i16)
+{
+    // cast uint8 input to 16 bits
+    HVX_VectorPair vvinput_i16 = Q6_Wuh_vunpack_Vub(*vinp);
+    // add total offset
+    HVX_VectorPair vvsum_i16 = Q6_Wh_vadd_WhWh_sat(vvinput_i16, vvtot_off_i16);
+    // saturate to 8 bits
+    return Q6_Vub_vpack_VhVh_sat(Q6_V_hi_W(vvsum_i16), Q6_V_lo_W(vvsum_i16));
+}

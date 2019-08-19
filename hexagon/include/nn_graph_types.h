@@ -118,7 +118,7 @@ enum {
 	NN_OPTION_TENSOR_PRINT_FILTER,
 	NN_OPTION_HAP_MEM_GROW_SIZE,
 	NN_OPTION_ENABLE_CONST_PRINT,
-	//  /\
+	//  /\.
 	//   \___ Add NEW entries HERE, at BOTTOM
 	NN_OPTION_LASTPLUSONE,
 };
@@ -126,6 +126,14 @@ struct uint_option_t {
 	uint32_t option_id;
 	uint32_t uint_value;
 };
+
+enum {
+        NN_EXECUTE_SUCCESS         = 0,
+        NN_EXECUTE_ERROR,
+        NN_EXECUTE_BUFFER_SIZE_ERROR
+};
+
+
 #define MAX_STRING_L 256
 struct string_option_t {
 	uint32_t option_id;
@@ -716,7 +724,9 @@ static inline void *tensor_location(
                               (src->shape.height *
                                (b)))))))));
         } else if ( tensor_is_d32(src)) {
-                return tensor_location_d32(src, b,h,w,d);
+		return ((uint8_t *) src->data) +
+			( tensor_type_size(src->format.type) *
+			  tensor_offset_for_d32(src, b,h,w,d));
         }
         return NULL;
 }
@@ -1077,4 +1087,10 @@ void hvx_argmin_or_max_in_cols( uint8_t const * data, int rows, int cols, int ro
 void hvx_argmin_or_max_d_8_d32( struct tensor const * data_tensor, int32_t * outp, int find_argmax );
 void hvx_argmin_or_max_whb_8_d32( struct tensor const * data_tensor, int32_t * outp, int32_t  axis, int find_argmax);
 
+static inline int shape_apparent_rank ( struct shape const *shp){
+	return (shp->batches > 1)? 4 :
+		 (shp->height >1)? 3:
+		(shp->width > 1)? 2:
+		(shp->depth>1)? 1: 0;
+}
 #endif

@@ -369,7 +369,7 @@ addsub_832_execute( struct nn_node * self, struct nn_graph * nn)
 			( node_type == OP_QuantizedAdd_8p8to32_ref ||
 			  node_type == OP_QuantizedSub_8p8to32_ref)? &AddSub_i832_funcs : &AddSub_i832_hvx_funcs;
 
-	return nn_elementwise_with_broadcast( self, nn, ew_funcs, &sc );
+	return nn_elementwise_with_broadcast( self, nn, ew_funcs,NULL, NULL, &sc );
 
 }
 //=================================================================
@@ -598,7 +598,7 @@ mul_832_execute( struct nn_node * self, struct nn_graph * nn)
 	struct elementwise_funcs const *ew_funcs =
 			( node_type == OP_QuantizedMul_8x8to32_ref) ? &Mul_i832_funcs : &Mul_i832_hvx_funcs;
 
-	return nn_elementwise_with_broadcast( self, nn, ew_funcs, &sc );
+	return nn_elementwise_with_broadcast( self, nn, ew_funcs,NULL, NULL, &sc );
 
 }
 

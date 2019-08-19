@@ -937,6 +937,7 @@ static int resizebilinear_f_execute(struct nn_node *self, struct nn_graph *nn)
 	if (self->n_inputs == 3)
 		align_corners = *(int32_t *)(self->inputs[2]->data);
 	if (align_corners) {
+		if (w_out <= 1 || h_out <= 1) return errlog(nn, "aligned_corners flag is no good with out width/height of 1 or less");
 		xscale = (float)(w_in-1) / (w_out-1);
 		yscale = (float)(h_in-1) / (h_out-1);
 	}

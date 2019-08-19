@@ -198,11 +198,16 @@ static int supernode_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	int32_t in_x_base;
 
 	uint8_t *in = in_tensor->data;
+	uint16_t *in_16 = in_tensor->data;  // WOLFE - Unsigned???
 	uint8_t *filt = filt_tensor->data;
+	uint16_t *filt_16 = filt_tensor->data;  // WOLFE - Unsigned???
 	uint8_t *bias = bias_tensor->data;
 	int32_t *bias32 = bias_tensor->data;
 	uint8_t *out = out_tensor->data;
+	uint16_t *out_16 = out_tensor->data;
 
+	uint16_t *instripe_16;  // WOLFE - Unsigned???
+	uint16_t *filtstripe_16;  // WOLFE - Unsigned???
 	uint8_t *instripe;
 	uint8_t *filtstripe;
 	int32_t *outstripe;
@@ -245,7 +250,8 @@ static int supernode_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	 * output min/max == INT_MIN / INT_MAX * output grade size
 	 */
 
-	int is_bias32 = (self->node_type == OP_Supernode_8x8p32to8) || (self->node_type == OP_Supernode_8x8p32to8_ref);	// did we ditch to ref version?
+	int is_bias32 = (self->node_type == OP_Supernode_8x8p32to8) || (self->node_type == OP_Supernode_8x8p32to8_ref) || (self->node_type == OP_Supernode_16x16p32to16);	// did we ditch to ref version?
+	int is_16b = (self->node_type == OP_Supernode_16x16p32to16);
 	float bias_divisor = is_bias32 ? 0x1.0p32 : 255.0f;
 	float in_level_size = (in_max_float - in_min_float) / 255;
 	float filt_level_size = (filt_max_float - filt_min_float) / 255;
@@ -331,15 +337,29 @@ static int supernode_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	          for (filt_x = 0; filt_x < filt_width; filt_x++) {
 	            if ((in_x_base + filt_x) >= in_width) continue;
 	            if ((in_x_base + filt_x) < 0) continue;
+		    if (is_16b) {
+			    instripe_16 = in_16+(in_depth*(in_x_base+filt_x+
+						     in_width*(in_y_base+filt_y+
+							       in_height*(batch))));
+			    filtstripe_16 = filt_16+(out_z + 
+					       out_depth*filt_depth*(filt_x+
+								     filt_width*(filt_y)));
+		    } else {
 		    instripe = in+(in_depth*(in_x_base+filt_x+
 	                           in_width*(in_y_base+filt_y+
                                    in_height*(batch))));
 	            filtstripe = filt+(out_z + 
 					out_depth*filt_depth*(filt_x+
 					filt_width*(filt_y)));
+		    }
 	            for (filt_z = 0; filt_z < filt_depth; filt_z++) {
+			    if (is_16b) {
+				    in_element = instripe_16[filt_z];
+				    filt_element = filtstripe_16[filt_z*out_depth];
+			    } else {
 	              in_element = instripe[filt_z];
 	              filt_element = filtstripe[filt_z*out_depth];
+			    }
 	              in_element -= input_offset;
 	              filt_element -= filt_offset;
 	              sum += in_element*filt_element;
@@ -372,6 +392,7 @@ static int supernode_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	for (j = 0; j < out_batches*out_height*out_width; j++) {
 	  for (i = 0; i < out_depth; i++) {
 	    sum = biasbuf[i] + tmp_out[j*out_depth+i] + minval_offset;
+// WOLFE - CHECK THIS MATH! vvvvvvv    (Does it still hold for 16b?)
 #ifdef USE_16BITS_RECIP
 	    int32_t out_i = ( ((sum) * fixed_recip_level_size) + (1<<15));
 	    out_i >>= 16;
@@ -380,8 +401,13 @@ static int supernode_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	    int32_t out_i = out_iL >> 31;
 #endif
 	    if (out_i < 0) out_i = 0;
+	    if (is_16b) {
+		    if (out_i > 65535) out_i = 65535;
+		    *out_16++ = out_i;
+	    } else {
             if (out_i > 255) out_i = 255;
 	    *out++ = out_i;
+	    }
             //logmsg(nn,2,"conv_out=%ld, biasbuf=%ld, out=%ld\n", tmp_out[j*out_depth+i], biasbuf[i],out_i);
 	  }
 	}
@@ -1265,22 +1291,11 @@ static int supernode_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 
 static int supernode_check_ref(struct nn_node *self, struct nn_graph *nn)
 {
-	int i;
 	logmsg(nn,2,"Checking supernode node %p",self);
-	if (self->n_inputs != 12) return errlog(nn,"supernode wrong # inputs");
-	if (self->n_outputs != 3) return errlog(nn,"supernode wrong # outputs");
-	if (self->inputs == NULL) return errlog(nn,"NULL inputs");
-	if (self->outputs == NULL) return errlog(nn,"NULL outputs");
-	for (i = 0; i < self->n_inputs; i++) {
-		if (self->inputs[i] == NULL) {
-			return errlog(nn,"input %d NULL",i);
-		}
-	}
-	for (i = 0; i < self->n_outputs; i++) {
-		if (self->outputs[i] == NULL) {
-			return errlog(nn,"output %d NULL",i);
-		}
-	}
+	// Supernode may have a 13th input 'ChannelScale', but it should end up being
+	// just a scalar [1.0] if the supernode doesn't convert to d32, so ignore it.
+	int is_16b = (self->node_type == OP_Supernode_16x16p32to16);
+	int elsize = is_16b ? 2 : 1;
 	const struct tensor *filt_tensor = self->inputs[1];
 	const struct tensor *min_filt_tensor = self->inputs[4];
 	const struct tensor *max_filt_tensor = self->inputs[5];
@@ -1290,14 +1305,14 @@ static int supernode_check_ref(struct nn_node *self, struct nn_graph *nn)
 	int32_t filt_depth = filt_tensor->shape.filt_depth;
 	uint32_t out_depth = filt_batches;
 	uint8_t *filt = filt_tensor->data;
+	uint16_t *filt_16 = filt_tensor->data;
 	float filt_max_float = tensor_get_float(max_filt_tensor,0);
 	float filt_min_float = tensor_get_float(min_filt_tensor,0);
 	int32_t filt_offset = quantize_uint8(0.0f,filt_min_float,filt_max_float);
 	uint32_t filt_elements = filt_width*filt_height*filt_depth;
 	uint32_t filt_elements_pad = (filt_elements + HPAD - 1) & (~(HPAD - 1));
 	int out_depth_pad = (out_depth + DPAD - 1) & ~(DPAD-1);
-	uint32_t consts_size = filt_elements_pad * out_depth_pad;
-	int vec_id;
+	uint32_t consts_size = filt_elements_pad * out_depth_pad * elsize;
 	struct supernode_info *info;
 	if ((info = nn_malloc(sizeof(*info))) == NULL) {
 		return errlog(nn,"couldn't allocate info");
@@ -1328,13 +1343,18 @@ static int supernode_check_ref(struct nn_node *self, struct nn_graph *nn)
 	if ((info->filt_pad = nn_memalign(ALIGN_SIZE,consts_size)) == NULL) {
 		return errlog(nn,"couldn't allocate buffer for const rearrangement");
 	}
-	if (nn_scratch_grow(nn,filt_elements_pad*out_depth_pad)) {
+	if (nn_scratch_grow(nn,filt_elements_pad*out_depth_pad*elsize)) {
 		return errlog(nn,"failed to get scratch");
 	}
-	vec_id = nn_os_vector_acquire();
+	nn_mutex_lock(&nn->scratch_mutex);
+	if (is_16b) {
+		pad2d_16(filt_16,filt_elements,out_depth,nn->scratch,filt_elements_pad,out_depth_pad,filt_offset);
+		transpack_16(nn->scratch,filt_elements_pad,out_depth_pad,info->filt_pad);
+	} else {
 	pad2d(filt,filt_elements,out_depth,nn->scratch,filt_elements_pad,out_depth_pad,filt_offset);
 	transpack(nn->scratch,filt_elements_pad,out_depth_pad,info->filt_pad);
-	nn_os_vector_release(vec_id);
+	}
+	nn_mutex_unlock(&nn->scratch_mutex);
 	logmsg(nn,2,"supernode node %p check OK",self);
 	return 0;
 }
@@ -1359,12 +1379,16 @@ struct nn_node_ops //nn_ops_for_QuantizedConv2d_8x8to32 = {
 };
 #endif
 
+// Supernode may have a 13th input 'ChannelScale', but it should end up being
+// just a scalar [1.0] if the supernode doesn't convert to d32, so ignore it.
 struct nn_node_ops nn_ops_for_Supernode_8x8p8to8 = {
 	.execute = supernode_execute_hvx,
 	//.execute = supernode_execute_ref,
 	.check = supernode_check_ref,
 	.ctor = node_alloc_common,
 	.dtor = supernode_dtor,
+	.n_inputs = NN_IOCOUNT_RANGE(12,13),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_Supernode_8x8p8to8_ref = {
@@ -1372,6 +1396,8 @@ struct nn_node_ops nn_ops_for_Supernode_8x8p8to8_ref = {
 	.check = supernode_check_ref,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(12,13),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_Supernode_8x8p32to8 = {
@@ -1380,6 +1406,8 @@ struct nn_node_ops nn_ops_for_Supernode_8x8p32to8 = {
 	.check = supernode_check_ref,
 	.ctor = node_alloc_common,
 	.dtor = supernode_dtor,
+	.n_inputs = NN_IOCOUNT_RANGE(12,13),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_Supernode_8x8p32to8_ref = {
@@ -1387,32 +1415,33 @@ struct nn_node_ops nn_ops_for_Supernode_8x8p32to8_ref = {
 	.check = supernode_check_ref,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(12,13),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 
-static int dwise_unsup_nond32_execute(struct nn_node *self, struct nn_graph *nn)
-{
-	return errlog(nn,"Non-D32 supernode not supported");
-}
-
-static int dwise_unsup_nond32_check(struct nn_node *self, struct nn_graph *nn)
+static int dwise_unsup_nond32(struct nn_node *self, struct nn_graph *nn)
 {
 	return errlog(nn,"Non-D32 supernode not supported");
 }
 
 
 struct nn_node_ops nn_ops_for_DepthwiseSupernode_8x8p8to8 = {
-	.execute = dwise_unsup_nond32_execute,
-	.check = dwise_unsup_nond32_check,
+	.execute = dwise_unsup_nond32,
+	.check = dwise_unsup_nond32,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(12,13),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 struct nn_node_ops nn_ops_for_DepthwiseSupernode_8x8p32to8 = {
-	.execute = dwise_unsup_nond32_execute,
-	.check = dwise_unsup_nond32_check,
+	.execute = dwise_unsup_nond32,
+	.check = dwise_unsup_nond32,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(12,13),
+	.n_outputs = NN_IOCOUNT(3),
 };
 
 static int supernode16_unsup_nond32_execute(struct nn_node *self, struct nn_graph *nn)
@@ -1433,8 +1462,8 @@ struct nn_node_ops nn_ops_for_Supernode_16x16p16to16 = {
 };
 
 struct nn_node_ops nn_ops_for_Supernode_16x16p32to16 = {
-	.execute = supernode16_unsup_nond32_execute,
-	.check = supernode16_unsup_nond32_check,
+	.execute = supernode_execute_ref,
+	.check = supernode_check_ref,
 	.ctor = node_alloc_common,
 	.dtor = supernode_dtor,
 };

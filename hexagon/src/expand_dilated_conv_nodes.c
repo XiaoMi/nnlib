@@ -126,13 +126,30 @@ int expand_dilated_conv_nodes(struct nn_graph *nn, struct nn_node **dilated_conv
     make_outputdesc_from_shape(&conv_output_defs[0], &conv_out_shape, sizeof(uint32_t), 0);
     conv_output_defs[1] = conv_output_defs[2] = Output_ScalarFloat; //min and max
     struct nn_node* conv_node = create_node(nn, 0, OP_QuantizedConv2d_8x8to32, dilated_conv_node->padding, 7, 3, conv_input_refs, conv_output_defs);
+    struct nn_node *biasadd_predecessor = conv_node;
+
+    uint32_t has_channel_scale = (dilated_conv_node->n_inputs == 14) ? 1 : 0;
+    struct nn_node *channel_scale_node = NULL;
+    if (has_channel_scale) {
+            struct input channel_scale_input_refs[4];
+            struct output channel_scale_output_defs[3];
+            channel_scale_input_refs[0] = (struct input){ conv_node->node_id, 0 }; //conv out
+            channel_scale_input_refs[1] = dilated_conv_node->input_refs[13]; //channel scales
+            channel_scale_input_refs[2] = (struct input){ conv_node->node_id, 1 }; //conv min
+            channel_scale_input_refs[3] = (struct input){ conv_node->node_id, 2 }; //conv max
+
+            make_outputdesc_from_shape(&channel_scale_output_defs[0], &conv_out_shape, sizeof(int32_t), 0);
+            channel_scale_output_defs[1] = channel_scale_output_defs[2] = Output_ScalarFloat; //min and max
+            channel_scale_node = create_node(nn, 0, OP_QuantizedChannelScale_32xf, NN_PAD_NA, 4, 3, channel_scale_input_refs, channel_scale_output_defs);
+            biasadd_predecessor = channel_scale_node;
+        }
 
     // BiasAdd
     struct input biasadd_input_refs[6] = {
-        { conv_node->node_id, 0 }, //conv out
+        { biasadd_predecessor->node_id, 0 }, //conv out
         dilated_conv_node->input_refs[2], //bias 
-        { conv_node->node_id, 1 }, //conv out min
-        { conv_node->node_id, 2 }, //conv out max
+        { biasadd_predecessor->node_id, 1 }, //conv out min
+        { biasadd_predecessor->node_id, 2 }, //conv out max
         dilated_conv_node->input_refs[7], //bias min
         dilated_conv_node->input_refs[8] //bias max
     };
@@ -181,13 +198,13 @@ int expand_dilated_conv_nodes(struct nn_graph *nn, struct nn_node **dilated_conv
     b2s_output_defs[1] = b2s_output_defs[2] = Output_ScalarFloat;
     struct nn_node *b2s_node = create_node(nn, 0, OP_BatchToSpaceND_8, NN_PAD_NA, 5, 3, b2s_input_refs, b2s_output_defs);
 
-    struct nn_node *new_nodes[5] = {
-        s2b_node,
-        conv_node,
-        biasadd_node,
-        requant_node,
-        b2s_node
-    };
+    struct nn_node *new_nodes[6];
+    new_nodes[0] = s2b_node;
+    new_nodes[1] = conv_node;
+    new_nodes[2] = channel_scale_node;
+    new_nodes[3] = biasadd_node;
+    new_nodes[4] = requant_node;
+    new_nodes[5] = b2s_node;
 
     struct input new_input_refs[3] = {
         { b2s_node->node_id, 0 },
@@ -196,7 +213,7 @@ int expand_dilated_conv_nodes(struct nn_graph *nn, struct nn_node **dilated_conv
     };
 
     change_multi_output_refs_table(nn, dilated_conv_node, dilated_conv_node->node_id, 3, new_input_refs);
-    replace_node_with_sequence(nn, dilated_conv_node_p, dilated_conv_node, new_nodes, 5);
+    replace_node_with_sequence(nn, dilated_conv_node_p, dilated_conv_node, new_nodes, 6);
 
     return 0;
 }

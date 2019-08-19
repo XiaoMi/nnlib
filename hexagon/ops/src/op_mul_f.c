@@ -41,8 +41,8 @@
 #include <nn_broadcast.h>
 
 #define OPERATOR_MUL(X,Y) ((X)*(Y))
-BROADCAST_STRIDE_11_FUNC( mul_f_stride_11, float, OPERATOR_MUL)
-BROADCAST_STRIDE_10_FUNC( mul_f_stride_10, float, OPERATOR_MUL )
+BROADCAST_STRIDE_11_FUNC( mul_f_stride_11, float, float, OPERATOR_MUL)
+BROADCAST_STRIDE_10_FUNC( mul_f_stride_10, float, float, OPERATOR_MUL )
 
 
 static const struct elementwise_funcs Mul_f_funcs = {
@@ -56,7 +56,7 @@ static const struct elementwise_funcs Mul_f_funcs = {
 
 static int mul_f_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return nn_elementwise_with_broadcast( self, nn, &Mul_f_funcs, NULL );
+	return nn_elementwise_with_broadcast( self, nn, &Mul_f_funcs,NULL, NULL, NULL );
 }
 
 struct nn_node_ops nn_ops_for_Mul_f = {

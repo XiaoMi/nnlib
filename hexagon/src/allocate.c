@@ -76,15 +76,15 @@
 #define STARTUP_OFFSET ((1+CANARY_VECTORS)*ALIGN_AMT)
 #define MAX_ALLOC_SIZE (3*512*1024*1024)
 
-static inline unsigned long round_up(unsigned long size)
+static inline size_t round_up(size_t size)
 {
-	return ((size + ALIGN_AMT - 1) & (-ALIGN_AMT));
+	return (size + ALIGN_AMT - 1) & ~(size_t)(ALIGN_AMT-1);
 }
 
 
 struct freelist_node {
 	struct freelist_node *next;
-	unsigned long base;
+	size_t base;
 	unsigned long size;
 };
 
@@ -94,8 +94,8 @@ static void *rechunk(
 	unsigned long size)
 {
 	struct freelist_node *me = *ptr;
-	unsigned long offset;
-	offset = me->base;
+	size_t offset = me->base;
+
 	if (me->size == size) {
 		*ptr = me->next;
 		nn_free(me);
@@ -139,7 +139,7 @@ static void try_coalesce(struct freelist_node *left)
 
 static int prefree(struct nn_graph *nn, struct freelist_node **ptr, void *baseptr, unsigned long size)
 {
-	unsigned long base = (unsigned long)baseptr-(CANARY_VECTORS*ALIGN_AMT);
+	size_t base = (size_t)baseptr-(CANARY_VECTORS*ALIGN_AMT);
 	struct freelist_node *tmp;
 	struct freelist_node *newnode;
 	size = round_up(size);
@@ -204,7 +204,7 @@ static int check_allocations(struct nn_graph *nn)
 
 static int allocate_storage(struct nn_graph *nn)
 {
-	unsigned long bulk_i;
+	size_t bulk_i;
 	if (check_allocations(nn) != 0) return errlog(nn,"check");
 	if (nn->bulk) return errlog(nn,"bulk already allocated!?");
 	if ((nn->bulk = nn_malloc(nn->watermark_offset)) == NULL) {
@@ -213,7 +213,7 @@ static int allocate_storage(struct nn_graph *nn)
 	logmsg(nn,2,"Allocated %d bytes @ %p.  Hope that's enough!",
 		nn->watermark_offset,
 		nn->bulk);
-	bulk_i = (unsigned long)nn->bulk;
+	bulk_i = (size_t)nn->bulk;
 	nn->root->base = round_up(bulk_i);
 	nn->root->size = nn->watermark_offset-(bulk_i - nn->root->base);
 	return 0;
@@ -391,8 +391,8 @@ static void freelist_teardown(struct nn_graph *nn)
 
 static inline int is_bulk_data(struct nn_graph *nn, void *p)
 {
-	unsigned long longp = (unsigned long)p;
-	unsigned long bulk_i = (unsigned long)nn->bulk;
+	size_t longp = (size_t)p;
+	size_t bulk_i = (size_t)nn->bulk;
 	unsigned long last_bulk_i = (unsigned long)(nn->watermark_offset);
 	int is_bulk = ((longp >= bulk_i) && (longp < last_bulk_i));
 	logmsg(nn,9,"p=%p longp=%lx bulk_i=%lx last_bulk_i=%lx is_bulk=%d",

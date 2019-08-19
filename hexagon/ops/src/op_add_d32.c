@@ -502,7 +502,8 @@ setup_elementwise_strategy( struct nn_graph *nn, struct nn_node *self, int opera
 		// (by 'clean' strides; height_stride= nd32*d32_stride).
 		if( run_nd32 >1 && ((run_depth&31)==0 || info->min_max_precalc==3)){
 			int can_flatten = 0;
-			if( run_height ==1 ){
+			// TODO: backing this off until an issue is solved: (1,1,14,128)+(1,1,1,128) doesn't work
+			if( 0 && run_height ==1 ){
 				can_flatten = 1;
 			}else if( info->tinA.height_stride == info->tinA.d32_stride*run_nd32){
 				struct shape const *bshape = swapXY? &info->x_shape : &info->y_shape;

@@ -60,7 +60,7 @@ struct nn_node_ops nn_ops_for_QuantizedTransposeConv2d_8x8p32to8 = {
     .check = transpose_conv_check,
     .ctor = node_alloc_common,
     .dtor = node_free_common,
-    .n_inputs = NN_IOCOUNT(13),
+    .n_inputs = NN_IOCOUNT_RANGE(13,14),
     .n_outputs = NN_IOCOUNT(3),
     .flags = NN_NODE_FLAG_CLS_TRANSPOSECONV
 };

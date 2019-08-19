@@ -62,8 +62,8 @@ static int max_execute(struct nn_node *self, struct nn_graph *nn)
 }
 
 
-BROADCAST_STRIDE_11_FUNC(minimum_f_stride_11, float, fminf)
-BROADCAST_STRIDE_10_FUNC(minimum_f_stride_10, float, fminf)
+BROADCAST_STRIDE_11_FUNC(minimum_f_stride_11, float, float, fminf)
+BROADCAST_STRIDE_10_FUNC(minimum_f_stride_10, float, float, fminf)
 
 static const struct elementwise_funcs Minimum_f_funcs = {
 	.op_stride_11 = minimum_f_stride_11,
@@ -75,10 +75,10 @@ static const struct elementwise_funcs Minimum_f_funcs = {
 
 static int minimum_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return nn_elementwise_with_broadcast(self, nn, &Minimum_f_funcs, NULL);
+	return nn_elementwise_with_broadcast(self, nn, &Minimum_f_funcs,NULL,NULL, NULL);
 }
-BROADCAST_STRIDE_11_FUNC(maximum_f_stride_11, float, fmaxf)
-BROADCAST_STRIDE_10_FUNC(maximum_f_stride_10, float, fmaxf)
+BROADCAST_STRIDE_11_FUNC(maximum_f_stride_11, float, float, fmaxf)
+BROADCAST_STRIDE_10_FUNC(maximum_f_stride_10, float, float, fmaxf)
 
 static const struct elementwise_funcs Maximum_f_funcs = {
 	.op_stride_11 = maximum_f_stride_11,
@@ -90,7 +90,7 @@ static const struct elementwise_funcs Maximum_f_funcs = {
 
 static int maximum_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return nn_elementwise_with_broadcast(self, nn, &Maximum_f_funcs, NULL);
+	return nn_elementwise_with_broadcast(self, nn, &Maximum_f_funcs,NULL,NULL, NULL);
 }
 
 struct nn_node_ops nn_ops_for_Min_f = {

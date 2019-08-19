@@ -224,7 +224,6 @@ float calculateIntersection_8(const struct Box b1, const struct Box b2) {
 }
 
 static int multiclassnms_8_execute(struct nn_node *self, struct nn_graph *nn) {
-
     //Input tensors setup
     //[BATCH,1,BOXES,4]
     const uint32_t input_boxes_count = self->inputs[INPUT_BOXES_IDX]->shape.width;                  //number of boxes per image
@@ -288,6 +287,7 @@ static int multiclassnms_8_execute(struct nn_node *self, struct nn_graph *nn) {
     size_t boxes_records_array_size = batch_count * input_boxes_count * input_scores_classes_count * sizeof(struct BoxRecord_8);
     size_t boxes_records_ref_array_size = batch_count * input_boxes_count * input_scores_classes_count * sizeof(struct BoxRecord_8_Ref);
     size_t filtered_boxes_hashtable_size = (1 + max_detection_per_class) * input_scores_classes_count * sizeof(uint32_t);  //(number of filtered boxes per class + max number of boxes per class)*max number of classes
+
 #if defined(HEXAGON_V65) || defined(HEXAGON_V66)
     size_t validnum_size = input_boxes_count * sizeof(uint32_t);
     size_t validclassidx_size = input_boxes_count * input_scores_classes_count * sizeof(uint16_t);
@@ -360,9 +360,6 @@ static int multiclassnms_8_execute(struct nn_node *self, struct nn_graph *nn) {
             return errlog(nn,"multiclassnms could not get enough VTCM to validate score \n");
         }
         // To guarantee that OS has mapped the TCM range in a single page
-        if (1 != nn_os_vtcm_query_page_count(nn)) {
-            return errlog(nn,"multiclassnms vtcm is not within single page \n");
-        }
         int offset = 0;
         struct validscore_thread_info thrinfo[VALIDATION_MAX_THREADS];
         for(uint32_t i = 0; i < num_threads; i++) {

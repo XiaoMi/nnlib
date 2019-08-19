@@ -99,7 +99,6 @@ static inline void qselect_hvx(
     /* Assumption: Range of a_offset and b_offset to be with between 0 to 255 */
     a_offset = (a_offset << 8) | a_offset;
     b_offset = (b_offset << 8) | b_offset;
-    qzero = (qzero << 8) | qzero;
     a_offset = Q6_R_combine_RlRl(a_offset, a_offset);
     b_offset = Q6_R_combine_RlRl(b_offset, b_offset);
     a_mult = Q6_R_combine_RlRl(a_mult, a_mult);
@@ -112,6 +111,9 @@ static inline void qselect_hvx(
     HVX_Vector vqzero = q6op_Vh_vsplat_R(qzero);
 
     // loop through each ${sizeof(HVX_Vector)} bytes
+    l2fetch(a, 128, 128, (elem + 127) / 128u);
+    l2fetch(b, 128, 128, (elem + 127) / 128u);
+
     int i;
     for (i = 0; i < loopcount; i++) {
         HVX_VectorPred qc = *ptr_c++;

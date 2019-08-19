@@ -35,7 +35,6 @@
  */
 #ifndef NN_ASM_OPS_H
 #define NN_ASM_OPS_H 1
-
 /*
  */
 
@@ -99,6 +98,7 @@ void quantize_asm(
 void vmemcpy_asm(void *dst, const void *src, int len);
 void vmemset_asm(void *dst, int val, int len);
 void vmemset_nt_asm(void *dst, int val, int len);
+void vmemset_short_asm(void *dst, int val, int len);
 #endif
 
 // 2d vector memcpy with src_pitch, dst_pitch being multiples of  vector
@@ -267,6 +267,20 @@ void biasadd_relu_requant_nonaligned_hvx(
 	const uint32_t fixed_recip_level_size); 
 
 /* transpose the weights matrix and shufle blocks of 32 together */
+void transpack_16(
+	const uint16_t *in,
+	int k,
+	int m,
+	uint16_t * out) ;
+
+void pad2d_16(
+	const uint16_t* input_data,
+	int input_height,
+	int input_width,
+	uint16_t* output_data,
+	int output_height,
+	int output_width,
+	int pad_value);
 void transpack(
 	const uint8_t *in,
 	int k,
@@ -504,6 +518,15 @@ void padzap_part(
 	int row_iters,
 	int w);
 
+void padzap16_part(
+	uint16_t *start,
+	uint16_t val,
+	int d32_stride,
+	int d32_iters,
+	int row_stride,
+	int row_iters,
+	int w);
+
 void gvint_asm(
 	const uint8_t *in_data_d32,
 	int32_t *integral_out,
@@ -527,7 +550,7 @@ void gvsuma_asm(
 	int32_t offset);
 
 void gsum_asm(const uint8_t *xi,
-              const int32_t *zi,
+              int32_t *zi,
               int in_width,
               int in_depth,
               int out_height,
@@ -538,7 +561,7 @@ void gsum_asm(const uint8_t *xi,
 void gvconv2dbbb_v60_asm(
 	const uint8_t *input,
 	const uint8_t *weights,
-	const uint8_t *output,
+	uint8_t *output,
 	int32_t in_width,
 	int32_t out_next_row,
 	int32_t out_width,
@@ -551,7 +574,8 @@ void gvconv2dbbb_v60_asm(
 	const int32_t *suma,
 	int32_t next_suma,
 	int32_t *minmax_buf,
-	uint32_t recip_val);
+	uint32_t const *recip_vals,
+	int32_t zshift );
 
 void gvconv2dbbb_v66_asm(
 	const uint8_t *input,
@@ -572,7 +596,7 @@ void gvconv2dbbb_v66_asm(
 	int32_t skip_col,
 	int32_t out_next_d32,
 	int32_t nslice,
-        const int32_t *equalize);
+	int32_t recip_shamt); //const int32_t *equalize);
 
 void gvconv2dbbbs1_d16_v66_asm( //special case for depths 48,80 etc.
 	const uint8_t *input,
@@ -593,7 +617,7 @@ void gvconv2dbbbs1_d16_v66_asm( //special case for depths 48,80 etc.
 	int32_t skip_col,
 	int32_t out_next_d32,
 	int32_t nslice,
-        const int32_t *equalize);
+	int32_t recip_shamt); //const int32_t *equalize);
 
 void gvconv2dbbbs1_v66_asm(
 	const uint8_t *input,
@@ -614,7 +638,7 @@ void gvconv2dbbbs1_v66_asm(
 	int32_t skip_col,
 	int32_t out_next_d32,
 	int32_t nslice,
-        const int32_t *equalize);
+	int32_t recip_shamt); //const int32_t *equalize);
 
 void gvconv2dbbbs1x4_v66_asm(
 	const uint8_t *input,
@@ -635,7 +659,7 @@ void gvconv2dbbbs1x4_v66_asm(
 	int32_t nc2, 
 	int32_t out_next_d32,
 	int32_t nslice,
-        const int32_t *equalize);
+	int32_t recip_shamt); //const int32_t *equalize);
 
 extern const unsigned char integral_control[];
 
@@ -755,6 +779,24 @@ void dwconv3x3bbb_unsigned_s2_v60_asm(
 	int32_t filt_offset,
 	int32_t padding );
 
+void dwconv2dhhh_MxN_asm(
+        const uint16_t *in_buf,
+        const int16_t  *filt,
+        uint16_t  *out_buf,
+        int next_in_width,
+        int next_out_width,
+        int next_in_width_32,
+        int next_out_width_32,
+        int depth,
+        int out_width,
+        int out_height,
+        int filt_width,
+        int filt_height,
+        const int32_t *bias_sum,
+        int32_t *max,
+        int32_t recip_level,
+        int recip_shift,
+        int stride_v_h);
 typedef void (*dwconv_t)(
 	const uint8_t *input, 
 	const uint8_t *weights,
@@ -772,6 +814,196 @@ typedef void (*dwconv_t)(
 	int32_t stride_height,
 	int32_t filt_offset, 
 	int32_t padding );
+
+typedef void (*dwconv2dbbb_t)(
+   const uint8_t *in_buf,
+   const uint8_t  *filt,
+   uint8_t  *out_buf,
+   int32_t next_in_width,
+   int32_t next_out_width,
+   int32_t next_in_width_32,
+   int32_t next_out_width_32,
+   int32_t depth,
+   int32_t out_width,
+   int32_t out_height,
+   int32_t filt_height,
+   int32_t filt_zero,
+   const int32_t *bias_sum,
+   int32_t *max,
+   const uint32_t *recip_level,
+   int32_t recip_shift,
+   int32_t stride_height,
+   HVX_Vector * scratch_buf,
+   int32_t  left_skip);
+
+void dwconv2dbbb_s1_5xN_asm(
+   const uint8_t *in_buf,
+   const uint8_t  *filt,
+   uint8_t  *out_buf,
+   int32_t next_in_width,
+   int32_t next_out_width,
+   int32_t next_in_width_32,
+   int32_t next_out_width_32,
+   int32_t depth,
+   int32_t out_width,
+   int32_t out_height,
+   int32_t filt_height,
+   int32_t filt_zero,
+   const int32_t *bias_sum,
+   int32_t *max,
+   const uint32_t *recip_level,
+   int32_t recip_shift,
+   int32_t stride_height,
+   HVX_Vector * scratch_buf,
+   int32_t  left_skip);
+
+void dwconv2dbbb_s2_7xN_asm(
+   const uint8_t *in_buf,
+   const uint8_t  *filt,
+   uint8_t  *out_buf,
+   int32_t next_in_width,
+   int32_t next_out_width,
+   int32_t next_in_width_32,
+   int32_t next_out_width_32,
+   int32_t depth,
+   int32_t out_width,
+   int32_t out_height,
+   int32_t filt_height,
+   int32_t filt_zero,
+   const int32_t *bias_sum,
+   int32_t *max,
+   const uint32_t *recip_level,
+   int32_t recip_shift,
+   int32_t stride_height,
+   HVX_Vector * scratch_buf,
+   int32_t  left_skip);
+
+void dwconv2dbbb_s1_7xN_asm(
+   const uint8_t *in_buf,
+   const uint8_t  *filt,
+   uint8_t  *out_buf,
+   int32_t next_in_width,
+   int32_t next_out_width,
+   int32_t next_in_width_32,
+   int32_t next_out_width_32,
+   int32_t depth,
+   int32_t out_width,
+   int32_t out_height,
+   int32_t filt_height,
+   int32_t filt_zero,
+   const int32_t *bias_sum,
+   int32_t *max,
+   const uint32_t *recip_level,
+   int32_t recip_shift,
+   int32_t stride_height,
+   HVX_Vector * scratch_buf,
+   int32_t  left_skip);
+
+void dwconv2dbbb_s2_5xN_asm(
+   const uint8_t *in_buf,
+   const uint8_t  *filt,
+   uint8_t  *out_buf,
+   int32_t next_in_width,
+   int32_t next_out_width,
+   int32_t next_in_width_32,
+   int32_t next_out_width_32,
+   int32_t depth,
+   int32_t out_width,
+   int32_t out_height,
+   int32_t filt_height,
+   int32_t filt_zero,
+   const int32_t *bias_sum,
+   int32_t *max,
+   const uint32_t *recip_level,
+   int32_t recip_shift,
+   int32_t stride_height,
+   HVX_Vector * scratch_buf,
+   int32_t  left_skip);
+
+void dwconv2dbbb_s1_3xN_asm(
+   const uint8_t *in_buf,
+   const uint8_t  *filt,
+   uint8_t  *out_buf,
+   int32_t next_in_width,
+   int32_t next_out_width,
+   int32_t next_in_width_32,
+   int32_t next_out_width_32,
+   int32_t depth,
+   int32_t out_width,
+   int32_t out_height,
+   int32_t filt_height,
+   int32_t filt_zero,
+   const int32_t *bias_sum,
+   int32_t *max,
+   const uint32_t *recip_level,
+   int32_t recip_shift,
+   int32_t stride_height,
+   HVX_Vector * scratch_buf,
+   int32_t  left_skip);
+
+void dwconv2dbbb_s1_3x3_asm(
+   const uint8_t *in_buf,
+   const uint8_t  *filt,
+   uint8_t  *out_buf,
+   int32_t next_in_width,
+   int32_t next_out_width,
+   int32_t next_in_width_32,
+   int32_t next_out_width_32,
+   int32_t depth,
+   int32_t out_width,
+   int32_t out_height,
+   int32_t filt_height,
+   int32_t filt_zero,
+   const int32_t *bias_sum,
+   int32_t *max,
+   const uint32_t *recip_level,
+   int32_t recip_shift,
+   int32_t stride_height,
+   HVX_Vector * scratch_buf,
+   int32_t  left_skip);
+
+void dwconv2dbbb_s2_3x3_asm(
+   const uint8_t *in_buf,
+   const uint8_t  *filt,
+   uint8_t  *out_buf,
+   int32_t next_in_width,
+   int32_t next_out_width,
+   int32_t next_in_width_32,
+   int32_t next_out_width_32,
+   int32_t depth,
+   int32_t out_width,
+   int32_t out_height,
+   int32_t filt_height,
+   int32_t filt_zero,
+   const int32_t *bias_sum,
+   int32_t *max,
+   const uint32_t *recip_level,
+   int32_t recip_shift,
+   int32_t stride_height,
+   HVX_Vector * scratch_buf,
+   int32_t  left_skip);
+
+void dwconv2dbbb_s2_3xN_asm(
+   const uint8_t *in_buf,
+   const uint8_t  *filt,
+   uint8_t  *out_buf,
+   int32_t next_in_width,
+   int32_t next_out_width,
+   int32_t next_in_width_32,
+   int32_t next_out_width_32,
+   int32_t depth,
+   int32_t out_width,
+   int32_t out_height,
+   int32_t filt_height,
+   int32_t filt_zero,
+   const int32_t *bias_sum,
+   int32_t *max,
+   const uint32_t *recip_level,
+   int32_t recip_shift,
+   int32_t stride_height,
+   HVX_Vector * scratch_buf,
+   int32_t  left_skip);
+
 
 void scalemem_d32_hvx(
 	uint8_t * ptr_out,
@@ -798,7 +1030,8 @@ typedef void (*inconv2d_t) (
 	const int32_t *biasbuf,
 	const int32_t *ptr_suma,
 	int next_suma,
-	int stride_height_width);
+	int stride_height_width,
+	int recip_shamt);
 
 void inconv2dbbb_s1_v60_asm(
 	const uint8_t * input,
@@ -816,7 +1049,8 @@ void inconv2dbbb_s1_v60_asm(
 	const int32_t *biasbuf,
 	const int32_t *ptr_suma,
 	int next_suma,
-	int stride_height_width);
+	int stride_height_width,
+	int recip_shamt);
 
 void inconv2dbbb_v60_asm(
 	const uint8_t * input,
@@ -834,7 +1068,8 @@ void inconv2dbbb_v60_asm(
 	const int32_t *biasbuf,
 	const int32_t *ptr_suma,
 	int next_suma,
-	int stride_height_width);
+	int stride_height_width,
+	int recip_shamt);
 
 void gvconv2dbbb_circ_d32_v65_asm(
         const uint8_t * input,
@@ -855,8 +1090,7 @@ void gvconv2dbbb_circ_d32_v65_asm(
         uint8_t * circ_buffer,
         int zshift, 
         int in_offset,
-        const uint8_t * store_ctrl,
-        const int32_t * equalize);
+        const uint8_t * store_ctrl);
 
 void gvconv2dbbb_circ_d64_v65_asm(
         const uint8_t * input,
@@ -877,8 +1111,7 @@ void gvconv2dbbb_circ_d64_v65_asm(
         uint8_t * circ_buffer,
         int zshift, 
         int in_offset,
-        const uint8_t * store_ctrl,
-        const int32_t * equalize);
+        const uint8_t * store_ctrl);
 
 void gvconv2dbbb_circ6_d32_v65_asm(
         const uint8_t * input,
@@ -899,8 +1132,7 @@ void gvconv2dbbb_circ6_d32_v65_asm(
         uint8_t * circ_buffer,
         int zshift,
         int in_offset,
-        const uint8_t * store_ctrl,
-        const int32_t * equalize);
+        const uint8_t * store_ctrl);
 
 void gvconv2dbbb_circ6_d64_v65_asm(
         const uint8_t * input,
@@ -921,8 +1153,7 @@ void gvconv2dbbb_circ6_d64_v65_asm(
         uint8_t * circ_buffer,
         int zshift,
         int in_offset,
-        const uint8_t * store_ctrl,
-        const int32_t * equalize);
+        const uint8_t * store_ctrl);
 
 typedef void (*conv2d_t)(
         const uint8_t *,
@@ -943,9 +1174,7 @@ typedef void (*conv2d_t)(
         uint8_t *,
         int,
         int,
-        const uint8_t *,
-        const int32_t *);
-
+        const uint8_t *);
 #if 0
 typedef void (*conv2d_t)(
         const uint8_t *,
@@ -1133,7 +1362,8 @@ void inconv2dbbb332_v60_asm(
         const int32_t *biasbuf,
         const int32_t *ptr_suma,
         int next_suma,
-        int stride_height_width);
+        int stride_height_width,
+    	int recip_shamt);
 
 void fcsuma_asm(const uint8_t * input,
                 int width,
@@ -1186,4 +1416,52 @@ void load_indata_d2(
 	int32_t in_offset, 
 	uint8_t *out,
 	int32_t remains);
-#endif
+
+// this is in shape_utils.c, but convenient to declare
+// in this header...
+// These funcs have the same prototypes as memset.
+// Note that dst must be aligned to the element size; 'n' is in elements,
+// not bytes.
+void *memset_32( void * dst, int val, size_t n);
+void *memset_16( void * dst, int val, size_t n);
+
+// more convenient wrappers
+static inline void
+memset_int32( int32_t * ptr, int32_t val, int n ){
+	memset_32(ptr,val, n);
+}
+static inline void
+memset_uint32( uint32_t * ptr, uint32_t val, int n)
+{
+	memset_32(ptr, (int)val, n );
+}
+
+static inline void
+memset_float( float * ptr, float val, int n){
+	union {
+		float as_f;
+		int32_t as_i32;
+	} uu  = { val };
+	memset_32(ptr, uu.as_i32, n );
+}
+static inline void
+memset_int16( int16_t * ptr, int val, int n ){
+	memset_16(ptr,val, n);
+}
+static inline void
+memset_uint16( uint16_t * ptr, int val, int n)
+{
+	memset_16(ptr, val, n );
+}
+
+void d32_16_to_88_cn(
+	uint8_t * ine8_ptr,
+	uint8_t * ino8_ptr,
+	const uint16_t * in16_ptr,
+	int width,
+	int height,
+	int depth
+);
+
+#endif // NN_ASM_OPS_H
+

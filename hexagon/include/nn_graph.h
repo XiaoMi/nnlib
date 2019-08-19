@@ -55,6 +55,8 @@
 #include <stdio.h>
 #include <nn_graph_earlywork.h>
 
+#include "nn_graph_looping.h"
+
 #define likely(cond)	(__builtin_expect(!!(cond), 1))
 #define unlikely(cond)	(__builtin_expect(!!(cond), 0))
 
@@ -188,7 +190,7 @@ struct nn_graph {
 	struct nn_node *tail;		// 'weak' tail pointer
 								// (may be null or not last; usually last though).
 	uint32_t node_count;		// may be inaccurate (use to e.g. estimate hash size)
-
+	nn_mutex_t scratch_mutex;
 	void *scratch;			// temporary storage
 	size_t scratch_size;		// size of scratch
 	int32_t scratch_nextalloc;	// next allocation offset
@@ -227,6 +229,8 @@ struct nn_graph {
 	uint32_t op_class_set;
 	int32_t priority;
 	struct nn_graph_batchseqstate batchseq;
+	struct nn_loopstack loopstack;
+	uint32_t expanded_outputs[NN_MAX_OUTPUTS];
 	
 	// Commandline options
 	int enable_graph_print;
@@ -442,13 +446,17 @@ void print_graph_checksum(struct nn_graph *nn);
 #define NN_NODE_FLAG_CLS_GROUPEDCONV    (1<<23)  //QuantizedGroupedConv2d_8x8p32to8
 #define NN_NODE_FLAG_CLS_DILATEDCONV	(1<<22)  //DilatedConv
 #define NN_NODE_FLAG_CLS_IMAGETRANSFORM	(1<<21)  //ImageTransform_f
+#define NN_NODE_FLAG_CLS_LOOP_CONTROL_NODE	(1<<20)  //Any loop control node
+#define NN_NODE_FLAG_CLS_DYNAMIC_TENSOR	(1<<19)  //Any nodes with dynamically sized output tensors
 
 // set of all 'classes' flags
 #define NN_NODE_FLAGS_SET\
     (NN_NODE_FLAG_CLS_QUANTIZE|NN_NODE_FLAG_CLS_REQUANTRANGE|NN_NODE_FLAG_CLS_QUANTMUL8TO32\
     |NN_NODE_FLAG_CLS_DWCONVF|NN_NODE_FLAG_CLS_CHANSHUFFLE|NN_NODE_FLAG_CLS_OEMNODE|NN_NODE_FLAG_CLS_SUPPORTS_ALIAS\
     |NN_NODE_FLAG_CLS_TRANSPOSECONV|NN_NODE_FLAG_CLS_GROUPEDCONV|NN_NODE_FLAG_CLS_DILATEDCONV\
-    |NN_NODE_FLAG_CLS_IMAGETRANSFORM)
+    |NN_NODE_FLAG_CLS_IMAGETRANSFORM\
+    |NN_NODE_FLAG_CLS_LOOP_CONTROL_NODE\
+	|NN_NODE_FLAG_CLS_DYNAMIC_TENSOR)
 
 // this defines the allowed range of input or output ports
 // (sub-struct of nn_node_ops)

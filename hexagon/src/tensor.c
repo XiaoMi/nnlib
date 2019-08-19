@@ -103,12 +103,12 @@ void print_tensor_to_file(struct nn_graph *nn, uint32_t id, uint32_t index, cons
 		errlog(nn,"Ooops... Couldn't open file '%s'", filename);
 		return;
 	} else {
-		logmsg(nn,1,"INFO: Writing '%s'", filename);
+		logmsg(nn,1,"INFO: Writing '%s' size=%d elements from %p (starting at %p) %dx%dx%dx%d", filename, elementsize, t->data, tensor_location(t,0,0,0,0), t->shape.batches, t->shape.height, t->shape.width, t->shape.depth);
 	}
 
-	uint8_t *start = t->data;
-	uint8_t *next = t->data;
-	uint8_t *last = ((uint8_t *) t->data) - 1;
+	uint8_t *start = 0;
+	uint8_t *next = 0;
+	uint8_t *last = 0;
 	int len = 0;
 	int total_len = 0;
 	for (int b=0; b < t->shape.batches; b++) {
@@ -123,10 +123,12 @@ void print_tensor_to_file(struct nn_graph *nn, uint32_t id, uint32_t index, cons
 							if (next == last+1) {
 								last = next;
 								len++;
-								total_len++;
 							} else {
-								fwrite(start, 1, len, outfile);
-								len = 0;
+								if (len) {
+									fwrite(start, 1, len, outfile);
+									total_len+=len;
+								}
+								len = 1;
 								start = last = next;
 							}
 						}
@@ -137,6 +139,7 @@ void print_tensor_to_file(struct nn_graph *nn, uint32_t id, uint32_t index, cons
 	}
 	if (len) {
 		fwrite(start, 1, len, outfile);
+		total_len+=len;
 	}
 	fclose(outfile);
 #endif

@@ -924,29 +924,22 @@ static inline HVX_Vector jointly_quantize(HVX_Vector ind_a, HVX_Vector va_offset
 	HVX_VectorPair a_sub = Q6_Wh_vsub_VubVub(ind_a, va_offset);
 
 	// ((a - offset) * a_mult) ~ h*h->w
-	HVX_VectorPair a_mult_res_lo = Q6_Ww_vmpy_VhVh(Q6_V_lo_W(a_sub), va_mult);
-	HVX_VectorPair a_mult_res_hi = Q6_Ww_vmpy_VhVh(Q6_V_hi_W(a_sub), va_mult);
+	HVX_VectorPair a_mult_res_lo = Q6_Ww_vmpy_VhVuh(Q6_V_lo_W(a_sub), va_mult);
+	HVX_VectorPair a_mult_res_hi = Q6_Ww_vmpy_VhVuh(Q6_V_hi_W(a_sub), va_mult);
 
 	// (((a - offset) * a_mult)) >> shift) ~ w*w->h
-	HVX_Vector shift_a_lo = Q6_Vh_vasr_VwVwR(Q6_V_hi_W(a_mult_res_lo), Q6_V_lo_W(a_mult_res_lo), shift);
-	HVX_Vector shift_a_hi = Q6_Vh_vasr_VwVwR(Q6_V_hi_W(a_mult_res_hi), Q6_V_lo_W(a_mult_res_hi), shift);
+	HVX_Vector shift_a_lo = Q6_Vh_vasr_VwVwR_rnd_sat(Q6_V_hi_W(a_mult_res_lo), Q6_V_lo_W(a_mult_res_lo), shift);
+	HVX_Vector shift_a_hi = Q6_Vh_vasr_VwVwR_rnd_sat(Q6_V_hi_W(a_mult_res_hi), Q6_V_lo_W(a_mult_res_hi), shift);
 
-	// shuffle high and low to convert from words to half words
-	// uint8 [x,0,y,0,z,0,...], [] -> shuffle -> [a,b,c,....0,0,0...]
+	// shuffle odd and even so that the elements are back to the original order
 	HVX_VectorPair ashuff = Q6_W_vshuff_VVR(shift_a_hi, shift_a_lo, -2);
 
 	// (((a - offset) * a_mult)) >> shift) + qzero ~ h*h->h
-	HVX_Vector joint_a_even = Q6_Vh_vadd_VhVh_sat(Q6_V_lo_W(ashuff), vqzero); // (((a - a_offset) * a_mult) >> shift) + qzero
-	HVX_Vector joint_a_odd = Q6_Vh_vadd_VhVh_sat(Q6_V_hi_W(ashuff), vqzero);  // (((a - a_offset) * a_mult) >> shift) + qzero
+	HVX_Vector joint_a_lo = Q6_Vh_vadd_VhVh_sat(Q6_V_lo_W(ashuff), vqzero);
+	HVX_Vector joint_a_hi = Q6_Vh_vadd_VhVh_sat(Q6_V_hi_W(ashuff), vqzero);
 
-	// deal high and low to restore element order
-	HVX_Vector joint_a_lo = Q6_Vb_vdeal_Vb(joint_a_even);
-	HVX_Vector joint_a_hi = Q6_Vb_vdeal_Vb(joint_a_odd);
+	HVX_Vector va = Q6_Vub_vpack_VhVh_sat(joint_a_hi,joint_a_lo);
 
-	// Each vector now has 64 elements.
-	// rotate high to the last 64 bits and mux together
-	// HVX_Vector rotated_a = Q6_V_vror_VR(joint_a_hi, 64);
-	HVX_Vector va = Q6_V_vmux_QVV(Q6_Q_vsetq_R(64), joint_a_lo, Q6_V_vror_VR(joint_a_hi, 64));
 	return va;
 }
 

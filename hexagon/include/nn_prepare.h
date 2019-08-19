@@ -53,15 +53,23 @@
 #include "nn_axis.h"
 
 // output desc for scalar floats.
-static const struct output Output_ScalarFloat = {
+extern const struct output Output_ScalarFloat;
+/*
 	.rank = 4,
 	.max_sizes = {1, 1, 1, 1},
 	.elementsize = 4};
+*/
 
 void make_outputdesc_from_shape(struct output *outp, struct shape const *shp, int elsize, int add_d32_padding_unused);
 
-// extract shape from output desc; optionally add d32 padding
-void shape_from_outdesc(struct shape *shp, struct output const *outp, int add_d32_padding);
+// extract shape from output desc
+void shape_from_outputdesc(struct shape *shp, struct output const *outp);
+
+//legacy
+static inline
+void shape_from_outdesc(struct shape *shp, struct output const *outp, int add_d32_padding){
+	shape_from_outputdesc(shp,outp);
+}
 
 struct nn_node *create_node(
 	struct nn_graph *nn,
@@ -81,7 +89,7 @@ struct nn_node *create_convert(
 	struct nn_graph *nn,
 	int src_id,
 	int output_idx,
-	struct shape outsize,
+	struct shape const *outsize,
 	uint32_t operation);
 
 // find a node, but only if node_type == ntype
@@ -183,6 +191,44 @@ do_prepend_const_node(
 			data, data_len);
 	return (tens==NULL)?-1:0;
 }
+//
+// two functions to handle oversize d32 supernodes:
+// if a node meets the criteria, we prepend a QuantizedPadForConv_8_d32
+// (or QuantizedPadForConv_u16_d32) in front of it, and make it a VALID operation.
+// The PadForConv node sees the same window and stride tensors as are used in the conv,
+// so it can work out what padding is needed, and apply it.
+// There are two functions here:
+//   - oversize_d32_supernode_quick_check( node const * ) returns 1 if the node
+//        '*may*' be a candidate. This is a simple inline function, for use in graph
+//         traversal loop.
+//   - handle_oversize_d32_supernode( nn_graph *, node ** nodep )
+//        will do the proper checking, and change if needed.
+//      It returns <0 if there is a fatal error.
+//
+static inline int
+oversize_d32_supernode_quick_check( struct nn_graph *nn, struct nn_node const * node)
+{
+	// this is just a check to see if (a) is one of the supernode types
+	//  (b) is not 'VALID' padding.
+	int ty = node->node_type;
+	if( ! (
+		   ty == OP_Supernode_8x8p8to8_d32
+		|| ty == OP_DepthwiseSupernode_8x8p8to8_d32
+		|| ty == OP_Supernode_8x8p32to8_d32
+		|| ty == OP_DepthwiseSupernode_8x8p32to8_d32
+		|| ty == OP_Supernode_u16x16p16to16_d32
+		|| ty == OP_Supernode_u16x16p32to16_d32 )){
+		return 0;
+	}
+	if( node->padding == NN_PAD_VALID){
+		return 0;
+	}
+	return 1;
+}
+// in prepare_utils.c
+int handle_oversize_d32_supernode( struct nn_graph *nn,  struct nn_node ** nodep);
+
+
 
 //
 // returns 0 iff
@@ -323,5 +369,8 @@ change_multi_output_refs_table( struct nn_graph * nn,
 		int n_outputs,					// number of outputs to rewire
 		struct input const new_inpref[] );  // array of new
 
+
+// used to convert a 13-input supernode (with channelscale) to 12
+int handle_channelscaled_supernode( struct nn_graph *nn, struct nn_node *nodep);
 
 #endif //NN_PREPARE_H

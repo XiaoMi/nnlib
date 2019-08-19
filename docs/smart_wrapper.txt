@@ -1,0 +1,76 @@
+/*
+ * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted (subject to the limitations in the
+ * disclaimer below) provided that the following conditions are met:
+ *
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *
+ *    * Redistributions in binary form must reproduce the above
+ *      copyright notice, this list of conditions and the following
+ *      disclaimer in the documentation and/or other materials provided
+ *      with the distribution.
+ *
+ *    * Neither the name of The Linux Foundation nor the names of its
+ *      contributors may be used to endorse or promote products derived
+ *      from this software without specific prior written permission.
+ *
+ * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
+ * GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
+ * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+ * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+ * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ */
+
+Purpose:
+========
+"Smart Wrapper" detects the SOC and automatically loads the correct
+Skel library to maximize performance.
+
+"Smart Wrapper" builds on top of "Graph Wrapper" functionality and 
+is dependent on those source files.
+
+Source code:
+============
+    hexagon
+       |- host
+       |    |- hexnn_dsp_api.c
+       |    |- hexnn_dsp_api.h
+       |    |- hexnn_dsp_api_impl.c
+       |    |- hexnn_dsp_domians_api.c
+       |    |- hexnn_dsp_domains_api.h
+       |    |- hexnn_dsp_domains_api_impl.c
+       |    |- hexnn_dsp_smart_wrapper_api.c
+       |    |- hexnn_dsp_smart_wrapper_api.h
+       |    |- hexnn_graph_wrapper.cpp
+       |    |- hexnn_graph_wrapper.hpp
+       |    |_ hexnn_soc_defines.h
+       |
+       |_ interface
+            |_ hexnn_graph_wrapper_interface.h
+
+Interface:
+==========
+There is no interface change required. Application can use existing call flow.
+In order to use this feature, application must only update makefile by including
+new files instead of hexagon_nn_stub.c.
+
+Please look at the example makefile under examples/wrapperexample/android.min.
+This is a stand-alone application that builds with "Smart Wrapper" turned on
+and makes some common hexagon-nn calls.
+
+Prerequisite:
+=============
+1. All of the prerequisites for building "Graph Wrapper" must be met. Please look
+   at docs/graph_wrapper.txt for more information. 

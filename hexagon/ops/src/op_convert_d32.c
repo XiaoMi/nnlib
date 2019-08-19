@@ -1523,7 +1523,7 @@ static int convert_to_d32_16b( struct nn_node *self, struct nn_graph *nn )
 
 	// process optional padding
 	int d_pad_before = 0;		// defaults
-	int w_pad_left = 2;
+	int w_pad_left = 4;
 	int w_pad_right_min = 0;
 	int h_pad_top = 4;
 
@@ -1536,7 +1536,7 @@ static int convert_to_d32_16b( struct nn_node *self, struct nn_graph *nn )
 			h_pad_top = get_option( nn, self->inputs[4], h_pad_top, "height padding", MAX_PADDING_HEIGHT );
 	}
 	// find wtotal, rounded up to even...
-	int wtotal = (w_pad_left + w_in + w_pad_right_min + 1)&~1;
+	int wtotal = (w_pad_left + w_in + w_pad_right_min + 3)&~3;
 	// total padding must be >= 3
 	int k = w_in+4 - wtotal;
 	if( k >=2 ) wtotal += k&~1;	// add 2 or 4 as needed.
@@ -1588,6 +1588,10 @@ static int convert_to_d32_16b( struct nn_node *self, struct nn_graph *nn )
 			for(int id32 = 0; id32 < tout.nd32; id32++){
 				int dn = min_i32( 32, d_in-32*id32);	// depths to copy (1..32)
 
+				if (dn  < 32) {
+					// fill depth padding with actual 0
+					nn_mcmanager_vmemset32_2d(nn, &mcman, p_out + elbytes * dn, 0, (32-dn)*elbytes, w_in, 32 * elbytes);
+				}
 				nn_mcmanager_vmemcpy_2d( nn, &mcman,
 						dn*elbytes,	w_in,					// width, height to copy
 						p_out,  32*elbytes,						// dst, dst_stride

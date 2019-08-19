@@ -331,8 +331,8 @@ check_heatmap_maxpk_strategy( struct nn_graph *nn, struct nn_node *self, int is_
 		// each occupies 4-byte slot over 3 vectors. Total # of vectors is thus
 		// heatmaps/32 (rounded up) times 3.
 		// (each group of 3 vectors in the array contains 32 3x3 windows).
-		//
-		int winbuf_size = ((heatmaps+31)/32u)*3*128;  // this many bytes per row
+		// Make a full group of 12 vecs for each 128 heat maps
+		int winbuf_size = ((heatmaps+127)/128u)*3*4*128;  // this many bytes per row
 		tmp = nn_scratch_alloc(nn, winbuf_size);
 		if( tmp == NULL) return errlog(nn,"scratch alloc");
 		info->winbuf_ptr = tmp;

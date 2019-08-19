@@ -43,9 +43,9 @@
 
 // add vector to vector
 #define OPERATOR_ADD(X,Y) ((X)+(Y))
-BROADCAST_STRIDE_11_FUNC( add_f_stride_11, float, OPERATOR_ADD)
+BROADCAST_STRIDE_11_FUNC( add_f_stride_11, float, float, OPERATOR_ADD)
 // add vector to scalar
-BROADCAST_STRIDE_10_FUNC( add_f_stride_10, float, OPERATOR_ADD )
+BROADCAST_STRIDE_10_FUNC( add_f_stride_10, float, float, OPERATOR_ADD )
 
 
 static const struct elementwise_funcs Add_f_funcs = {
@@ -59,16 +59,16 @@ static const struct elementwise_funcs Add_f_funcs = {
 
 static int add_f_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return nn_elementwise_with_broadcast( self, nn, &Add_f_funcs, NULL );
+	return nn_elementwise_with_broadcast( self, nn, &Add_f_funcs, NULL, NULL, NULL );
 }
 
 
 
 /// Add int32
 
-BROADCAST_STRIDE_11_FUNC(add_int32_stride_11, int32_t, OPERATOR_ADD)
+BROADCAST_STRIDE_11_FUNC(add_int32_stride_11, int32_t, int32_t, OPERATOR_ADD)
 // subtract scalar from vector
-BROADCAST_STRIDE_10_FUNC(add_int32_stride_10, int32_t, OPERATOR_ADD)
+BROADCAST_STRIDE_10_FUNC(add_int32_stride_10, int32_t, int32_t, OPERATOR_ADD)
 
 static const struct elementwise_funcs Add_int32_funcs = {
 	.op_stride_11 = add_int32_stride_11,
@@ -81,7 +81,7 @@ static const struct elementwise_funcs Add_int32_funcs = {
 
 static int add_int32_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	return nn_elementwise_with_broadcast( self, nn, &Add_int32_funcs, NULL );
+	return nn_elementwise_with_broadcast( self, nn, &Add_int32_funcs, NULL, NULL, NULL );
 }
 
 struct nn_node_ops nn_ops_for_Add_f = {

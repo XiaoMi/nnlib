@@ -1,8 +1,42 @@
+/*
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted (subject to the limitations in the
+ * disclaimer below) provided that the following conditions are met:
+ *
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *
+ *    * Redistributions in binary form must reproduce the above
+ *      copyright notice, this list of conditions and the following
+ *      disclaimer in the documentation and/or other materials provided
+ *      with the distribution.
+ *
+ *    * Neither the name of The Linux Foundation nor the names of its
+ *      contributors may be used to endorse or promote products derived
+ *      from this software without specific prior written permission.
+ *
+ * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
+ * GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
+ * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+ * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+ * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ */
 
 
-// Refer: FlowNet2.0 https://lmb.informatik.uni-freiburg.de/Publications/2017/IMKDB17/
-
-
+/*
+ * Includes code used with permission of University of Freiburg.
+ */
 #include <nn_graph.h>
 #include <quantize.h>
 #include "hvx_inlines.h"
@@ -28,7 +62,7 @@ l2fetch_linear( uint8_t const * addr, unsigned len){
 #define FALSE 0
 #endif
 #ifndef BOOL
-#define BOOL int32_t
+#define BOOL int32_t 
 #endif
 
 
@@ -52,7 +86,7 @@ typedef void (*correlation1d_fp)(
 	int32_t quantized_multiplier, int32_t shift_bit, ShiftType direction);
 
 typedef struct
-{
+{	
 	uint8_t thread_id;
 	uint8_t num_threads;
 	uint8_t *a_data;
@@ -98,7 +132,7 @@ typedef struct
 } correlation1d_thread_info;
 
 
-static int correlation1d_execute_ref(struct nn_node* self, struct nn_graph* nn)
+static int correlation1d_execute_ref(struct nn_node* self, struct nn_graph* nn) 
 {
 	const struct tensor* a_tensor = self->inputs[0];
 	const struct tensor* b_tensor = self->inputs[1];
@@ -255,7 +289,7 @@ static int correlation1d_prepare(struct nn_node *self, struct nn_graph *nn, stru
 	uint8_t* out = (uint8_t*)out_tensor->data;
 	int32_t displacement = tensor_get_int32(displacement_tensor, 0);
 	int32_t shift = tensor_get_int32(shift_tensor, 0);
-
+   
 	float a_max_float = tensor_get_float(max_a_tensor, 0);
 	float a_min_float = tensor_get_float(min_a_tensor, 0);
 	float b_max_float = tensor_get_float(max_b_tensor, 0);
@@ -272,8 +306,8 @@ static int correlation1d_prepare(struct nn_node *self, struct nn_graph *nn, stru
 		return errlog(nn, "min or max too small");
 	}
 
-	float scale_A = (a_max_float - a_min_float) / 255;
-	float scale_B = (b_max_float - b_min_float) / 255;
+	float scale_A = (a_max_float - a_min_float) / 255;					
+	float scale_B = (b_max_float - b_min_float) / 255;					
 	float scale_Out = (out_max_float - out_min_float) / 255;
 
 	float scale = scale_A * scale_B / scale_Out;
@@ -394,8 +428,8 @@ static int prepare_work_ref(struct nn_node *self, struct nn_graph *nn, struct nn
 	float out_max_float = tensor_get_float(max_out_tensor, 0);
 	float out_min_float = tensor_get_float(min_out_tensor, 0);
 
-	float scale_A = (a_max_float - a_min_float) / 256;
-	float scale_B = (b_max_float - b_min_float) / 256;
+	float scale_A = (a_max_float - a_min_float) / 256;					
+	float scale_B = (b_max_float - b_min_float) / 256;					
 	float scale_Out = (out_max_float - out_min_float) / 256;
 
 	float scale = scale_A * scale_B / scale_Out;
@@ -422,7 +456,7 @@ static int prepare_work_ref(struct nn_node *self, struct nn_graph *nn, struct nn
 }
 
 static void correlation1d_thread_work(struct nn_graph *nn, void *work_info) {
-	correlation1d_thread_info* work = work_info;
+	correlation1d_thread_info* work = work_info;	
 	uint8_t *a_data = work->a_data;
 	uint8_t *b_data = work->b_data;
 	uint8_t  *out_data = work->out;
@@ -448,7 +482,7 @@ static void correlation1d_thread_work(struct nn_graph *nn, void *work_info) {
 	int jobno;
 	batchslice_decode bsdecode;
 	batchslice_decode_init(&bsdecode, work->inner_count);
-
+	
 	while(jobno = __sync_fetch_and_add(&work->jobno, 1), jobno < work->jobcount) {
 		int height_idx = batchslice_decode_update(&bsdecode, jobno);
 		int batch_idx = bsdecode.ibatch;
@@ -557,7 +591,7 @@ static int do_correlation1d_execute_hvx(struct nn_node *self, struct nn_graph *n
 	const struct tensor* max_out_tensor = self->inputs[9];
 	struct tensor* out_min = self->outputs[1];
 	struct tensor* out_max = self->outputs[2];
-
+	   
 	float out_max_float = tensor_get_float(max_out_tensor, 0);
 	float out_min_float = tensor_get_float(min_out_tensor, 0);
 
@@ -565,7 +599,7 @@ static int do_correlation1d_execute_hvx(struct nn_node *self, struct nn_graph *n
 		|| tensor_set_single_float(out_max, out_max_float) != 0){
 		return errlog(nn, "min or max too small");
 	}
-
+	
 
 	//process vectors
 	correlation1d_thread_info* thrinfo = (correlation1d_thread_info*)self->opaque;
@@ -588,7 +622,7 @@ static int correlation1d_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 	return do_correlation1d_execute_hvx(self, nn);
 }
 
-static int correlation1d_check_ref(struct nn_node* self, struct nn_graph* nn)
+static int correlation1d_check_ref(struct nn_node* self, struct nn_graph* nn) 
 {
 	if(self->n_inputs != 10) return errlog(nn,"correalation1d f id %x wrong # inputs",self->node_id);
 	if(self->n_outputs != 3) return errlog(nn,"correalation1d f wrong # outputs");

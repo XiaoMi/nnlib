@@ -35,3 +35,8 @@ Try the "calculator" or other examples in the SDK to make sure you can execute o
 
 6) adb push hexagon_Release_dynamic_toolv83_v6x/ship/libhexagon_nn_skel.so /system/vendor/lib/rfsa/adsp/
 	 (Replace with the actual V= path that gets created from the appropriate option from above)
+
+7) To test it could run successfully, after (3), 
+adb shell mkdir -p /data/local/tmp/hexagon_nn
+adb push android_Release/ship/controller_test /data/local/tmp/hexagon_nn/
+adb shell "LD_LIBRARY_PATH=/data/local/tmp/hexagon_nn /data/local/tmp/hexagon_nn/controller_test"

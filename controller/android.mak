@@ -20,6 +20,13 @@ libhexagon_controller_DLLS += $(hexagon_controller_lib_DLLS)
 libhexagon_controller_LIBS += $(hexagon_controller_lib_LIBS)
 libhexagon_controller_LD_FLAGS += $(hexagon_controller_lib_LD_FLAGS)
 
+BUILD_EXES += controller_test
+
+controller_test_QAICIDLS += interface/hexagon_nn
+controller_test_C_SRCS += $V/hexagon_nn_stub controller/test
+controller_test_DLLS += libhexagon_controller libcdsprpc
+controller_test_LD_FLAGS += -llog
+
 BUILD_COPIES = \
    $(DLLS) \
    $(EXES) \

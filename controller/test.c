@@ -3,7 +3,10 @@
 
 int main(){
   int version;
-  hexagon_nn_version(&version);
+  if (hexagon_nn_version(&version) != 0) {
+    printf("Failed.\n");
+    return 0;
+  }
   printf("HexagonNN version: %d\n", version);
   printf("Success!\n");
 

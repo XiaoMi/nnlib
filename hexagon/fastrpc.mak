@@ -66,9 +66,6 @@ $(HEXAGON_NN_C_SRCS:.c=)
 libhexagon_nn_skel.ASM_SRCS +=  \
 $(HEXAGON_NN_ASM_SRCS)
 
-interface/hexagon_nn.idl: interface/proto_to_idl.pl interface/hexagon_nn.proto_idl
-	interface/proto_to_idl.pl
-
 # copy final build products to the ship directory
 BUILD_COPIES = \
     interface/hexagon_nn.idl \

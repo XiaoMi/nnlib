@@ -320,7 +320,6 @@ DEF_OP(QuantizeForTest_u16b_d32)
 DEF_OP(Close_16b_d32)
 DEF_OP(Close_u16b_d32)
 DEF_OP(Convert_from_d32_16b)
-DEF_OP(Supernode_16x16p16to16_d32)
 DEF_OP(Supernode_u16x16p16to16_d32)
 
 DEF_OP(QuantizedMatMulDims_8x8p32to16)
@@ -456,6 +455,17 @@ DEF_OP(DepthwiseSupernode_16x16p16to16)
 DEF_OP(DepthwiseSupernode_16x16p16to16_d32)
 DEF_OP(DepthwiseSupernode_16x16p32to16)
 DEF_OP(DepthwiseSupernode_16x16p32to16_d32)
+DEF_OP(Close_mse_u8)
+DEF_OP(MirrorPad_8_d32)
+
+DEF_OP(QuantizedPadForConv_8_d32)
+DEF_OP(QuantizedPadForConv_u16_d32)
+DEF_OP(LSHProjection)
+DEF_OP(Requantize_8to8)
+DEF_OP(InputSupernode_16x16p16to16_outd32)
+DEF_OP(InputSupernode_16x16p32to16_outd32)
+
+DEF_OP_WREF(QuantizedCorrelation1d_8x8to8)
 // Add new operations above this line
 #ifdef __SELF_DEF_OP_WREF
 #undef __SELF_DEF_OP_WREF

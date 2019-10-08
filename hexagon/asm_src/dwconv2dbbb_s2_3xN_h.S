@@ -21,7 +21,7 @@ dwconv2dbbb_s2_3xN_asm:
 #define   filt_zero            r7       //
 #define   bias_sum             r14      //
 #define   ptr_max              r15      //
-#define   recip_level          r16      //
+#define   recip_level          r10      //
 #define   recip_shift          r8       //
 #define   stride_v             r28      //
 #define   sbuf_base            r4       //
@@ -104,16 +104,14 @@ dwconv2dbbb_s2_3xN_asm:
       out_width = lsr(out_width, #2)               //
    } {
       memw(sp+#17<<2) = depth                      //
-      recip_level = memw(sp+#24<<2)                //
       zzzz  = vsplatb(filt_zero)                   //
    } {
-      vrecip = vsplat(recip_level)                 //
       recip_shift = memw(sp+#25<<2)                //
       stride_v = memw(sp+#26<<2)                   //
    } {
       sbuf_base = memw(sp+#27<<2)                  //scratchpad buffer 128*filt_height bytes
       vshamt_vec= vsplat(recip_shift)              //
-      next_in_width_depth_stride=mpyi(next_in_width_depth,stride_v)//
+      next_in_width_depth_stride = mpyi(next_in_width_depth,stride_v) //
    } {
       max = vmem(ptr_max+#0)                       //
       filt_size = filt_height                      //
@@ -122,10 +120,14 @@ dwconv2dbbb_s2_3xN_asm:
       _zzz  = lsr(zzzz, #8)                        //
       min = vmem(ptr_max+#1)                       //
       depth_cnt = memw(sp+#17<<2)                  //depth
+      p2 = !cmp.gt(filt_height, #0)                //<=0
    } 
 /* ----------------------------------------------------------------------------- */
      .balign 32
 .L_height:
+   {
+      recip_level = memw(sp+#24<<2)
+   }
    {  bias_ptr = bias_sum                          //
       ptr_xin = in_buf
       ptr_w0 = filt
@@ -133,6 +135,12 @@ dwconv2dbbb_s2_3xN_asm:
    }
 /* ----------------------------------------------------------------------------- */
 .L_depth:
+   {
+      vrecip = vmem(recip_level++#1)
+   }
+   {
+      memw(sp+#52) = recip_level
+   }
    {  bias_val = vmem(bias_ptr++#1)                //
       ptr_x0 = ptr_xin                             //
       ptr_y = out_buf                              //
@@ -185,12 +193,13 @@ dwconv2dbbb_s2_3xN_asm:
    } {
       s0.uw += vrmpy(x3x2x1x0.ub, w_210.ub)        //[0, 8]filter even output
       xbxax9x8.b = vshuff(x2.b)                    //[0, 8]
+      vmem(sbuf++#1) = xbxax9x8.new                //[0, 9]
       x5x4x3x2.h = vshuffe(x7x6x5x4.h,x3x2x3x2.h)  //[0, 8]
    } {
       z0.uw = vrmpy(x3x2x1x0.ub, _zzz.ub)          //[0, 9]filter even output
       z2.uw = vrmpy(x7x6x5x4.ub, _zzz.ub)          //[0, 9]filter even output
-      vmem(sbuf++#1) = xbxax9x8                    //[0, 9]
       x7x6x7x6.h = vshuffo(x7x6x5x4.h, x7x6x5x4.h) //[0, 9]
+      z3 = #0                                      //  
    } {
       s1.uw += vrmpy(x5x4x3x2.ub, w_210.ub)        //[0,10]filter even output
       x9x8x7x6.h = vshuffe(xbxax9x8.h,x7x6x7x6.h)  //[0,10]
@@ -206,12 +215,14 @@ dwconv2dbbb_s2_3xN_asm:
       ptr_x1 = add(ptr_x1, next_in_width_depth)    //[1, 4]
    } {
       z1.uw = vrmpy(x5x4x3x2.ub, _zzz.ub)          //[0,13]filter even output
-      z3.uw = vrmpy(x9x8x7x6.ub, _zzz.ub)          //[0,13]filter even output
       x2.b = vshuff(x2.b)                          //[1, 6]
       w_210 = vmem(ptr_w1++#1)                     //[1, 6]
+      if(p2) jump .L_skip                          //dont do <=0 iterations
    }
 .L_vert:
-   {  x3x2x3x2.h = vshuffo(x3x2x1x0.h, x3x2x1x0.h) //[0, 7]
+   {  
+      z3.uw += vrmpy(x9x8x7x6.ub, _zzz.ub)         //[0,13]filter even output
+      x3x2x3x2.h = vshuffo(x3x2x1x0.h, x3x2x1x0.h) //[0, 7]
       x1 = vmemu(ptr_x1+#1)                        //[1, 0]
    } {
       s0.uw += vrmpy(x3x2x1x0.ub, w_210.ub)        //[0, 8]filter even output
@@ -236,12 +247,13 @@ dwconv2dbbb_s2_3xN_asm:
       x3x2x1x0 = vmem(sbuf)                        //[1, 5]
    } {
       z1.uw += vrmpy(x5x4x3x2.ub, _zzz.ub)         //[0,13]filter even output
-      z3.uw += vrmpy(x9x8x7x6.ub, _zzz.ub)         //[0,13]filter even output
       x2.b = vshuff(x2.b)                          //[1, 6]
       w_210 = vmem(ptr_w1++#1)                     //[1, 6]
    }:endloop0
 /* --------------------------------------------------------------------------- */
+.L_skip:
    {  x3x2x3x2.h = vshuffo(x3x2x1x0.h, x3x2x1x0.h) //[1, 7]
+      z3.uw += vrmpy(x9x8x7x6.ub, _zzz.ub)         //[0,13]filter even output
       d3d2.h = vpack(d3.w, d2.w):sat               //[WIDTH, E]
    } {
       s0.uw += vrmpy(x3x2x1x0.ub, w_210.ub)        //[1, 8]filter even output
@@ -314,9 +326,11 @@ dwconv2dbbb_s2_3xN_asm:
    {  d3d2.h = vpack(d3.w, d2.w):sat               //[WIDTH, E]
       ptr_w0 += asl(filt_size, #7)                 //[DEPTH,E]filt_size = filt_height*256 //4*3*64
       ptr_xin = add(ptr_xin, next_in_width_32)     //[DEPTH]
+      next_out_width_32 = memw(sp+#16<<2)
    } {
       depth_cnt = add(depth_cnt, #-1)              //[DEPTH,E]
       out_buf = add(out_buf, next_out_width_32)    //[DEPTH]
+      recip_level = memw(sp+#52)
    } {
       p0 = cmp.eq(depth_cnt, #0)                   //[DEPTH,E]
       d3210.ub = vpack(d3d2.h, d1d0.h):sat         //[WIDTH, E]

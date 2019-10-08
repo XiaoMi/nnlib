@@ -37,6 +37,12 @@
  */
 #include <nn_prepare.h>
 
+const struct output Output_ScalarFloat = {
+	.rank = 4,
+	.max_sizes = {1, 1, 1, 1},
+	.elementsize = 4
+};
+
 void __attribute__((noinline))
 make_outputdesc_from_shape(struct output *outp, struct shape const *shp, int elsize, int add_d32_padding_unused)
 {
@@ -313,4 +319,122 @@ handle_channelscaled_supernode( struct nn_graph *nn, struct nn_node *nodep)
 
 //////////////////////////////////////////////////////////////////////////
 
+// handle supernodes which have filters so large that d32 may not provide enough padding
+// space for them.
+// it is assumed that oversize_d32_supernode_quick_check(nn, *nodep ) has already returned 1.
+//
+int handle_oversize_d32_supernode( struct nn_graph *nn,  struct nn_node ** nodep)
+{
+	struct nn_node * conv_node = *nodep;
+	// get the 'weights' tensor.
+	struct nn_node const * wts_node = find_node_must_be_Const_from_ref( nn, &conv_node->input_refs[1]);
+	if( wts_node == NULL) return 0;
+	struct shape const *wts_shape = &wts_node->outputs[0]->shape;
+	int fht = wts_shape->filt_height;
+	int fwid = wts_shape->filt_width;
+	if( fht < 1 || fwid < 1 || (fht==1 && fwid ==1)) return 0;
+	// below are the only supported padding types; do nothing if the
+	// padding type is not supported.
+	// (VALID is also supported, but we do nothing for that)
+	// we want to find the worst-case padding needed for this filter size, for any input size.
+	//
+	int pad = conv_node->padding;
+	int pad_adj=1;
+	switch( pad){
+	 case NN_PAD_NA:
+		 break;
+	 case NN_PAD_SAME:
+		 break;
+	 case NN_PAD_SAME_CAFFE:
+		 pad_adj = 0;
+		 break;
+	 default:
+		 return 0;
+	}
+	// for NN_PAD_NA, we need to look at the stride, and effectively reduce the filter size by stride-1.
+	if( pad == NN_PAD_NA){
+		struct nn_node const * stride_node = find_node_must_be_Const_from_ref( nn, &conv_node->input_refs[6]);
+		if(stride_node == NULL) return 0;
+		struct shape const *stride_shape = &stride_node->outputs[0]->shape;
+		int str_h = stride_shape->height;
+		int str_w = stride_shape->width;
+		fht = (fht > str_h)? (fht+1-str_h) : 1;
+		fwid = (fwid > str_w)? (fwid+1-str_w) : 1;
+	}
+	// all of these should be >=0, since the fht and fwid are >=1.
+	int need_top = (fht-pad_adj)>>1;
+	int need_bottom = fht-1-need_top;
+	int need_left = (fwid-pad_adj)>>1;
+	int need_right = fwid-1-need_left;
+
+	// conditions for 'at-risk' supernode:
+	//      need_top or need_bottom : either > 4
+	//      need_left or need_right : either > 3
+	//      need_right > 0 and need_bottom >3
+	//
+	if( ! (  max_i32(need_top, need_bottom)> 4
+		  || max_i32(need_left, need_right)> 3
+		  || (need_right >0 && need_bottom > 3)))
+		return 0;
+
+	int tmp = conv_node->input_refs->output_idx;
+	struct nn_node *upstream = find_node( nn, conv_node->input_refs[0].src_id);
+	if( upstream ==NULL || upstream->n_outputs <= tmp) return 0;
+
+	logmsg(nn,3,"Replacing supernode 0x%X with PadForConv + Supernode: padding = %d %d %d %d\n",
+			(unsigned)conv_node->node_id, need_top, need_bottom, need_left, need_right );
+	struct nn_node * qfc_node = NULL;
+	struct nn_node *newconv_node = NULL;
+	// OK it needs conversion.
+	// (1) make QuantizedPadForConv
+	// inputs are :  data, min,max; filter, stride
+	// it has the same 'padding' as the conv we are replacing.
+	{
+		struct input const * convin = conv_node->input_refs;
+		struct input qfc_in[5] = {
+				convin[0], convin[2], convin[3],	// data, min, max
+				convin[1], convin[6]				// weights, stride
+		};
+		struct output qfc_out[3] = {
+				upstream->output_defs[tmp],
+				Output_ScalarFloat,
+				Output_ScalarFloat
+		};
+		// pad the sizes with worst-case padding
+		qfc_out[0].max_sizes[1] += need_top + need_bottom;
+		qfc_out[0].max_sizes[2] += need_left + need_right;
+
+		int pad_for_conv_op = (qfc_out[0].elementsize ==2)? OP_QuantizedPadForConv_u16_d32 : OP_QuantizedPadForConv_8_d32;
+
+		qfc_node = create_node( nn, 0, pad_for_conv_op, pad, 5, 3, qfc_in, qfc_out);
+		if( qfc_node == NULL) return errlog(nn,"can't make QuantizedPadForConv node!");
+	}
+	// (2) make a new conv: same as original - same node id - but with VALID padding and with
+	//   input from QuantizedPadForConv node.
+	//
+	{
+		int n_in = conv_node->n_inputs;
+		struct input newconvin[n_in];
+		memcpy( newconvin, conv_node->input_refs, n_in*sizeof(struct input));
+		// replace inputs 0,2,3:
+		unsigned qfc_nid = qfc_node->node_id;
+		newconvin[0].src_id = qfc_nid;
+		newconvin[0].output_idx = 0;
+		newconvin[2].src_id = qfc_nid;
+		newconvin[2].output_idx = 1;
+		newconvin[3].src_id = qfc_nid;
+		newconvin[3].output_idx = 2;
+		newconv_node = create_node( nn, conv_node->node_id,conv_node->node_type, NN_PAD_VALID, n_in, 3, newconvin, conv_node->output_defs);
+		if( newconv_node == NULL) {
+			qfc_node->ops->dtor( qfc_node, nn);
+			return errlog(nn,"can't make new supernode!");
+		}
+	}
+
+	// replace one node with two, and we are done.
+	if( replace_node_with(nn,nodep, conv_node, qfc_node, newconv_node) < 0)
+		return errlog(nn,"replace with QuantizedPadForConv failed");
+
+	return 0;
+}
 

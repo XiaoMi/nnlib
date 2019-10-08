@@ -45,7 +45,10 @@ Source code:
        |- host
        |    |- hexnn_dsp_api.c
        |    |- hexnn_dsp_api.h
+       |    |- hexnn_dsp_api_impl.c
        |    |- hexnn_dsp_domians_api.c
+       |    |- hexnn_dsp_domains_api.h
+       |    |- hexnn_dsp_domains_api_impl.c
        |    |- hexnn_graph_wrapper.cpp
        |    |_ hexnn_graph_wrapper.hpp
        |
@@ -68,7 +71,7 @@ Below is additional changes in makefile in order to support graph wrapper
         <c files for sample app> \
 
     ifeq ($(GRAPH_WRAPPER), 1)
-        sample_C_SRCS += hexagon/host/hexnn_dsp_api
+        sample_C_SRCS += hexagon/host/hexnn_dsp_api hexagon/host/hexnn_dsp_api_impl
         sample_CPP_SRCS += hexagon/host/hexnn_graph_wrapper
     else
         sample_C_SRCS += $V/hexagon_nn_stub

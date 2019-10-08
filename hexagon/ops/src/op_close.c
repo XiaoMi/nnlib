@@ -239,6 +239,26 @@ static inline int check_u8vals(struct nn_graph *nn, void *av, void *bv, uint32_t
 	return 0;
 }
 
+static inline int check_mse_u8(struct nn_graph *nn, void *av, void *bv, uint32_t size)
+{
+    uint8_t *a = av;
+    uint8_t *b = bv;
+    int count = size/sizeof(uint8_t);
+    int i;
+    uint64_t se = 0;
+    for (i = 0; i < count; i++) {
+        int d = a[i]-b[i];
+        se += d*d;
+    }
+    float mse = (float)se/(float)count;
+    errlog(nn, "mse %f", mse);
+    if (mse > 0.5) {
+        logmsg(nn,0,"mse %f, expected %f", mse, 0.5);
+        return 1;
+    }
+    return 0;
+}
+
 static inline int check_u16vals(struct nn_graph *nn, void *av, void *bv, uint32_t size)
 {
 	uint16_t *a = av;
@@ -642,6 +662,12 @@ static int close_execute_q_u16(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
+static int close_execute_mse_u8(struct nn_node *self, struct nn_graph *nn)
+{
+    return close_execute(self,nn,check_mse_u8);
+}
+
+
 struct nn_node_ops nn_ops_for_Close_f = {
 	.execute = close_execute_f,
 	.check = NULL,
@@ -721,4 +747,13 @@ struct nn_node_ops nn_ops_for_Close_boxes_quint16 = {
 	.dtor = node_free_common,
 	.n_inputs = NN_IOCOUNT(2),
 	.n_outputs = NN_IOCOUNT(0),
+};
+
+struct nn_node_ops nn_ops_for_Close_mse_u8 = {
+        .execute = close_execute_mse_u8,
+        .check = NULL,
+        .ctor = node_alloc_common,
+        .dtor = node_free_common,
+        .n_inputs = NN_IOCOUNT(2),
+        .n_outputs = NN_IOCOUNT(0),
 };

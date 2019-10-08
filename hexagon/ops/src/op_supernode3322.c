@@ -129,7 +129,7 @@ static void fill_info_minmax_basics(
 
     /* Get min/max values for input, weights, and bias data */
     float in_min_float = tensor_get_float(min_in_tensor,0);
-    float in_max_float = fmaxf(tensor_get_float(max_in_tensor,0),in_min_float+0.00001f);
+    float in_max_float = fmaxf(tensor_get_float(max_in_tensor,0), in_min_float + 1e-18f);
 
     /* find zero offset for each input */
     int32_t input_offset = quantize_uint8(0.0f,in_min_float,in_max_float);

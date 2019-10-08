@@ -241,6 +241,9 @@ Resets the per-node performance counters, and changes the performance monitor
 unit event ID to the specified one.  Event ID 0 counts cycles, event ID 1 and 2 
 are defined by the op (and typically unused).  All other event IDs match the
 hardware PMU event ID.
+Using reset_perfinfo in production code will cause problems, as the hardware
+counters are a shared resource likely used by the OS.  Only the UTIME event (5)
+can be used safely in production.  All other events are "debug only."
 
 Returns 0.
 
@@ -260,5 +263,71 @@ Returns 0 on success, nonzero otherwise.
 
 Returns the total number of processor cycles during execution of
 the most recent hexagon_nn_execute() call.
+
+
+
+
+
+Here's a summary of the API calls, and when they can be made:
+  Any Time:
+    hexagon_nn_GetHexagonBinaryVersion
+    hexagon_nn_version
+    hexagon_nn_vote
+    hexagon_nn_get_power
+    hexagon_nn_disable_dcvs
+    hexagon_nn_get_dsp_offset
+    hexagon_nn_op_id_to_name
+    hexagon_nn_op_name_to_id
+    hexagon_nn_set_powersave_details
+    hexagon_nn_set_powersave_level
+
+
+  Any Time (with a graph context):
+    hexagon_nn_PrintLog
+    hexagon_nn_get_perfinfo
+    hexagon_nn_getlog
+    hexagon_nn_reset_perfinfo
+    hexagon_nn_set_debug_level
+    hexagon_nn_set_graph_option
+    hexagon_nn_snpprint
+
+
+  Phased:
+
+  1)
+    hexagon_nn_config
+    hexagon_nn_config_with_options
+
+  2)
+    hexagon_nn_init
+    hexagon_nn_init_with_info
+
+  3)
+    hexagon_nn_graph_config
+
+  4)
+    hexagon_nn_append_const_node
+    hexagon_nn_append_empty_const_node
+    hexagon_nn_append_node
+    hexagon_nn_populate_const_node
+    hexagon_nn_populate_graph
+
+  5)
+    hexagon_nn_prepare
+
+  6)
+    hexagon_nn_execute
+    hexagon_nn_execute_new
+    hexagon_nn_get_nodetype
+    hexagon_nn_get_num_nodes_in_graph
+    hexagon_nn_variable_read
+    hexagon_nn_variable_write
+    hexagon_nn_variable_write_flat
+    hexagon_nn_last_execution_cycles
+    hexagon_nn_multi_execution_cycles
+
+  7)
+    hexagon_nn_teardown
+
 
 

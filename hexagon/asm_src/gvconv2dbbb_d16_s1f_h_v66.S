@@ -479,6 +479,3 @@ gvconv2dbbbs1_d16_v66_asm:
 /*=============================================================================*/
       .size gvconv2dbbbs1_d16_v66_asm, .L_end-gvconv2dbbbs1_d16_v66_asm
 /*=============================================================================*/
-/*
- * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
- */

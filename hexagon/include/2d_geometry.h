@@ -187,18 +187,18 @@ rectangle create_upright_rectangle(float* rectangle_data){
 // x_center, y_center, width, height, angle
 rectangle create_rotated_rectangle(float *rectangle_data){
 
-    float x = rectangle_data[2]/2;
-    float y = rectangle_data[3]/2;
-    float rotation_angle = rectangle_data[4] * M_PI / 180.f;
-    float hyp = sqrt(pow(x, 2) + pow(y, 2));
-    float angle1 = atan(y/x);
+    float x = rectangle_data[2]*0.5f;
+    float y = rectangle_data[3]*0.5f;
+    float rotation_angle = rectangle_data[4] * (float)(M_PI / 180.f);
+    float hyp = hypotf(x,y);
+    float angle1 = atan2f(y,x);
     float angle2 = angle1 - rotation_angle;
     angle1 += rotation_angle;
     point vertices[4];
 
     // rotate around the center
-    vertices[0].x =  hyp * cos(angle1);   vertices[0].y = hyp * sin(angle1);
-    vertices[1].x = -hyp * cos(angle2);   vertices[1].y = hyp * sin(angle2);
+    vertices[0].x =  hyp * cosf(angle1);   vertices[0].y = hyp * sinf(angle1);
+    vertices[1].x = -hyp * cosf(angle2);   vertices[1].y = hyp * sinf(angle2);
     vertices[2].x = -vertices[0].x;       vertices[2].y = -vertices[0].y;
     vertices[3].x = -vertices[1].x;       vertices[3].y = -vertices[1].y;
 
@@ -486,7 +486,7 @@ float get_polygon_area(point *vertices, int num_vertices){
     }
     numerator += vertices[num_vertices-1].x * vertices[0].y - vertices[num_vertices-1].y * vertices[0].x;
 
-    return fabs(numerator/2.f);
+    return fabsf(numerator/2.f);
 }
 
 // returns the area of the intersection between rectangles r1 and r2
@@ -524,8 +524,8 @@ float get_upright_rectangles_intersection_area(rectangle r1, rectangle r2){
     float xx2 = r1.right_bound > r2.right_bound   ? r2.right_bound  : r1.right_bound;
     float yy2 = r1.top_bound > r2.top_bound       ? r2.top_bound    : r1.top_bound;
 
-    float w = xx2 - xx1 + 1.0;
-    float h = yy2 - yy1 + 1.0;
+    float w = xx2 - xx1 + 1.0f;
+    float h = yy2 - yy1 + 1.0f;
 
     w = w < 0.0 ? 0.0 : w;
     h = h < 0.0 ? 0.0 : h;

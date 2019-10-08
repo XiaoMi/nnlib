@@ -1032,12 +1032,11 @@ static int fill_info_minmax_basics(
 
 	/* Get min/max values for input, weights, and bias data */
 	float in_min_float = tensor_get_float(min_in_tensor,0);
-	float in_max_float = tensor_get_float(max_in_tensor,0);
+	float in_max_float = fmaxf(tensor_get_float(max_in_tensor,0), in_min_float + 1e-18f);
 
 	if( !flt_isfinite(in_min_float) || ! flt_isfinite(in_max_float)){
 		return errlog(nn,"input range to supernode, not finite");
 	}
-	in_max_float = fmaxf(in_max_float,in_min_float+0.00001f);
 	//float filt_min_float = tensor_get_float(min_filt_tensor,0);
 	//float filt_max_float = fmaxf(tensor_get_float(max_filt_tensor,0),filt_min_float+0.00001f);
 	//float bias_min_float = tensor_get_float(bias_min_tensor,0);
@@ -1100,7 +1099,7 @@ static int fill_info_minmax_basics(
 			if( need_adjust){
 				// adjust zero and recalc all the things
 				adjust_minmax_for_zero_with_constraints_16b( & info->out_minval, & info->out_maxval, info->minmax_precalc_flags);
-				output_level_size= flt_div_65535( info->out_maxval - info->out_minval);
+				output_level_size = ( info->out_maxval - info->out_minval)*(float)(1./65536.);
 				final_scaling = max_k * prod_level_size/output_level_size;
 			}
 			info->output_level_size = output_level_size;

@@ -42,6 +42,7 @@
 
 #include <nn_graph.h>
 #include <string.h>
+#include "nn_axis.h"
 
 static int split_impl(
 	struct nn_node *self,
@@ -63,7 +64,9 @@ static int split_impl(
 	int bytestride;
 	int copyn;
 	
-
+	int res = handle_negative_axes(nn, &dimdef, 1);
+    if (res)
+        return errlog(nn, "split dimension out of range");
 	logmsg(nn,2,"split node %p execute, dim %d",self, (int)dimdef);
 
 	if( ! ( 0 <= dimdef && dimdef <= 3)){

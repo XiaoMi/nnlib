@@ -448,7 +448,6 @@ void print_graph_checksum(struct nn_graph *nn);
 #define NN_NODE_FLAG_CLS_IMAGETRANSFORM	(1<<21)  //ImageTransform_f
 #define NN_NODE_FLAG_CLS_LOOP_CONTROL_NODE	(1<<20)  //Any loop control node
 #define NN_NODE_FLAG_CLS_DYNAMIC_TENSOR	(1<<19)  //Any nodes with dynamically sized output tensors
-#define NN_NODE_FLAG_CLS_PRELU          (1<<18) //Prelu_v2_d32
 
 // set of all 'classes' flags
 #define NN_NODE_FLAGS_SET\
@@ -457,8 +456,7 @@ void print_graph_checksum(struct nn_graph *nn);
     |NN_NODE_FLAG_CLS_TRANSPOSECONV|NN_NODE_FLAG_CLS_GROUPEDCONV|NN_NODE_FLAG_CLS_DILATEDCONV\
     |NN_NODE_FLAG_CLS_IMAGETRANSFORM\
     |NN_NODE_FLAG_CLS_LOOP_CONTROL_NODE\
-	|NN_NODE_FLAG_CLS_DYNAMIC_TENSOR\
-    |NN_NODE_FLAG_CLS_PRELU)
+	|NN_NODE_FLAG_CLS_DYNAMIC_TENSOR)
 
 // this defines the allowed range of input or output ports
 // (sub-struct of nn_node_ops)

@@ -33,159 +33,89 @@
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
-#include "hexnn_dsp_api.h"
-#include "hexnn_graph_wrapper.hpp"
-
-#ifndef __QAIC_STUB_EXPORT
-#define __QAIC_STUB_EXPORT
-#endif // __QAIC_STUB_EXPORT
+#include "hexnn_dsp_domains_api.h"
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_open(const char* uri, remote_handle64* h)
 {
-    return(stub_hexagon_nn_domains_open(uri, h));
+    return hexagon_nn_domains_open_impl(uri, h);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_close(remote_handle64 h)
 {
-    return(stub_hexagon_nn_domains_close(h));
+    return hexagon_nn_domains_close_impl(h);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_config(remote_handle64 _h)
 {
-    return(stub_hexagon_nn_domains_config(_h));
+    return hexagon_nn_domains_config_impl(_h);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_config_with_options(remote_handle64 _h, const hexagon_nn_uint_option* uint_options,
         int uint_optionsLen, const hexagon_nn_string_option* string_options, int string_optionsLen)
 {
-    return(stub_hexagon_nn_domains_config_with_options(_h, uint_options, uint_optionsLen, string_options, string_optionsLen));
+    return hexagon_nn_domains_config_with_options_impl(_h, uint_options, uint_optionsLen, string_options, string_optionsLen);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_graph_config(remote_handle64 _h, hexagon_nn_nn_id id,
         const hexagon_nn_uint_option* uint_options, int uint_optionsLen,
         const hexagon_nn_string_option* string_options, int string_optionsLen)
 {
-    return(stub_hexagon_nn_domains_graph_config(_h, id, uint_options, uint_optionsLen, string_options, string_optionsLen));
+    return hexagon_nn_domains_graph_config_impl(_h, id, uint_options, uint_optionsLen, string_options, string_optionsLen);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_get_dsp_offset(remote_handle64 _h, unsigned int* libhexagon_addr, unsigned int* fastrpc_shell_addr)
 {
-    return(stub_hexagon_nn_domains_get_dsp_offset(_h, libhexagon_addr, fastrpc_shell_addr));
+    return hexagon_nn_domains_get_dsp_offset_impl(_h, libhexagon_addr, fastrpc_shell_addr);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_init(remote_handle64 _h, hexagon_nn_nn_id* g)
 {
-    int sts;
-    sts = stub_hexagon_nn_domains_init(_h, g);
-
-    if(sts == 0)
-    {
-        sts = add_nn_id(_h, *g);
-    }
-    return sts;
+    return hexagon_nn_domains_init_impl(_h, g);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_set_debug_level(remote_handle64 _h, hexagon_nn_nn_id id, int level)
 {
-    return(stub_hexagon_nn_domains_set_debug_level(_h, id, level));
+    return hexagon_nn_domains_set_debug_level_impl(_h, id, level);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_snpprint(remote_handle64 _h, hexagon_nn_nn_id id, unsigned char* buf, int bufLen)
 {
-    return(stub_hexagon_nn_domains_snpprint(_h, id, buf, bufLen));
+    return hexagon_nn_domains_snpprint_impl(_h, id, buf, bufLen);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_getlog(remote_handle64 _h, hexagon_nn_nn_id id, unsigned char* buf, int bufLen)
 {
-    return(stub_hexagon_nn_domains_getlog(_h, id, buf, bufLen));
+    return hexagon_nn_domains_getlog_impl(_h, id, buf, bufLen);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_append_node(remote_handle64 _h, hexagon_nn_nn_id id, unsigned int node_id,
         unsigned int operation, hexagon_nn_padding_type padding, const hexagon_nn_input* inputs, int inputsLen,
         const hexagon_nn_output* outputs, int outputsLen)
 {
-    int sts = -1;
-    batch_ops_params params;
-
-    params.op = HEXNN_BATCH_OP_APPEND_NODE;
-    params.node_id = node_id;
-    params.operation = operation;
-    params.padding = padding;
-    params.inputs = (hexagon_nn_input*)inputs;
-    params.inputsLen = inputsLen;
-    params.outputs = (hexagon_nn_output*)outputs;
-    params.outputsLen = outputsLen;
-    sts = batch_append_ops(_h, id, params);
-
-    return sts;
+    return hexagon_nn_domains_append_node_impl(_h, id, node_id, operation, padding, inputs, inputsLen, outputs, outputsLen);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_append_const_node(remote_handle64 _h, hexagon_nn_nn_id id, unsigned int node_id,
         unsigned int batches, unsigned int height, unsigned int width, unsigned int depth, const unsigned char* data, int dataLen)
 {
-    int sts = -1;
-    batch_ops_params params;
-
-    params.op = HEXNN_BATCH_OP_APPEND_CONST_NODE;
-    params.node_id = node_id;
-    params.batches = batches;
-    params.height = height;
-    params.width = width;
-    params.depth = depth;
-    params.data = (unsigned char*)data;
-    params.dataLen = dataLen;
-    sts = batch_append_ops(_h, id, params);
-
-    return sts;
+    return hexagon_nn_domains_append_const_node_impl(_h, id, node_id, batches, height, width, depth, data, dataLen);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_append_empty_const_node(remote_handle64 _h, hexagon_nn_nn_id id, unsigned int node_id,
         unsigned int batches, unsigned int height, unsigned int width, unsigned int depth, unsigned int size)
 {
-    int sts = -1;
-    batch_ops_params params;
-
-    params.op = HEXNN_BATCH_OP_APPEND_EMPTY_CONST_NODE;
-    params.node_id = node_id;
-    params.batches = batches;
-    params.height = height;
-    params.width = width;
-    params.depth = depth;
-    params.size = size;
-    sts = batch_append_ops(_h, id, params);
-
-    return sts;
+    return hexagon_nn_domains_append_empty_const_node_impl(_h, id, node_id, batches, height, width, depth, size);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_populate_const_node(remote_handle64 _h, hexagon_nn_nn_id id, unsigned int node_id,
         const unsigned char* data, int dataLen, unsigned int target_offset)
 {
-    int sts = -1;
-    batch_ops_params params;
-
-    params.op = HEXNN_BATCH_OP_POPULATE_CONST_NODE;
-    params.node_id = node_id;
-    params.data = (unsigned char*)data;
-    params.dataLen = dataLen;
-    params.target_offset = target_offset;
-    sts =batch_append_ops(_h, id, params);
-
-    return sts;
+    return hexagon_nn_domains_populate_const_node_impl(_h, id, node_id, data, dataLen, target_offset);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_prepare(remote_handle64 _h, hexagon_nn_nn_id id)
 {
-    int sts = -1;
-    // setup batch ops' ion memory
-    unsigned char *poi;
-    unsigned int size;
-    copy_batch_ops_to_ion_memory(_h, id, &poi, &size);
-
-    sts = stub_hexagon_nn_domains_populate_graph(_h, id, poi, size);
-
-    // free up the memory
-    free_batch_op_memory(_h, id);
-    return sts;
+    return hexagon_nn_domains_prepare_impl(_h, id);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_execute(remote_handle64 _h, hexagon_nn_nn_id id,
@@ -194,141 +124,133 @@ __QAIC_STUB_EXPORT int hexagon_nn_domains_execute(remote_handle64 _h, hexagon_nn
         unsigned int* batches_out, unsigned int* height_out, unsigned int* width_out, unsigned int* depth_out,
         unsigned char* data_out, int data_outLen, unsigned int* data_len_out)
 {
-    return(stub_hexagon_nn_domains_execute(_h, id, batches_in, height_in, width_in, depth_in, data_in, data_inLen,
-            batches_out, height_out, width_out, depth_out, data_out, data_outLen, data_len_out));
+    return hexagon_nn_domains_execute_impl(_h, id, batches_in, height_in, width_in, depth_in, data_in, data_inLen,
+            batches_out, height_out, width_out, depth_out, data_out, data_outLen, data_len_out);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_teardown(remote_handle64 _h, hexagon_nn_nn_id id)
 {
-    int sts;
-    sts = stub_hexagon_nn_domains_teardown(_h, id);
-
-    if(sts == 0)
-    {
-        sts = remove_nn_id(_h, id);
-    }
-    return sts;
+    return hexagon_nn_domains_teardown_impl(_h, id);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_variable_read(remote_handle64 _h, hexagon_nn_nn_id id, unsigned int node_id,
         int output_index, unsigned int* batches_out, unsigned int* height_out, unsigned int* width_out, unsigned int* depth_out,
         unsigned char* data_out, int data_outLen, unsigned int* data_len_out)
 {
-    return(stub_hexagon_nn_domains_variable_read(_h, id, node_id, output_index,
-            batches_out, height_out, width_out, depth_out, data_out, data_outLen, data_len_out));
+    return hexagon_nn_domains_variable_read_impl(_h, id, node_id, output_index,
+            batches_out, height_out, width_out, depth_out, data_out, data_outLen, data_len_out);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_variable_write(remote_handle64 _h, hexagon_nn_nn_id id, unsigned int node_id,
         int output_index, unsigned int batches, unsigned int height, unsigned int width, unsigned int depth,
         const unsigned char* data_in, int data_inLen)
 {
-    return(stub_hexagon_nn_domains_variable_write(_h, id, node_id,
-            output_index, batches, height, width, depth, data_in, data_inLen));
+    return hexagon_nn_domains_variable_write_impl(_h, id, node_id,
+            output_index, batches, height, width, depth, data_in, data_inLen);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_variable_write_flat(remote_handle64 _h, hexagon_nn_nn_id id, unsigned int node_id,
         int output_index, const unsigned char* data_in, int data_inLen)
 {
-    return(stub_hexagon_nn_domains_variable_write_flat(_h, id, node_id, output_index, data_in, data_inLen));
+    return hexagon_nn_domains_variable_write_flat_impl(_h, id, node_id, output_index, data_in, data_inLen);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_set_powersave_level(remote_handle64 _h, unsigned int level)
 {
-    return(stub_hexagon_nn_domains_set_powersave_level(_h, level));
+    return hexagon_nn_domains_set_powersave_level_impl(_h, level);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_set_powersave_details(remote_handle64 _h,
         hexagon_nn_corner_type corner, hexagon_nn_dcvs_type dcvs, unsigned int latency)
 {
-    return(stub_hexagon_nn_domains_set_powersave_details(_h, corner, dcvs, latency));
+    return hexagon_nn_domains_set_powersave_details_impl(_h, corner, dcvs, latency);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_get_perfinfo(remote_handle64 _h, hexagon_nn_nn_id id,
         hexagon_nn_perfinfo* info_out, int info_outLen, unsigned int* n_items)
 {
-    return(stub_hexagon_nn_domains_get_perfinfo(_h, id, info_out, info_outLen, n_items));
+    return hexagon_nn_domains_get_perfinfo_impl(_h, id, info_out, info_outLen, n_items);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_reset_perfinfo(remote_handle64 _h, hexagon_nn_nn_id id, unsigned int event)
 {
-    return(stub_hexagon_nn_domains_reset_perfinfo(_h, id, event));
+    return hexagon_nn_domains_reset_perfinfo_impl(_h, id, event);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_last_execution_cycles(remote_handle64 _h, hexagon_nn_nn_id id,
         unsigned int* cycles_lo, unsigned int* cycles_hi)
 {
-    return(stub_hexagon_nn_domains_last_execution_cycles(_h, id, cycles_lo, cycles_hi));
+    return hexagon_nn_domains_last_execution_cycles_impl(_h, id, cycles_lo, cycles_hi);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_version(remote_handle64 _h, int* ver)
 {
-    return(stub_hexagon_nn_domains_version(_h, ver));
+    return hexagon_nn_domains_version_impl(_h, ver);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_op_name_to_id(remote_handle64 _h, const char* name, unsigned int* node_id)
 {
-    return(stub_hexagon_nn_domains_op_name_to_id(_h, name, node_id));
+    return hexagon_nn_domains_op_name_to_id_impl(_h, name, node_id);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_op_id_to_name(remote_handle64 _h, unsigned int node_id, char* name, int nameLen)
 {
-    return(stub_hexagon_nn_domains_op_id_to_name(_h, node_id, name, nameLen));
+    return hexagon_nn_domains_op_id_to_name_impl(_h, node_id, name, nameLen);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_get_num_nodes_in_graph(remote_handle64 _h, hexagon_nn_nn_id id, unsigned int* num_nodes)
 {
-    return(stub_hexagon_nn_domains_get_num_nodes_in_graph(_h, id, num_nodes));
+    return hexagon_nn_domains_get_num_nodes_in_graph_impl(_h, id, num_nodes);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_disable_dcvs(remote_handle64 _h)
 {
-    return(stub_hexagon_nn_domains_disable_dcvs(_h));
+    return hexagon_nn_domains_disable_dcvs_impl(_h);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_GetHexagonBinaryVersion(remote_handle64 _h, int* ver)
 {
-    return(stub_hexagon_nn_domains_GetHexagonBinaryVersion(_h, ver));
+    return hexagon_nn_domains_GetHexagonBinaryVersion_impl(_h, ver);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_PrintLog(remote_handle64 _h, const unsigned char* buf, int bufLen)
 {
-    return(stub_hexagon_nn_domains_PrintLog(_h, buf, bufLen));
+    return hexagon_nn_domains_PrintLog_impl(_h, buf, bufLen);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_execute_new(remote_handle64 _h, hexagon_nn_nn_id id,
         const hexagon_nn_tensordef* inputs, int inputsLen, hexagon_nn_tensordef* outputs, int outputsLen)
 {
-    return(stub_hexagon_nn_domains_execute_new(_h, id, inputs, inputsLen, outputs, outputsLen));
+    return hexagon_nn_domains_execute_new_impl(_h, id, inputs, inputsLen, outputs, outputsLen);
+}
+
+__QAIC_STUB_EXPORT int hexagon_nn_domains_execute_with_info(remote_handle64 _h, hexagon_nn_nn_id id,
+        const hexagon_nn_tensordef* inputs, int inputsLen, hexagon_nn_tensordef* outputs, int outputsLen, hexagon_nn_execute_info* execute_info)
+{
+    return hexagon_nn_domains_execute_with_info_impl(_h, id, inputs, inputsLen, outputs, outputsLen, execute_info);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_init_with_info(remote_handle64 _h, hexagon_nn_nn_id* g, const hexagon_nn_initinfo* info)
 {
-    return(stub_hexagon_nn_domains_init_with_info(_h, g, info));
+    return hexagon_nn_domains_init_with_info_impl(_h, g, info);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_get_nodetype(remote_handle64 _h, hexagon_nn_nn_id graph_id, hexagon_nn_nn_id node_id, unsigned int* node_type)
 {
-    return(stub_hexagon_nn_domains_get_nodetype(_h, graph_id, node_id, node_type));
+    return hexagon_nn_domains_get_nodetype_impl(_h, graph_id, node_id, node_type);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_multi_execution_cycles(remote_handle64 _h, hexagon_nn_nn_id id, unsigned int* cycles_lo, unsigned int* cycles_hi)
 {
-    return(stub_hexagon_nn_domains_multi_execution_cycles(_h, id, cycles_lo, cycles_hi));
+    return hexagon_nn_domains_multi_execution_cycles_impl(_h, id, cycles_lo, cycles_hi);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_get_power(remote_handle64 _h, int type)
 {
-    return(stub_hexagon_nn_domains_get_power(_h, type));
+    return hexagon_nn_domains_get_power_impl(_h, type);
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_set_graph_option(remote_handle64 _h, hexagon_nn_nn_id id, const char* name, int value)
 {
-    return(stub_hexagon_nn_domains_set_graph_option(_h, id, name, value));
+    return hexagon_nn_domains_set_graph_option_impl(_h, id, name, value);
 }
-
-#ifdef  __QAIC_STUB
-#undef __QAIC_STUB
-#endif //__QAIC_STUB
-#define __QAIC_STUB(ff) stub_ ## ff
-
-#include "hexagon_nn_domains_stub.c"

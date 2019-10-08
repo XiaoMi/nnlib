@@ -61,6 +61,7 @@ static int output_execute(struct nn_node *self, struct nn_graph *nn)
 	struct nn_memcpy_manager mcman;
 	nn_mcmanager_init(nn, &mcman );
 
+	int buffer_error =0;
 	for (i = 0; i < nn->n_outputs; i++) {
 		in = self->inputs[i];
 		out = &nn->outputs[i];
@@ -68,11 +69,6 @@ static int output_execute(struct nn_node *self, struct nn_graph *nn)
 		if( in->data_size > 0){
 			if(nn->loopstack.n > 0 && nn_graph_output_expanded(nn, i)){
                 uint32_t offset = nn_loopstack_get_offset(nn, i);
-
-                if (out->max_size < in->data_size + offset) {
-                    return errlog(nn,"output %d too small (%zu < %zu)",i, out->max_size, in->data_size + offset);
-                }
-
                 uint32_t iteration = nn_loopstack_get_itercount(nn);
 
                 if(iteration == 0){
@@ -83,23 +79,34 @@ static int output_execute(struct nn_node *self, struct nn_graph *nn)
                     out->shape.batches += in->shape.batches;
                     out->data_size += in->data_size;
                 }
-
+                if (out->max_size < in->data_size + offset) {
+                    errlog(nn,"output %d too small (%zu < %zu)",i, out->max_size, in->data_size + offset);
+                    buffer_error = 1;
+                    continue;
+                }
                 uint8_t* out_data = out->data;
-
+                
 				nn_mcmanager_vmemcpy( nn, &mcman, out_data+offset, in->data, in->data_size);
+				
 				nn_loopstack_increment_offset(nn, i, in->data_size);
 			}
 			else{
-                if (out->max_size < in->data_size) {
-                    return errlog(nn,"output %d too small (%zu < %zu)",i, out->max_size, in->data_size);
-                }
                 out->shape = in->shape;
 				out->data_size = in->data_size;
+                if (out->max_size < in->data_size) {
+                    errlog(nn,"output %d too small (%zu < %zu)",i, out->max_size, in->data_size);
+					buffer_error = 1;
+					continue;
+                }
 				nn_mcmanager_vmemcpy( nn, &mcman, out->data, in->data, in->data_size);
 			}
 		}
 	}
 	nn_mcmanager_wait( nn, &mcman);
+
+	if (buffer_error){
+		return NN_EXECUTE_BUFFER_SIZE_ERROR;
+	}
 	/* Copy input tensor to output */
 	logmsg(nn,2,"copied %d tensors",self->n_inputs);
 	return 0;

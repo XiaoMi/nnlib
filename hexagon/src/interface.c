@@ -66,7 +66,7 @@ typedef void* remote_handle64;
 #endif
 
 #define UNUSED_PARAM(x) (void)(x)
-#define NN_VERSION 0x00020C00
+#define NN_VERSION 0x00020F00
 
 #define ROUNDUP_8BYTES(X)   ((X+7)&(~7))
 
@@ -614,6 +614,7 @@ int hexagon_nn_domains_populate_const_node(
 }
 
 
+
 /*
  * FIXME: hexagon_nn_tensordef will no longer be compatible with struct tensor
  * as we make it more complex.
@@ -703,8 +704,37 @@ int hexagon_nn_execute_new(
 	pcycle_stop = nn_os_get_cycles(graph);
 	graph->execution_total_cycles = pcycle_stop - pcycle_start;
 	graph->multi_execution_total_cycles += graph->execution_total_cycles;
-	if (ret) return errlog(graph,"fail in execute_new()");
+	if (ret) errlog(graph,"fail in execute_new()");
 	return ret;
+}
+
+int hexagon_nn_execute_with_info(
+	nn_id_t id,
+	const hexagon_nn_tensordef *inputs,
+	uint32_t n_inputs,
+	hexagon_nn_tensordef *outputs,
+	uint32_t n_outputs,
+	hexagon_nn_execute_info *execute_info) {
+
+    /* Prototype implementation just wraps hexagon_execute_new.
+       Eventually it should be the other way around */
+	int result = hexagon_nn_execute_new(id, inputs, n_inputs, outputs, n_outputs);
+
+    /* initialize extra info to 0 */
+    if(execute_info->extraInfo != NULL|| execute_info->extraInfoLen != 0){
+       memset(execute_info->extraInfo,0, execute_info->extraInfoLen);
+	}
+    /* Set the returned extraInfoValidLen to 0. */
+    execute_info->extraInfoValidLen = 0;
+    /* Just handle basic errors right now */
+    if (result == 0) {
+        execute_info->result = NN_EXECUTE_SUCCESS;
+    } else if(result == -1) {
+        execute_info->result = NN_EXECUTE_ERROR;
+    } else{
+    	execute_info->result = result;
+    }
+	return 0;
 }
 
 int hexagon_nn_domains_execute_new(
@@ -717,6 +747,18 @@ int hexagon_nn_domains_execute_new(
 {
 	UNUSED_PARAM(h);
 	return hexagon_nn_execute_new(id, inputs, n_inputs, outputs, n_outputs);
+}
+
+int hexagon_nn_domains_execute_with_info(
+        remote_handle64 h,
+	nn_id_t id,
+	const hexagon_nn_tensordef *inputs,
+	uint32_t n_inputs,
+	hexagon_nn_tensordef *outputs,
+        uint32_t n_outputs,
+        hexagon_nn_execute_info *execute_info) {
+        UNUSED_PARAM(h);
+        return hexagon_nn_execute_with_info(id, inputs, n_inputs, outputs, n_outputs, execute_info);
 }
 
 int hexagon_nn_execute(

@@ -111,6 +111,15 @@ int hexagon_nn_graph_config(
 	uint32_t num_string_options
 	);
 
+
+/* MUST MATCH IDL !! */
+typedef struct {
+        hexagon_nn_execute_result result;
+        unsigned char* extraInfo;
+        int extraInfoLen;
+        int extraInfoValidLen; //like data_valid_len in tensordef
+} hexagon_nn_execute_info;
+
 /* 
  * Definition / I/O for a Tensor
  * Must match IDL
@@ -198,6 +207,12 @@ int hexagon_nn_execute_new(nn_id_t id,
 	uint32_t n_tensors_in,
 	hexagon_nn_tensordef *tensors_out,
 	uint32_t n_tensors_out);
+int hexagon_nn_execute_with_info(nn_id_t id,
+	const hexagon_nn_tensordef *tensors_in,
+	uint32_t n_tensors_in,
+	hexagon_nn_tensordef *tensors_out,
+	uint32_t n_tensors_out, 
+	hexagon_nn_execute_info *execute_info);
 int hexagon_nn_teardown(nn_id_t id);
 int hexagon_nn_reset_perfinfo(nn_id_t id, uint32_t event);
 int hexagon_nn_get_perfinfo(nn_id_t id, 

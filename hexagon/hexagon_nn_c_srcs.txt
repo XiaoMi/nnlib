@@ -48,6 +48,7 @@ hexagon/src/graph_looping.c
 hexagon/src/data_utils.c
 hexagon/src/expand_grouped_conv_nodes.c
 hexagon/src/expand_dilated_conv_nodes.c
+hexagon/src/dwconv2dbbb_c.c
 hexagon/src/dwconv2dhhh_c.c
 hexagon/ops/src/op_resizebilinear.c 
 hexagon/ops/src/op_resizebilinear_d32.c 
@@ -76,6 +77,7 @@ hexagon/ops/src/op_resizenear.c
 hexagon/ops/src/op_resizeunitsquare_f.c 
 hexagon/ops/src/op_resizeunitsquare.c 
 hexagon/ops/src/op_mirrorpad.c 
+hexagon/ops/src/op_mirrorpad_d32.c 
 hexagon/ops/src/op_add.c 
 hexagon/ops/src/op_add_d32.c 
 hexagon/ops/src/op_prod_f.c 
@@ -224,3 +226,6 @@ hexagon/ops/src/op_proposal_8.c
 hexagon/ops/src/op_box_with_nms_limit_f.c
 hexagon/ops/src/op_box_with_nms_limit_q8q16.c
 hexagon/ops/src/op_l2normalize_8.c
+hexagon/ops/src/op_dwise_snode_8bit.c
+hexagon/ops/src/op_lsh_projection.c
+hexagon/ops/src/op_correlation1d.c

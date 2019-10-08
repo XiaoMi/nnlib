@@ -106,6 +106,18 @@ struct hvx_quant_parms
 	float minval, maxval;
 };
 
+struct requant_runstate {
+    uint8_t const *inp;
+    uint8_t *outp;
+    unsigned n_elem;
+    unsigned chunk;
+    volatile unsigned current_pos;
+    float gain;
+    int32_t in_offset;
+    int32_t out_offset;
+    nn_sem_t done_sem;
+};
+
 // saturate_u8
 // this is the same as clip_i32( val, 0, 255) (but there's an opcode for it)
 
@@ -293,20 +305,23 @@ static inline float flt_div_255( float x)
 #endif
 }
 
+#if 0 // disused - 16 bit scaling divides by 65536.
 /* tailor series expansion (1-2^-16)^-1 = 1 + k + k^2 +k^3 */
 static inline float flt_div_65535( float x)
 {
 #ifdef __hexagon__
         //return  Q6_R_sfmpyacc_RR(0x8.0008p-51f * x, x, 0x8.0008p-19f );
-        return  (x / 65535.0); //Q6_R_sfmpyacc_RR(0x8.0008p-51f * x, x, 0x8.0008p-19f );
+        return  (x / 65535.0f); //Q6_R_sfmpyacc_RR(0x8.0008p-51f * x, x, 0x8.0008p-19f );
 #else
         return (0x8.0008p-19f * x)  +  ( (0x8.0008p-51f) * x);
 #endif
 }
+#endif // disused
+
 static inline uint8_t quantize_uint8(float val, float minval, float maxval)
 {
 	/* We want 0.0 -- 255.0 to resize to 0..255 */
-	float range = fmaxf(0.0001f,maxval-minval);
+	float range = fmaxf(1e-18f, maxval-minval);
 	float resize_amt = 255.0f/range;
 	float value_f = (val - minval) * resize_amt;
 	int32_t value_i = roundf(value_f);
@@ -325,14 +340,14 @@ static inline int get_qu8_level_size_zero( float minval, float maxval, float * l
 // this converts a min and max to level_size and 'zero' for qu16
 static inline int get_qu16_level_size_zero( float minval, float maxval, float * levsize_p)
 {
-    float level_size = flt_div_65535( maxval-minval );
+    float level_size = ( maxval-minval )*(float)(1.0/65536.0);
     int zeroval = roundf_i32( -minval/level_size);
     *levsize_p = level_size;
     return saturate_u16( zeroval );
 }
 static inline uint16_t quantize_uint16(float val, float minval, float maxval)
 {
-	float range = fmaxf(0.0001f, maxval - minval);
+	float range = fmaxf(1e-18f, maxval - minval);
 	float resize_amt = 65536.0f / range;
 	float value_f = (val - minval) * resize_amt;
 	int32_t value_i = roundf(value_f);
@@ -343,7 +358,7 @@ static inline uint16_t quantize_uint16(float val, float minval, float maxval)
 static inline int32_t quantize_uint(float val, float minval, float maxval)
 {
 	/* We want 0.0 -- 255.0 to resize to 0..255 */
-	float range = fmaxf(0.0001f,maxval-minval);
+	float range = fmaxf(1e-18f, maxval - minval);
 	float resize_amt = 255.0f/range;
 	float value_f = (val - minval) * resize_amt;
 	int32_t value_i = roundf(value_f);
@@ -354,7 +369,7 @@ static inline int32_t quantize_uint(float val, float minval, float maxval)
 static inline int32_t quantize_int(float val, float minval, float maxval)
 {
 	/* We want 0.0 -- 255.0 to resize to 0..255 */
-	float range = fmaxf(0.0001f,maxval-minval);
+	float range = fmaxf(1e-18f, maxval - minval);
 	float resize_amt = 255.0f/(range);
 	float value_f = (val - minval) * resize_amt;
 	int32_t value_i = roundf(value_f);
@@ -454,7 +469,7 @@ static inline void quantize_adjust_range(float *out_min, float *out_max, float *
 {
 	float minval = fminf(0.0f,in_min);
 	float maxval = fmaxf(0.0f,in_max);
-	float range = fmaxf(0.0001f,maxval-minval);
+	float range = fmaxf(1e-18f, maxval - minval);
 	float recip_stepsize = 255.0f/range;
 
 	// move either min, or max, as  little as possible, so that
@@ -502,7 +517,7 @@ quantize_adjust_range_u16(float *out_min, float *out_max, float *out_stepsize, f
 {
 	float minval = fminf(0.0f,in_min);
 	float maxval = fmaxf(0.0f,in_max);
-	float range = fmaxf(0.0001f,maxval-minval);
+	float range = fmaxf(1e-18f, maxval - minval);
 	float recip_stepsize = 65536.0f/range;
 
 	if (minval < 0.0f)
@@ -608,6 +623,8 @@ void nn_requantize_i32_to_qu8_hvx( uint8_t *outp, int32_t const * inp, int n, fl
 
 // same with no hvx
 void nn_requantize_i32_to_qu8( uint8_t *outp, int32_t const * inp, int n, float in_level_size, float out_min, float out_max);
+
+void nn_requantize_qu8_to_qu8_hvx(uint8_t *outp, uint8_t const* inp, unsigned n, float gain, int32_t in_offset, int32_t out_offset);
 
 //Find min/max of i32 tensor
 void find_min_max_int32( int32_t const *arr, int n, int32_t * minmaxp );

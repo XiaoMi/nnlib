@@ -339,9 +339,6 @@ static int input_execute_multibatch(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
-
-
-
 static int input_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking input node %p",self);
@@ -359,7 +356,14 @@ static int input_check(struct nn_node *self, struct nn_graph *nn)
 	}
 	nn_sem_init(&info->donesem,0);
 	self->opaque = info;
-	info->allocated_output = self->outputs[0]->data;
+
+	if(self->outputs) { //n_ouputs > 0
+		info->allocated_output = self->outputs[0]->data;
+	}
+	else {
+		info->allocated_output = NULL;
+	}
+
 	logmsg(nn,2,"input node %p check OK",self);
 	return 0;
 }

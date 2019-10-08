@@ -59,6 +59,8 @@ typedef long HVX_Vect_UN __attribute__((__vector_size__(128))) __attribute__((al
 #define vmemu(A) *((HVX_Vect_UN *)(A))
 #endif
 
+#define SHIFT 12
+
 BROADCAST_STRIDE_11_FUNC( maximum_stride_11, uint8_t, uint8_t, max_u32)
 BROADCAST_STRIDE_10_FUNC( maximum_stride_10, uint8_t, uint8_t, max_u32)
 BROADCAST_REV_STRIDE_01_FUNC( maximum_rev_stride_01, uint8_t, uint8_t, max_u32)
@@ -68,29 +70,27 @@ BROADCAST_STRIDE_10_FUNC( minimum_stride_10, uint8_t, uint8_t, min_u32)
 BROADCAST_REV_STRIDE_01_FUNC( minimum_rev_stride_01, uint8_t, uint8_t, min_u32)
 
 static const struct elementwise_funcs maximum_funcs = {
-        .op_stride_11 = maximum_stride_11,
-        .op_stride_10 = maximum_stride_10,
-        .op_rev_stride_01 = maximum_rev_stride_01,
-        .in_elbytes = 1,
-        .out_elbytes = 1,
-        .out_typecode = NN_TYPE_QUINT8
+    .op_stride_11 = maximum_stride_11,
+    .op_stride_10 = maximum_stride_10,
+    .op_rev_stride_01 = maximum_rev_stride_01,
+    .in_elbytes = 1,
+    .out_elbytes = 1,
+    .out_typecode = NN_TYPE_QUINT8
 };
 
 static const struct elementwise_funcs minimum_funcs = {
-        .op_stride_11 = minimum_stride_11,
-        .op_stride_10 = minimum_stride_10,
-        .op_rev_stride_01 = minimum_rev_stride_01,
-        .in_elbytes = 1,
-        .out_elbytes = 1,
-        .out_typecode = NN_TYPE_QUINT8
+    .op_stride_11 = minimum_stride_11,
+    .op_stride_10 = minimum_stride_10,
+    .op_rev_stride_01 = minimum_rev_stride_01,
+    .in_elbytes = 1,
+    .out_elbytes = 1,
+    .out_typecode = NN_TYPE_QUINT8
 };
 
 typedef struct minmax_info
 {
     int32_t a_tensor_size;
     int32_t b_tensor_size;
-    float *a_tensor_intermed_f_buffer;
-    float *b_tensor_intermed_f_buffer;
     uint8_t *a_tensor_intermed_b_buffer;
     uint8_t *b_tensor_intermed_b_buffer;
     uint8_t* a_buffer_ptr; //points to the data buffer that is used to do the operation
@@ -152,6 +152,8 @@ static inline void qminmax_hvx(
         HVX_Vector ind_a = (a_const_value != 0) ? vaconst_val : *ptr_a++;
         HVX_Vector ind_b = (b_const_value != 0) ? vbconst_val : *ptr_b++;
 
+
+
         HVX_Vector res = op == MINIMUM ? Q6_Vub_vmin_VubVub(ind_a, ind_b) : Q6_Vub_vmax_VubVub(ind_a, ind_b);
         *((HVX_Vector *)(&out[i * sizeof(HVX_Vector)])) = res;
     }
@@ -165,30 +167,45 @@ static inline void qminmax_hvx(
     }
 }
 
-static int requantize_to_outrange(struct nn_graph *nn, float in_min, float in_max, float out_min, float out_max,
-        const uint8_t* in_data, uint8_t* requant_data, uint32_t in_size, float*  intermed_f_buffer) {
+static void requantize_to_outrange(float in_min, float in_max, float out_min, float out_max,
+        const uint8_t* in_data, uint8_t* requant_data, uint32_t in_size) {
 
-    float step = flt_div_255(in_max - in_min);
-    if(step == 0.0f) return errlog(nn, "munimun invalid input");
-    int offset = saturate_u8(roundf_i32(-in_min/step));
+    int loopcount = in_size / ALIGN_SIZE;
+    int leftovers = in_size % ALIGN_SIZE;
+    float in_step = flt_div_255(in_max - in_min);
+    int in_offset = get_qu8_level_size_zero(in_min, in_max, &in_step);
+    float out_step = flt_div_255(out_max - out_min);
+    int out_offset =get_qu8_level_size_zero(out_min, out_max, &out_step);
 
+    in_offset = (in_offset << 8) | in_offset;
+    in_offset = Q6_R_combine_RlRl(in_offset, in_offset);
+    int mult = round(((float)(1 << SHIFT)) * (in_step / out_step));
+
+    mult = Q6_R_combine_RlRl(mult, mult);
+
+    HVX_Vector v_in_offset = Q6_V_vsplat_R(in_offset);
+    HVX_Vector v_mult = Q6_V_vsplat_R(mult);
+    HVX_Vector v_out_offset = q6op_Vh_vsplat_R(out_offset);
     l2fetch(in_data, 128, 128, (in_size + 127) / 128u);
-    hvx_do_dequantize(in_data, intermed_f_buffer, in_size, offset, step);
+    HVX_Vector *ptr = (HVX_Vector *)in_data;
 
-    struct hvx_quant_parms qparms;
-    float fbuf[2];
-    fbuf[0] = -out_min;
-    fbuf[1] = out_max;
-    if( find_scaling_for_hvx_quant(fbuf, &qparms) !=0 ){
-        errlog(nn,"minimum/maximum: inf or NaN input");
+    int i = 0;
+    for (i = 0; i < loopcount; i++) {
+        HVX_Vector v_in = *ptr;
+        ptr++;
+
+        HVX_Vector v_requant = jointly_quantize(v_in, v_in_offset, v_mult, v_out_offset, SHIFT);
+        *((HVX_Vector *)&requant_data[i*sizeof(HVX_Vector)]) = v_requant;
     }
-    quantize_floats_to_8b_asm(intermed_f_buffer, requant_data, in_size, qparms.min_offset, qparms.common_exp, qparms.scaling);
-    return 0;
+    if (leftovers) {
+        HVX_Vector v_in = *ptr;
+        HVX_Vector v_requant = jointly_quantize(v_in, v_in_offset, v_mult, v_out_offset, SHIFT);
+        q6op_vstu_variable_ARV(&requant_data[i * sizeof(HVX_Vector)], leftovers, v_requant);
+    }
 }
 
 static void qminmax_thread_process(struct nn_graph *nn, void *vtdata)
 {
-
     struct minmax_tdata *td = vtdata;
     int op = td->op;
     const struct tensor *a_tensor = td->a_tensor;
@@ -208,14 +225,11 @@ static void qminmax_thread_process(struct nn_graph *nn, void *vtdata)
     uint8_t *a_data_pad;
     uint8_t *b_data_pad;
 
-    int res = 0;
     if(info->a_min_float != info->out_min_float || info->a_max_float != info->out_max_float) {
 
-        res = requantize_to_outrange(nn, info->a_min_float, info->a_max_float, info->out_min_float, info->out_max_float,
-                               a_data, a_requant_data, info->a_tensor_size, info->a_tensor_intermed_f_buffer);
+        requantize_to_outrange(info->a_min_float, info->a_max_float, info->out_min_float, info->out_max_float,
+                               a_data, a_requant_data, info->a_tensor_size);
         info->a_buffer_ptr = a_requant_data;
-        if(0!=res) td->opt_flag = 2;
-
     }
     else {
         info->a_buffer_ptr = (uint8_t*)a_data;
@@ -223,11 +237,9 @@ static void qminmax_thread_process(struct nn_graph *nn, void *vtdata)
 
     if(info->b_min_float != info->out_min_float || info->b_max_float != info->out_max_float) {
 
-        res = requantize_to_outrange(nn, info->b_min_float, info->b_max_float, info->out_min_float, info->out_max_float,
-                               b_data, b_requant_data, info->b_tensor_size, info->b_tensor_intermed_f_buffer);
+        requantize_to_outrange(info->b_min_float, info->b_max_float, info->out_min_float, info->out_max_float,
+                               b_data, b_requant_data, info->b_tensor_size);
         info->b_buffer_ptr = b_requant_data;
-        if(0!=res) td->opt_flag = 2;
-
     }
     else {
         info->b_buffer_ptr = (uint8_t*)b_data;
@@ -240,6 +252,7 @@ static void qminmax_thread_process(struct nn_graph *nn, void *vtdata)
     elements = opt_info.elements;
     a_const_value = opt_info.a_const_value;
     b_const_value = opt_info.b_const_value;
+
     if (td->opt_flag == 1)
     {
         qminmax_hvx(a_data_pad, b_data_pad, out_data, elements, a_const_value, b_const_value, op);
@@ -273,35 +286,25 @@ static int minmax_execute(struct nn_node *self, struct nn_graph *nn, int op)
         out_min = tensor_get_float(self->inputs[6],0);
         out_max = tensor_get_float(self->inputs[7],0);
     }
+    else if (self->n_inputs == 7) {
+        out_min = tensor_get_float(self->inputs[6],0);
+        out_max = fmaxf(a_max_float, b_max_float);
+    }
     else {
         out_min = fminf(a_min_float, b_min_float);
         out_max = fmaxf(a_max_float, b_max_float);
     }
 
-    uint32_t a_tensor_size = a_tensor->shape.batches * a_tensor->shape.height * a_tensor->shape.width * a_tensor->shape.depth;
-    uint32_t b_tensor_size = b_tensor->shape.batches * b_tensor->shape.height * b_tensor->shape.width * b_tensor->shape.depth;
+    if(out_min >= out_max) return errlog(nn, "minimum/maximum output min >= output max");
 
-    int a_intermed_f_buffer_size = (a_tensor_size + 128) * sizeof(float);
-    a_intermed_f_buffer_size = (a_intermed_f_buffer_size + 127)  & ~127;    //align to 128 bytes
-    int b_intermed_f_buffer_size = (b_tensor_size + 128) * sizeof(float);
-    b_intermed_f_buffer_size = (b_intermed_f_buffer_size + 127)  & ~127;
-    int a_intermed_b_buffer_size = a_tensor_size + 128;
-    a_intermed_b_buffer_size = (a_intermed_b_buffer_size + 127)  & ~127;
-    int b_intermed_b_buffer_size = b_tensor_size + 128;
-    b_intermed_b_buffer_size = (b_intermed_b_buffer_size + 127)  & ~127;
+    uint32_t a_tensor_size = a_tensor->data_size;
+    uint32_t b_tensor_size = b_tensor->data_size;
 
-    size_t total_size = a_intermed_f_buffer_size + b_intermed_f_buffer_size + a_intermed_b_buffer_size + b_intermed_b_buffer_size;
-    if(nn_scratch_grow(nn,total_size)) return errlog(nn, "miminum/maximum failed to assign memory \n");
-
-    uint8_t *head_temp_mem = nn->scratch;
-    float* a_tensor_intermed_f_buffer = (float*)head_temp_mem;
-    float* b_tensor_intermed_f_buffer = (float*)((uint8_t*) a_tensor_intermed_f_buffer + a_intermed_f_buffer_size);
-    uint8_t* a_tensor_intermed_b_buffer = (uint8_t*)b_tensor_intermed_f_buffer + b_intermed_f_buffer_size;
-    uint8_t* b_tensor_intermed_b_buffer = a_tensor_intermed_b_buffer + a_intermed_b_buffer_size;
+    uint32_t intermed_buffer_size = max_u32(a_tensor_size, b_tensor_size) + 128;
+    uint8_t* a_tensor_intermed_b_buffer = nn_memalign(128, intermed_buffer_size);   //use memalign here since broadcast uses nn_scratch
+    uint8_t* b_tensor_intermed_b_buffer = nn_memalign(128, intermed_buffer_size);
 
     struct minmax_info info;
-    info.a_tensor_intermed_f_buffer = a_tensor_intermed_f_buffer;
-    info.b_tensor_intermed_f_buffer = b_tensor_intermed_f_buffer;
     info.a_tensor_intermed_b_buffer = a_tensor_intermed_b_buffer;
     info.b_tensor_intermed_b_buffer = b_tensor_intermed_b_buffer;
     info.a_tensor_size = a_tensor_size;
@@ -346,7 +349,6 @@ static int minmax_execute(struct nn_node *self, struct nn_graph *nn, int op)
     }
     else
     {
-
         if (op == MINIMUM)
         {
             retval = nn_elementwise_with_broadcast(self, nn, &minimum_funcs, info.a_buffer_ptr, info.b_buffer_ptr, NULL);
@@ -354,11 +356,13 @@ static int minmax_execute(struct nn_node *self, struct nn_graph *nn, int op)
         else
         {
             retval = nn_elementwise_with_broadcast(self, nn, &maximum_funcs, info.a_buffer_ptr, info.b_buffer_ptr, NULL);
-
         }
-
     }
 
+    if (a_tensor_intermed_b_buffer)
+        nn_free(a_tensor_intermed_b_buffer);
+    if (b_tensor_intermed_b_buffer)
+        nn_free(b_tensor_intermed_b_buffer);
     return retval;
 }
 

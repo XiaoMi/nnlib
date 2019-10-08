@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -33,20 +33,44 @@
  *
  */
 
+Purpose:
+========
+"Smart Wrapper" detects the SOC and automatically loads the correct
+Skel library to maximize performance.
 
-#include <nn_graph.h>
-#include <string.h>
-#include <stdio.h>
-#include <quantize.h>
-#include <math.h>
-#include <nn_broadcast.h>
-#include <op_add_sub.h>
-#if defined(__hexagon__)
-#include "hexagon_types.h"
-#endif
+"Smart Wrapper" builds on top of "Graph Wrapper" functionality and 
+is dependent on those source files.
 
-// This creates:
-//  nn_ops_for_QuantizedSub_8p8to32
-//  nn_ops_for_QuantizedSub_8p8to32_ref
+Source code:
+============
+    hexagon
+       |- host
+       |    |- hexnn_dsp_api.c
+       |    |- hexnn_dsp_api.h
+       |    |- hexnn_dsp_api_impl.c
+       |    |- hexnn_dsp_domians_api.c
+       |    |- hexnn_dsp_domains_api.h
+       |    |- hexnn_dsp_domains_api_impl.c
+       |    |- hexnn_dsp_smart_wrapper_api.c
+       |    |- hexnn_dsp_smart_wrapper_api.h
+       |    |- hexnn_graph_wrapper.cpp
+       |    |- hexnn_graph_wrapper.hpp
+       |    |_ hexnn_soc_defines.h
+       |
+       |_ interface
+            |_ hexnn_graph_wrapper_interface.h
 
-CREATE_OP_ADD_SUB(sub, Sub, -)
+Interface:
+==========
+There is no interface change required. Application can use existing call flow.
+In order to use this feature, application must only update makefile by including
+new files instead of hexagon_nn_stub.c.
+
+Please look at the example makefile under examples/wrapperexample/android.min.
+This is a stand-alone application that builds with "Smart Wrapper" turned on
+and makes some common hexagon-nn calls.
+
+Prerequisite:
+=============
+1. All of the prerequisites for building "Graph Wrapper" must be met. Please look
+   at docs/graph_wrapper.txt for more information. 

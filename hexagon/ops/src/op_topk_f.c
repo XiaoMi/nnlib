@@ -130,6 +130,7 @@ static inline void topk_f_push_value_to_heap(struct topk_f_heap * heap,float val
         //current value is smaller than parent value in min-heap
         topk_f_swap_elements(heap,p,i);
         i = p;
+        p = PARENT_IDX(i);
    }
 }
 

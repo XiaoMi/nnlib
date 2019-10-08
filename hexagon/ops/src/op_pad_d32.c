@@ -63,16 +63,49 @@
 //
 // Strategy is agnostic to elementsize
 //
+//
+// QuantizedPadForConv_8_d32
+// This does a QuantizedPad8 operation, except:
+//  (1) the only possible fill value is (quantized 0.0).
+//  (2) the padding is determined by examining the input shape, the supplied filter and stride shape,
+//      and the 'padding_mode' (which is any convolution padding mode, other than VALID).
+//    The padding on h,w which produces the proper result (when a 'valid' convolution is done to the padded data)
+//    is selected.
+//   5 inputs:
+//        0 : input tensor, qu8
+//        1 : scalar float (input min)
+//        2 : scalar float (input max)
+//        3 : weights tensor (only the first 2 dims are examined; filt_height, filt_wid)
+//        4 : stride tensor (only the h and w dims are examined: stride_ht, stride_wid)
+//    3 output:
+//        0: output tensor, qu8
+//        1 : scalar float (output min)  (these are copied from input)
+//        2 : scalar float (output max)
+//
+// There should be no need for a non-d32 version of this; it is only generated in prepare. When we find
+// a d32 supernode with a filter size that may not work due to limitations of padding, we insert a
+// QuantizedPadForConv_8_d32 ahead of it, and change it to the same conv with VALID padding.
+//
+//  QuantizedPadForConv_u16_d32:
+//    Same thing but works on u16 data.
+
+//
 struct pad_s32_info {
 	// these are set when the field is allocated in check()
 	uint8_t elbytes;	// 1 or 2
 	uint8_t dtype;		// NN_TYPE_UINT8 or NN_TYPE_QUINT8 or NN_TYPE_QINT8
+	uint8_t is_padforconv;
 	// fields to check if the strategy is valid.
 	uint8_t strategy_valid;
 	struct tensor in_tensor;	// copy of input tensor
 	float in_min,in_max;	// input range
 	float pad_val_f;
 	uint32_t pad_amount[4][2];	// values from the pad tensor.
+
+	// if it's a PadForConv, the next four fields store the last-seen filter
+	// size and stride; and the pad_amount[] are the previously calculated padding.
+	uint32_t prev_filt_h, prev_filt_w;
+	uint32_t prev_stride_h, prev_stride_w;
 
 	struct shape out_shape;
 	struct tensor_addressing tin;
@@ -119,26 +152,40 @@ pad32_check_strategy(struct nn_node *self, struct nn_graph *nn )
 	struct tensor const  *in_tensor = self->inputs[0];
 	struct tensor const *in_min_tensor = self->inputs[1];
 	struct tensor const *in_max_tensor = self->inputs[2];
-	struct tensor const * pads_tensor = self->inputs[3];
 	if( memcmp( in_tensor,&info->in_tensor,sizeof(struct tensor))!=0) return 0;
-	//
-	// check pad values
-	//
-	int rank = pads_tensor->shape.width;
-	if( rank <1 || rank > 4 || pads_tensor->shape.depth!=2
-			|| pads_tensor->data_size < sizeof(int32_t)*2*rank){
-		return 0;
-	}
-	if( memcmp( pads_tensor->data,info->pad_amount[4-rank],sizeof(int32_t)*2*rank)!=0)
-		return 0;
-	for(int i=0; i < 4-rank; i++){
-		if( info->pad_amount[i][0] !=0 || info->pad_amount[i][1] != 0){
+
+	float req_padval = 0.0f;
+
+	if( !info->is_padforconv){
+		struct tensor const * pads_tensor = self->inputs[3];
+		//
+		// check pad values
+		//
+		int rank = pads_tensor->shape.width;
+		if( rank <1 || rank > 4 || pads_tensor->shape.depth!=2
+				|| pads_tensor->data_size < sizeof(int32_t)*2*rank){
 			return 0;
 		}
+		if( memcmp( pads_tensor->data,info->pad_amount[4-rank],sizeof(int32_t)*2*rank)!=0)
+			return 0;
+		for(int i=0; i < 4-rank; i++){
+			if( info->pad_amount[i][0] !=0 || info->pad_amount[i][1] != 0){
+				return 0;
+			}
+		}
+		if(self->n_inputs >=5) req_padval = tensor_get_float( self->inputs[4],0);
+	}else{
+		// check filt size and stride are the same
+		struct tensor const * filt_tensor = self->inputs[3];
+		struct tensor const * stride_tensor = self->inputs[4];
+		if( info->prev_filt_h != filt_tensor->shape.filt_height
+			|| info->prev_filt_w != filt_tensor->shape.filt_width
+			|| info->prev_stride_h != stride_tensor->shape.height
+			|| info->prev_stride_w != stride_tensor->shape.width )
+			return 0;
 	}
 	// all OK except maybe for scaling...
 	// check that
-	float req_padval = (self->n_inputs <5)? 0.0f : tensor_get_float( self->inputs[4],0);
 	if( tensor_get_float(in_min_tensor,0) != info->in_min
 	  || tensor_get_float(in_max_tensor,0) != info->in_max
 	  || req_padval != info->pad_val_f )
@@ -153,27 +200,68 @@ pad32_build_strategy(struct nn_node *self, struct nn_graph *nn )
 	struct pad_s32_info *info = (struct pad_s32_info*) self->opaque;
 	int is_16 = info->elbytes==2;
 	struct tensor const  *in_tensor = self->inputs[0];
-	struct tensor const * pads_tensor = self->inputs[3];
 	struct tensor *out_tensor = self->outputs[0];
 
 	info->strategy_valid = 0;
 	info->in_tensor = *in_tensor;
 
-	int rank = pads_tensor->shape.width;
-	if( rank <1 || rank > 4 || pads_tensor->shape.depth!=2
-			|| pads_tensor->data_size < sizeof(int32_t)*2*rank){
-		return errlog(nn,"bad shape for dims tensor");
-	}
-	{
-		int32_t const * pads_arr = (int32_t const*)pads_tensor->data;
-		uint32_t *fillp = info->pad_amount[4-rank];
-		if( rank < 4)
-			memset( info->pad_amount, 0, sizeof(info->pad_amount[0])*(4-rank));
-		for( int i=0;i < rank*2;i++){
-			int p = pads_arr[i];
-			if( p < 0) return errlog( nn,"negative value in pads tensor");
-			fillp[i] = p;
+	if(!info->is_padforconv ){
+		struct tensor const * pads_tensor = self->inputs[3];
+		int rank = pads_tensor->shape.width;
+		if( rank <1 || rank > 4 || pads_tensor->shape.depth!=2
+				|| pads_tensor->data_size < sizeof(int32_t)*2*rank){
+			return errlog(nn,"bad shape for dims tensor");
 		}
+		{
+			int32_t const * pads_arr = (int32_t const*)pads_tensor->data;
+			uint32_t *fillp = info->pad_amount[4-rank];
+			if( rank < 4)
+				memset( info->pad_amount, 0, sizeof(info->pad_amount[0])*(4-rank));
+			for( int i=0;i < rank*2;i++){
+				int p = pads_arr[i];
+				if( p < 0) return errlog( nn,"negative value in pads tensor");
+				fillp[i] = p;
+			}
+		}
+	}else{
+		// PadForConv
+		// compute padding from filter shape, stride, self->padding.
+		struct tensor const * filt_tensor = self->inputs[3];
+		struct tensor const * stride_tensor = self->inputs[4];
+		unsigned filt_h = filt_tensor->shape.filt_height;
+		unsigned filt_w = filt_tensor->shape.filt_width;
+		unsigned stride_h = stride_tensor->shape.height;
+		unsigned stride_w = stride_tensor->shape.width;
+
+		info->prev_filt_h = filt_h;
+		info->prev_filt_w = filt_w;
+		info->prev_stride_h = stride_h;
+		info->prev_stride_w = stride_w;
+
+		// do the padding calc
+		int32_t h_pad_before, h_pad_after;
+		int32_t w_pad_before, w_pad_after;
+
+		int out_h = nn_pad_compute_outsize_and_pad( info->in_tensor.shape.height, filt_h, stride_h, self->padding, &h_pad_before, &h_pad_after );
+		int out_w = nn_pad_compute_outsize_and_pad( info->in_tensor.shape.width, filt_w, stride_w, self->padding, &w_pad_before, &w_pad_after );
+		if( out_h <1 || out_w <1) return errlog(nn,"invalid size/filter/padding detected in PadForConv");
+
+		//
+		// note that h_pad_after, w_pad_after may be <0; this means that the operation doesn't use all the input (usually due to a large stride)
+		// and we treat those as 0 here.
+		if ( h_pad_after < 0) h_pad_after = 0;
+		if ( w_pad_after < 0) w_pad_after = 0;
+
+		info->pad_amount[1][0] = h_pad_before;
+		info->pad_amount[1][1] = h_pad_after;
+		info->pad_amount[2][0] = w_pad_before;
+		info->pad_amount[2][1] = w_pad_after;
+
+		logmsg(nn,3,"PadForConv: input is (%d,%d) - filter (%d,%d) stride (%d,%d) pad mode = %d; pad by h=%d:%d w = %d:%d",
+				(int) info->in_tensor.shape.height, (int) info->in_tensor.shape.width,
+				filt_h, filt_w, stride_h, stride_w, (int)self->padding,
+				(int)h_pad_before, (int)h_pad_after,(int)w_pad_before, (int)w_pad_after);
+
 	}
 	int elbytes = info->elbytes;
 
@@ -276,7 +364,7 @@ pad32_setup_scaling( struct nn_graph * nn,struct nn_node *self, struct pad_s32_i
 	float in_min = tensor_get_float(self->inputs[1],0);
 	float in_max = tensor_get_float(self->inputs[2],0);
 
-	if( self->n_inputs >= 5){
+	if( !info->is_padforconv && self->n_inputs >= 5){
 		pad_val_f =  tensor_get_float( self->inputs[4],0);
 		// if there's an input[5] and it's non zero, it is disallowed
 		// for the pad to be outside the range at all.
@@ -419,11 +507,19 @@ static int pad_d32_check(struct nn_node *self, struct nn_graph *nn)
 	if( info == NULL) return errlog(nn,"calloc failed");
 	self->opaque = info;
 	int dtype,elbytes;
+	int is_pad_for_conv =0;
+
 	switch( self->node_type){
+		case OP_QuantizedPadForConv_8_d32:
+			is_pad_for_conv = 1;
+			/* no break */
 		case OP_QuantizedPad_8_d32:
 			dtype = NN_TYPE_QUINT8;
 			elbytes=1;
 			break;
+		case OP_QuantizedPadForConv_u16_d32:
+			is_pad_for_conv = 1;
+			/* no break */
 		case OP_QuantizedPad_u16_d32:
 			dtype = NN_TYPE_QUINT16;
 			elbytes=2;
@@ -435,6 +531,7 @@ static int pad_d32_check(struct nn_node *self, struct nn_graph *nn)
 		default:
 			return errlog(nn,"bad node_type %d",(int)self->node_type);
 	}
+	info->is_padforconv = is_pad_for_conv;
 	info->dtype = dtype;
 	info->elbytes = elbytes;
 	return 0;
@@ -467,6 +564,27 @@ struct nn_node_ops nn_ops_for_QuantizedPad_u16_d32 = {
 	.ctor = node_alloc_common,
 	.dtor = node_free_common_release_opaque,
 	.n_inputs = NN_IOCOUNT_RANGE(4,6),
+	.n_outputs = NN_IOCOUNT(3),
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
+};
+
+
+struct nn_node_ops nn_ops_for_QuantizedPadForConv_8_d32 = {
+	.execute = pad_d32_execute,
+	.check = pad_d32_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common_release_opaque,
+	.n_inputs = NN_IOCOUNT(5),
+	.n_outputs = NN_IOCOUNT(3),
+	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
+};
+
+struct nn_node_ops nn_ops_for_QuantizedPadForConv_u16_d32 = {
+	.execute = pad_d32_execute,
+	.check = pad_d32_check,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common_release_opaque,
+	.n_inputs = NN_IOCOUNT(5),
 	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT
 };

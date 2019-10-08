@@ -73,8 +73,16 @@ hexagon/asm_src/fullconnlayerbatch_h.S
 hexagon/asm_src/fullconnlayerbatch1_h.S
 hexagon/asm_src/gvconv2db2b2b2_d32_h_v60.S
 hexagon/asm_src/gvconv3322bbb_h.S
+hexagon/asm_src/dwconv2dbbb_s1_7xN_h.S
+hexagon/asm_src/dwconv2dbbb_s2_7xN_h.S
 hexagon/asm_src/dwconv2dhhh_MxN_h.S
 hexagon/asm_src/dwconv2dbbb_s1_5xN_h.S
 hexagon/asm_src/dwconv2dbbb_s2_5xN_h.S
 hexagon/asm_src/dwconv2dbbb_s1_3xN_h.S
 hexagon/asm_src/dwconv2dbbb_s2_3xN_h.S
+hexagon/asm_src/d32_16_to_88.S
+hexagon/asm_src/dwconv2dbbb_s1_3x3_h.S
+hexagon/asm_src/dwconv2dbbb_s2_3x3_h.S
+hexagon/asm_src/inconv2db2b2b2_d32_v60_h.S
+hexagon/asm_src/gvsuma_16b_h.S
+hexagon/asm_src/gvint16_h.S

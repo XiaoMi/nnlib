@@ -32,7 +32,7 @@
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
-
+ 
 #include <nn_graph.h>
 #include <hexagon_protos.h>
 #include <stdio.h>
@@ -201,4 +201,3 @@ void dwconv2dbbb_MxN_cn(
     }//out_y
     return;
 }
-

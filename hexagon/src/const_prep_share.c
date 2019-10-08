@@ -95,7 +95,8 @@ nn_cpshare_decref( struct nn_graph *nn, void * cpsharev )
 {
 	struct nn_cpshare_base * cpshare = (struct nn_cpshare_base *)cpsharev;
 	nn_mutex_lock( &nn_const_share_mutex);
-	if( cpshare->ref_count-- <= 0){
+	cpshare->ref_count--;
+	if( cpshare->ref_count <= 0){
 		nn_cpshare_call_dtor( nn, cpshare);
 	}
 	nn_mutex_unlock( &nn_const_share_mutex);

@@ -1,3 +1,8 @@
+# SMART WRAPPER FLAG to turn on GRAPH_WRAPPER
+ifeq ($(SMART_WRAPPER), 1)
+        GRAPH_WRAPPER = 1
+endif
+
 # stand-alone executable
 BUILD_EXES+=graph_app
 graph_app_QAICIDLS += interface/hexagon_nn \
@@ -18,10 +23,15 @@ graph_app_C_SRCS += \
     test/append_const_node_large_array \
     $(COMPILE_GRAPHINIT) \
 
-
 ifeq ($(GRAPH_WRAPPER), 1)
-    graph_app_C_SRCS += hexagon/host/hexnn_dsp_api
+    graph_app_C_SRCS += hexagon/host/hexnn_dsp_api_impl
     graph_app_CPP_SRCS += hexagon/host/hexnn_graph_wrapper
+
+    ifeq ($(SMART_WRAPPER), 1)
+        graph_app_C_SRCS += hexagon/host/hexnn_dsp_smart_wrapper_api hexagon/host/hexnn_dsp_domains_api_impl
+    else
+        graph_app_C_SRCS += hexagon/host/hexnn_dsp_api
+    endif
 else
     graph_app_C_SRCS += $V/hexagon_nn_stub
 endif

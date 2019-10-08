@@ -32,138 +32,6 @@
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
-/*
- * Now that that's out of the way, let's get to the good stuff.
- *
- * This contains memory allocation routines
- */
-
-#ifndef NN_GRAPH_IDL
-#define NN_GRAPH_IDL 1
-
-/* Data types used */
-
-/* Data types in here are statically prefixed with "hexagon_nn" instead of letting the
- * IDL compiler do it (which would prefix it with the interface name)
- * This is to allow the domains version of the hexagon_nn interface, which
- * is called "hexagon_nn_domains" to use the same data types instead of
- * having a duplicated data type set prefixed with "hexagon_nn_domains"
- */
-
-struct hexagon_nn_input {
-	unsigned long src_id;
-	unsigned long output_idx;	// used if src_id not reserved
-};
-
-
-#define HEXAGON_NN_MAX_DIMENSIONS 8
-
-struct hexagon_nn_output {
-	unsigned long rank;
-	unsigned long max_sizes[8];	// IDL doesn't work with #defines maybe?
-	unsigned long elementsize;
-	long zero_offset;		// FUTURE: static range.  Set to 0 for current ops.
-	float stepsize;			// FUTURE: static range.  Set to 0 for current ops.
-};
-
-struct hexagon_nn_perfinfo {
-	unsigned long node_id;
-	unsigned long node_type;
-	unsigned long executions;
-	unsigned long unused;
-	unsigned long counter_lo;	/* IDL generates broken 64 bit types :-( */
-	unsigned long counter_hi;	/* IDL generates broken 64 bit types :-( */
-};
-
-typedef long hexagon_nn_nn_id;
-
-struct hexagon_nn_initinfo {
-	long priority; /* 0 is default, negative is higher priority, higher is lower priority */
-};
-
-enum hexagon_nn_padding_type {
-	NN_PAD_NA,
-	NN_PAD_SAME,
-	NN_PAD_VALID,
-	NN_PAD_MIRROR_REFLECT,
-	NN_PAD_MIRROR_SYMMETRIC,
-	NN_PAD_SAME_CAFFE
-};
-
-enum hexagon_nn_corner_type {
-    NN_CORNER_RELEASE,
-	NN_CORNER_TURBO,
-	NN_CORNER_NOMPLUS,
-	NN_CORNER_NOMINAL,
-	NN_CORNER_SVSPLUS,
-	NN_CORNER_SVS,
-	NN_CORNER_SVS2
-};
-
-enum hexagon_nn_dcvs_type {
-    NN_DCVS_DEFAULT,
-	NN_DCVS_ENABLE,
-	NN_DCVS_DISABLE
-};
-
-struct hexagon_nn_tensordef {
-	unsigned long batches;		/* Batches */
-	unsigned long height;		/* Height */
-	unsigned long width;		/* Width */
-	unsigned long depth;		/* Depth */
-	sequence<octet> data;		/* Data + DataLen */
-	unsigned long data_valid_len;	/* Return location for valid data out */
-	unsigned long unused;		/* Unused */
-};
-
-enum hexagon_nn_option_type {
-	// WARNING - DANGER!  Do not alter existing enum-IDs.
-	//                    These IDs should be stable across builds
-	//                    So you should:
-    //                    Add new items to BOTTOM
-	NN_OPTION_NOSUCHOPTION,
-	NN_OPTION_SCALAR_THREADS,
-	NN_OPTION_HVX_THREADS,
-	NN_OPTION_VTCM_REQ,
-	NN_OPTION_ENABLE_GRAPH_PRINT,
-	NN_OPTION_ENABLE_TENSOR_PRINT,
-	NN_OPTION_TENSOR_PRINT_FILTER,
-	NN_OPTION_HAP_MEM_GROW_SIZE,
-	NN_OPTION_ENABLE_CONST_PRINT,
-
-	//  /\.
-	//   \___ Add NEW entries HERE, at BOTTOM
-	NN_OPTION_LASTPLUSONE
-};
-struct hexagon_nn_uint_option {
-  unsigned long option_id;
-  unsigned long uint_value;
-};
-
-// TODO - see https://jira.qualcomm.com/jira/browse/APD-4745
-//        which suggests trying "string" instead of char[]
-//        for arbitrary length buffers
-#define MAX_STRING_L 256
-struct hexagon_nn_string_option {
-  unsigned long option_id;
-  char string_data[256];
-};
-
-struct hexagon_nn_op_node {
-  unsigned long node_id;
-  unsigned long operation;
-  hexagon_nn_padding_type padding;
-  sequence<hexagon_nn_input> inputs;
-  sequence<hexagon_nn_output> outputs;
-};
-
-struct hexagon_nn_const_node {
-  unsigned long node_id;
-  hexagon_nn_tensordef tensor;
-};
-
-interface hexagon_nn {
-
 
 /* Actual functions in the interface */
 /* Returns 0 on success, nonzero on error unless otherwise noted */
@@ -333,6 +201,12 @@ long execute_new(in hexagon_nn_nn_id id,
 	in sequence<hexagon_nn_tensordef> inputs,
 	rout sequence<hexagon_nn_tensordef> outputs);
 
+/* Enable specifying multiple inputs and outputs, and returning extra info. */
+long execute_with_info(in hexagon_nn_nn_id id,
+	in sequence<hexagon_nn_tensordef> inputs,
+	rout sequence<hexagon_nn_tensordef> outputs,
+        rout hexagon_nn_execute_info execute_info);
+
 /* Initialize a new graph with info, returns a new nn_id or -1 on error */
 long init_with_info(rout hexagon_nn_nn_id g, in hexagon_nn_initinfo info);
 
@@ -360,9 +234,4 @@ long populate_graph(in hexagon_nn_nn_id id, in sequence<octet> graph_data);
 //  /_/   \_\__,_|\__,_| |_| |_|\___|_|  \___|
 //===============================================
 */
-
-
-}; /* interface hexagon_nn */
-
-#endif
 

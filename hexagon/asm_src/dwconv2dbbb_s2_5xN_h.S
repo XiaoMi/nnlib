@@ -159,7 +159,7 @@ dwconv2dbbb_s2_5xN_asm:
 #define   filt_zero            r7        //
 #define   bias_sum             r14       //
 #define   ptr_max              r15       //
-#define   recip_level          r16       //
+#define   recip_level          r10       //
 #define   recip_shift          r8        //
 #define   stride_v             r28       //
 //scaler registers
@@ -242,7 +242,7 @@ dwconv2dbbb_s2_5xN_asm:
       zzzz  = vsplatb(filt_zero)                   //
       next_out_width_32 = memw(sp+#16<<2)          //
    } {
-      next_in_width_depth_stride=mpyi(next_in_width_depth,stride_v)//
+      next_in_width_depth_stride = mpyi(next_in_width_depth,stride_v) //
       _zzz  = lsr(zzzz, #8)                        //
       depth  = memw(sp+#17<<2)                     //
    } {
@@ -256,9 +256,7 @@ dwconv2dbbb_s2_5xN_asm:
    } {
       min = vmem(ptr_max+#1)                       //
       zz__  = asl(zzzz, #16)                       //
-      recip_level = memw(sp+#24<<2)                //
    } {
-      vrecip = vsplat(recip_level)                 //
       filt_size = memw(sp+#20<<2)                  //
       recip_shift = memw(sp+#25<<2)                //
    } {
@@ -270,6 +268,9 @@ dwconv2dbbb_s2_5xN_asm:
 /* ----------------------------------------------------------------------------- */
      .balign 32
 .L_height:
+   {
+      recip_level = memw(sp+#24<<2)
+   }
    {  bias_ptr = bias_sum                          //
       ptr_xin = in_buf                             //
       ptr_w0 = filt                                //
@@ -281,8 +282,12 @@ dwconv2dbbb_s2_5xN_asm:
    }
 /* ----------------------------------------------------------------------------- */
 .L_depth:
-   {  ptr_x0 = ptr_xin                             //
+   {
+      vrecip = vmem(recip_level++#1)
+      ptr_x0 = ptr_xin                             //
       ptr_y = out_buf                              //
+      memw(sp+#52) = recip_level
+   } {  
       x1 = vmemu(ptr_xin+#1)                       //[0, 1]
    } {
       xbx9xax8.b = vshuff(x2.b)                    //[0, 2]
@@ -439,6 +444,7 @@ dwconv2dbbb_s2_5xN_asm:
    {  d3d2.h = vpack(d3.w, d2.w):sat               //[WIDTH, E]
       col_count = out_width                        //[DEPTH,P]
       ptr_xin = add(ptr_xin, next_in_width_32)     //[DEPTH]
+      next_out_width_32 = memw(sp+#16<<2)
    } {
       d1d0.h = vpack(d1.w, d0.w):sat               //[WIDTH,E]
       ptr_w0 += asl(filt_size, #8)                 //[DEPTH,E]filt_size = filt_height*256 //4*3*64
@@ -450,6 +456,7 @@ dwconv2dbbb_s2_5xN_asm:
    } {
       p0 = cmp.eq(depth_cnt, #0)                   //[DEPTH,E]
       d3210.ub = vpack(d3d2.h, d1d0.h):sat         //[WIDTH, E]
+      recip_level = memw(sp+#52)
    } {
       vmemu(ptr_y+#0) = d3210                      //[WIDTH, E]save final activations
       if(!p0) jump .L_depth                        //[DEPTH,E]next depth

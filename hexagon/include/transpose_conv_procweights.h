@@ -59,6 +59,5 @@ static inline uint32_t roundup(uint32_t numToRound, uint32_t multiple)
     return numToRound + multiple - remainder;
 }
 
-int process_tranpose_conv_filter(struct nn_graph *nn, struct transpose_conv_filter_parms * rtcwparms);
-int process_tranpose_conv16_filter(struct nn_graph *nn, struct transpose_conv_filter_parms * rtcwparms);
+int process_transpose_conv_filter(struct nn_graph *nn, struct transpose_conv_filter_parms * rtcwparms);
 #endif /* TRANSPOSE_CONV_PROCWEIGHTS_H_ */

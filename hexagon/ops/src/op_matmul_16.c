@@ -82,8 +82,6 @@ typedef struct nn_cpshare_base matmul_16_cpshare;	// use the base class
 static const struct nn_cpshare_typedesc
 matmul_16_cpshare_typedesc = { sizeof(matmul_16_cpshare) };
 
-
-
 // persistent info for the op
 struct matmul_16_info {
 	int in_depth, out_depth;
@@ -909,7 +907,7 @@ static int matmul_16_dtor(struct nn_node *self, struct nn_graph *nn)
 		nn_free( self->opaque);
 		self->opaque = NULL;
 	}
-	return 0;
+	return node_free_common(self, nn);
 }
 
 

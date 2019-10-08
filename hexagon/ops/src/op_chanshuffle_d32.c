@@ -41,6 +41,7 @@
 #include <quantize.h>
 #include <math.h>
 #include "hvx_inlines.h"
+#include "nn_axis.h"
 
 
 #define CHANNELSHUFFLE_D32_MAX_THREADS 2
@@ -293,9 +294,12 @@ static int split_d32_execute(struct nn_node *self, struct nn_graph *nn)
 
 	// if input 0 is wired to same source as input1, consider the dimno to be 3.
 	// ** when converting a Split_8 to Split8_d32, this will need special handling **
-	int dim_no =3;
+	int32_t dim_no =3;
 	if( dim_tensor != in_tensor0) {
 		dim_no = tensor_get_int32( dim_tensor, 0);
+		int res = handle_negative_axes(nn, &dim_no, 1);
+    	if (res)
+        	return errlog(nn, "split dimension out of range");
 		// ** for now we don't convert split to d32, unless it's on dim 3.
 		if( dim_no != 3)
 			return errlog(nn, "split_d32 must be on dim 3");

@@ -250,13 +250,6 @@ struct gather_runstate {
 	 struct gather_thrinfo thrinfo[2];
 };
 
-static inline int shape_apparent_rank ( struct shape const *shp){
-	return (shp->batches > 1)? 4 :
-		 (shp->height >1)? 3:
-		(shp->width > 1)? 2:
-		(shp->depth>1)? 1: 0;
-}
-
 // 'opaque' is pointed to one of these.
 struct gather_table_variant_token {
 	int16_t element_bytes;			// e.g 4 for float

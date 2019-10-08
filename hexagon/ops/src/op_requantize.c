@@ -45,6 +45,12 @@
 #include <quantize.h>
 #include "hvx_inlines.h"
 
+#ifdef HEXAGON_V66
+#define NUM_THREADS 4
+#else
+#define NUM_THREADS 2
+#endif
+
 #define VELEM(elem_size)  (sizeof(HVX_Vector) / elem_size)
 
 
@@ -216,6 +222,101 @@ static int do_requantize_execute(struct nn_node *self, struct nn_graph *nn)
 	logmsg(nn,2,"requantize %p done",self);
 	return 0;
 }
+
+static void requantize_hvx_work_func(struct nn_graph *nn, void *rstpv)
+{
+    struct requant_runstate *rstp= (struct requant_runstate *)rstpv;
+    uint8_t const* inp0 = rstp->inp;
+    uint8_t *outp0 = rstp->outp;
+    unsigned n_elem = rstp->n_elem;
+    unsigned chunk = rstp->chunk;
+    unsigned pos;
+    float gain = rstp->gain;
+    int32_t in_offset = rstp->in_offset;
+    int32_t out_offset = rstp->out_offset;
+
+    while(pos = __sync_fetch_and_add(&rstp->current_pos, chunk), pos < n_elem)
+    {
+        uint8_t const* inp = inp0 + pos;
+        uint8_t *outp = outp0 + pos;
+        unsigned numel = min_u32(chunk, n_elem - pos);
+        l2fetch(inp, 128, 128, (numel + 127) / 128u);
+        nn_requantize_qu8_to_qu8_hvx(outp, inp, numel, gain, in_offset, out_offset);
+    }
+    nn_sem_post(&rstp->done_sem);
+}
+
+static int do_requantize_8to8_execute(struct nn_node *self, struct nn_graph *nn)
+{
+    const struct tensor *in_tensor = self->inputs[0];
+    const struct tensor *in_min_tensor = self->inputs[1];
+    const struct tensor *in_max_tensor = self->inputs[2];
+    const struct tensor *out_min_tensor = self->inputs[3];
+    const struct tensor *out_max_tensor = self->inputs[4];
+    struct tensor *out_tensor = self->outputs[0];
+    struct tensor *new_out_min_tensor = self->outputs[1];
+    struct tensor *new_out_max_tensor = self->outputs[2];
+
+    if( tensor_out_prepare_normal_fromshape( out_tensor, &in_tensor->shape, NN_TYPE_QUINT8)!= 0 ){
+        return errlog(nn,"out too small");
+    }
+
+    size_t n_elements = tensor_element_count(in_tensor);
+    uint8_t *in_data = in_tensor->data;
+    uint8_t *out_data = out_tensor->data;
+    const float in_min = tensor_get_float(in_min_tensor, 0);
+    const float in_max = tensor_get_float(in_max_tensor, 0);
+    float out_min = tensor_get_float(out_min_tensor, 0);
+    float out_max = tensor_get_float(out_max_tensor, 0);
+    float stepsize, recip_stepsize;
+
+    float old_out_min = out_min, old_out_max = out_max;
+    quantize_adjust_range(&out_min, &out_max, &stepsize, &recip_stepsize, out_min, out_max);
+    if(old_out_min != out_min || old_out_max != out_max) {
+        return errlog(nn, "Requant_8to8: Supplied output range (%f, %f) does not yield an integer zero-point. Try using (%f, %f)!", old_out_min, old_out_max, out_min, out_max);
+    }
+    tensor_set_single_float(new_out_min_tensor, out_min);
+    tensor_set_single_float(new_out_max_tensor, out_max);
+
+    const float in_range = in_max - in_min;
+    const float out_range = out_max - out_min;
+    const float gain = in_range / out_range;
+    const uint8_t in_offset = saturate_u8(roundf_i32(-255 * in_min / in_range));
+    const uint8_t out_offset = saturate_u8(roundf_i32(-255 * out_min / out_range));
+
+    if(flt_getexp(gain) > 15) {
+        return errlog(nn, "Requantize_8to8: Out range too small compared to in range!");
+    }
+
+    struct requant_runstate rstate;
+    rstate.inp = in_data;
+    rstate.outp = out_data;
+    rstate.n_elem = n_elements;
+    rstate.gain = gain;
+    rstate.in_offset = in_offset;
+    rstate.out_offset = out_offset;
+    nn_sem_init(&rstate.done_sem, 0);
+
+    unsigned n_vectors = (n_elements + 127) / 128u;
+    unsigned chunk = 256;
+    if(n_vectors < 512) {
+        chunk = (n_vectors < 32) ? n_vectors : ((n_vectors + 1) >> 1);
+    }
+    rstate.chunk = 128 * chunk;
+    rstate.current_pos = 0;
+    int n_threads = (n_vectors > (NUM_THREADS - 1) * chunk) ? NUM_THREADS : (n_vectors + (chunk - 1)) / chunk;
+
+    for(int i = 0; i < n_threads; i++) {
+        nn_os_work_for_vector(nn, requantize_hvx_work_func, &rstate);
+    }
+
+    nn_sem_wait_n_times(&rstate.done_sem, n_threads);
+
+   // nn_requantize_qu8_to_qu8_hvx(out_data, in_data, n_elements, gain, in_offset, out_offset);
+
+    return 0;
+}
+
 static void scale_32_to_16( int16_t * outp, int32_t const * inp, int num, int32_t gain, int rsh );
 
 //
@@ -527,6 +628,11 @@ static int requantize_execute(struct nn_node *self, struct nn_graph *nn)
 	return launcher(self,nn,do_requantize_execute);
 }
 
+static int requantize_8to8_execute(struct nn_node *self, struct nn_graph *nn)
+{
+    return launcher(self, nn, do_requantize_8to8_execute);
+}
+
 static int requantrange_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	return launcher(self,nn,do_requantrange_execute);
@@ -685,6 +791,25 @@ struct nn_node_ops nn_ops_for_Requantize_32to8_ref = {
 	.dtor = node_free_common,
 	.n_inputs = NN_IOCOUNT(5),
 	.n_outputs = NN_IOCOUNT(3),
+};
+
+// Requantize_8to8:
+// Change the quantization range of 8-bit quantized values.
+//
+//  input 0: quint8 tensor
+//  input 1, 2: float32 input min, max
+//  input 3, 4: float32 target output min, max
+//
+//  output 0: quint8 requantized tensor
+//  output 1, 2: float32 new output min, max
+//
+struct nn_node_ops nn_ops_for_Requantize_8to8 = {
+    .execute = requantize_8to8_execute,
+    .check = NULL,
+    .ctor = node_alloc_common,
+    .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT(5),
+    .n_outputs = NN_IOCOUNT(3)
 };
 
 // Requantize_32to16:

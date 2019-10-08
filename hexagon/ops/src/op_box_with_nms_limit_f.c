@@ -242,13 +242,13 @@ static void soft_nms(rectangle *boxes, float *scores, int *candidate_indices, in
 			float weight;
 			switch (method) {
 				case 1: // Linear
-					weight = (ovr > overlap_thresh) ? (1.0 - ovr) : 1.0;
+					weight = (ovr > overlap_thresh) ? (1.0f - ovr) : 1.0f;
 					break;
 				case 2: // Gaussian
-					weight = exp(-1.0 * ovr * ovr / sigma);
+					weight = expf(-ovr * ovr / sigma);
 					break;
 				default: // Original NMS
-					weight = (ovr > overlap_thresh) ? 0.0 : 1.0;
+					weight = (ovr > overlap_thresh) ? 0.0f : 1.0f;
 			}
 			scores[candidate_indices[i]] *= weight;
 			

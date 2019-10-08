@@ -159,11 +159,11 @@ dwconv2dbbb_s1_5xN_asm:
 #define   depth                r11      //input and output depth
 #define   out_width            r12      //output width
 #define   out_height           r13      //output height
-#define   filt_height          r25      //ilter height (width is <=5 by definition)
+#define   filt_height          r25      //filter height (width is <=5 by definition)
 #define   filt_zero            r7       //ilter zero point
 #define   bias_sum             r14      //ptr to bias values
 #define   ptr_max              r15      //ptr to max and mins
-#define   recip_level          r16      //quantization output level
+#define   recip_level          r3      //quantization output level
 #define   recip_shift          r8       //shift for accumulator is outputs larger
 #define   stride_v             r28      //vertical stride (horizontal stride assumed 1
 //scaler values
@@ -258,14 +258,12 @@ dwconv2dbbb_s1_5xN_asm:
       filt_height = memw(sp+#20<<2)                //filter mask height
       memw(sp+#17<<2) = depth                      //save depth count for later
       __zz  = lsr(_zzz, c8)                        // gemsuma mask pos 1
-      next_in_width_depth_stride=mpyi(next_in_width_depth,stride_v) //vertical stride
+      next_in_width_depth_stride = mpyi(next_in_width_depth,stride_v) //vertical stride
    } {
-      out_width4 = out_width                       //rounded output width
-      recip_level = memw(sp+#24<<2)                //quantization level
+      memw(sp+#48) = out_width                     //
       recip_shift = memw(sp+#25<<2)                //qunatization shift
       zzz_  = asl(zzzz, c8)                        // gemsuma mask pos 1
    } {
-      vrecip = vsplat(recip_level)                 //splat quant level
       vshamt_vec= vsplat(recip_shift)              //splat shift
       ptr_max = memw(sp+#23<<2)                    //ptr to max and min
       filt_size = filt_height                      //tride for filter for each depth
@@ -286,7 +284,7 @@ dwconv2dbbb_s1_5xN_asm:
    {  out_height = add(out_height, #-1)            //decrement height count
       ptr_xin_bias_ptr = combine(in_buf, bias_sum) //init depth ptr and bias ptr
       ptr_w0 = filt                                //init filter ptr
-      loop1(.L_width, out_width4)                  //init width loop
+      recip_level = memw(sp+#24<<2)                //quantization level read from origin 1st
    }
 /* ----------------------------------------------------------------------------- */
 .L_depth:
@@ -298,14 +296,18 @@ dwconv2dbbb_s1_5xN_asm:
    } {
       x7x5x6x4.b = vshuff(x1.b)                    //[P, 3]shuffle inputs 4-7
       out_width = memw(sp+#18<<2)                  //initialize output width count
+      vrecip = vmem(recip_level++#1)               //splat quant level VECTOR
    } {
       x3x1x2x0.b = vshuff(x0.b)                    //[P, 4]shuffle inputs 0-3
       bias_val = vmem(bias_ptr++#1)                //init bias offset vector
+      memw(sp+#52) = recip_level                   //quantization level save to temp location
    } { 
       x7x6x5x4.b = vshuff(x7x5x6x4.b)              //[P, 5]shuffle inputs 4-7
       ptr_y = out_buf                              //init output ptr
       p3 = !cmp.eq(r0, r0)                         //disable store for pipeline
+      out_width4 = memw(sp+#48)                    //
    } {
+      loop1(.L_width, out_width4)                  //init width loop
       x3x2x1x0.b = vshuff(x3x1x2x0.b)              //[P, 6]shuffle inputs 0-3
       w3210     = vmem(ptr_w0+#0)                  //[P, 6]load first 4 taps
    }
@@ -467,6 +469,7 @@ dwconv2dbbb_s1_5xN_asm:
    } {
       p0 = cmp.eq(depth_cnt, #0)                   //[DEPTH,E]
       d3210.ub = vpack(d3d2.h, d1d0.h):sat         //[WIDTH, E]pack 64/64 together
+      recip_level = memw(sp+#52)                   //read quantization level from temp location
    } {
       vmemu(ptr_y+#0) = d3210                      //[WIDTH, E]save last 128 actvtns.
       if(!p0) jump .L_depth                        //[DEPTH,E]next chunk of 32 depth

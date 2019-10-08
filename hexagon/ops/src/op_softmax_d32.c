@@ -503,8 +503,8 @@ static int softmax_flat_execute(struct nn_node *self, struct nn_graph *nn)
 	const struct tensor *in_tensor = self->inputs[0];
 	int d = in_tensor->shape.depth;
 	if( d <=2){
-		if(d== 2) return softmax_d2_flat_exec(self,nn);
-		return errlog(nn,"d=1 not supported");
+		if(d==2) return softmax_d2_flat_exec(self,nn);
+		if(d==0) return errlog(nn,"d=0 not supported");
 	}else if( d >=MIN_DEPTH_FOR_LARGED && in_tensor->data_size >= MIN_SIZE_FOR_LARGED){
 		return softmax_larged_flat_exec(self,nn);
 	}
@@ -527,7 +527,7 @@ static int softmax_flat_execute(struct nn_node *self, struct nn_graph *nn)
 
 	struct softmax_run_state rstt;
 
-	if( set_scaling_parms( &rstt.sparms, in_min, in_max, beta, in_tensor->shape.depth) != 0){
+	if( d > 1 && set_scaling_parms( &rstt.sparms, in_min, in_max, beta, in_tensor->shape.depth) != 0){
 		return errlog(nn,"softmax_8: range = %f ... %f, beta = %f: beta too large", in_min, in_max, beta);
 	}
 
@@ -537,6 +537,13 @@ static int softmax_flat_execute(struct nn_node *self, struct nn_graph *nn)
 
 	if( tensor_out_prepare_normal_fromshape( out_tensor, &rstt.shape, NN_TYPE_QUINT8) != 0 ){
 		return errlog(nn,"out too small");
+	}
+	tensor_set_single_float( out_min_tensor, 0.0f);
+	tensor_set_single_float( out_max_tensor, 1.0f);
+	// handle d=1 case
+	if( d == 1 ){
+		memset( out_tensor->data, 0xFF, out_tensor->data_size);
+		return 0;
 	}
 	rstt.tout.data = out_tensor->data;
 	int depth = rstt.shape.depth;
@@ -641,8 +648,6 @@ static int softmax_flat_execute(struct nn_node *self, struct nn_graph *nn)
 		nn_os_work_for_vector(nn, softmax_flat_run_thread , &rstt.thrinfo[1]);
 	}
 
-	tensor_set_single_float( out_min_tensor, 0.0f);
-	tensor_set_single_float( out_max_tensor, 1.0f);
 
 	for( int i =0; i < nthreads; i++){
 		nn_sem_wait( & rstt.done_sem);
@@ -2398,6 +2403,7 @@ static int softmax_d32_free(struct nn_node *self, struct nn_graph *nn)
 	if( self->opaque !=NULL){
 		struct softmax_lookup_cache * cachep = (struct softmax_lookup_cache*)self->opaque;
 		if( cachep->largedepth_tables != NULL) nn_free( cachep->largedepth_tables);
+		nn_free( self->opaque);
 		self->opaque = NULL;
 	}
 	return node_free_common(self,nn);

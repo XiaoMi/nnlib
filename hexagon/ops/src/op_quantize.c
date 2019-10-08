@@ -309,7 +309,7 @@ find_scaling_for_hvx_quant ( float const minmax[2], struct hvx_quant_parms *out)
 
 
 	float minv = -minmax[0];
-	float maxv = fmaxf( minv+1e-5f, minmax[1]);
+	float maxv = fmaxf(minv+1e-18f, minmax[1]);
 
 	if( minv < 0.0f)	// make sure the 'zero' is an integer
 		adjust_minmax_for_zero( & minv , & maxv);
@@ -1174,7 +1174,7 @@ static int dequantize_execute(struct nn_node *self, struct nn_graph *nn)
 	struct tensor *out_tensor = self->outputs[0];
 	float minval = tensor_get_float(min_tensor,0);
 	float maxval = tensor_get_float(max_tensor,0);
-	float range = fmaxf(0.0001f,maxval-minval);
+	float range = fmaxf(1e-18f, maxval-minval);
 	float stepsize = flt_div_255(range);
 	float batches = in_tensor->shape.batches;
 	float height = in_tensor->shape.height;
@@ -1427,7 +1427,7 @@ static int dequantize_i32_execute(struct nn_node *self, struct nn_graph *nn)
 	struct tensor *out_tensor = self->outputs[0];
 	float minval = tensor_get_float(min_tensor,0);
 	float maxval = tensor_get_float(max_tensor,0);
-	float range = fmaxf(0.0001f,maxval-minval);
+	float range = fmaxf(1e-18f, maxval-minval);
 	float stepsize = range/4294967296.0f/*0x1.0p32f*/;
 	float batches = in_tensor->shape.batches;
 	float height = in_tensor->shape.height;
@@ -1828,7 +1828,7 @@ static int output_dequantize_execute_opt(struct nn_node *self, struct nn_graph *
         // set min/maxes
         minval = tensor_get_float(in_min_tensor, 0);
         maxval = tensor_get_float(in_max_tensor, 0);
-		float range = fmaxf(0.0001f,maxval-minval);
+		float range = fmaxf(1e-18f, maxval-minval);
 		float stepsize = flt_div_255(range);
 		// the hvx code will quietly generate nonsense if stepsize is infeasible...
 		// it must be in range 2**-126 <= step < 2**120 to ensure results are

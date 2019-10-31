@@ -171,6 +171,9 @@ long set_powersave_level(in unsigned long level);
 /* latency specifies the minimum tolerable uSec wakeup latency for the DSP. 0 indicates to use the default for the requested corner. */
 long set_powersave_details(in hexagon_nn_corner_type corner, in hexagon_nn_dcvs_type dcvs, in unsigned long latency);
 
+long set_clocks(in hexagon_nn_corner_type corner, in hexagon_nn_dcvs_type dcvs, in unsigned long latency);
+long remove_clocks();
+
 /* Get performance information */
 long get_perfinfo(in hexagon_nn_nn_id id, rout sequence<hexagon_nn_perfinfo> info_out, rout unsigned long n_items);
 /* Reset performance information, and select a new event. */

@@ -1187,6 +1187,81 @@ int hexagon_nn_get_power(int type)
 	return response.clkFreqHz;
 }
 
+static int power_context = 0x100;
+int hexagon_nn_set_clocks(hexagon_nn_corner_type corner, hexagon_nn_dcvs_type dcvs, unsigned int latency)
+{
+    // Set client class (useful for monitoring concurrencies)
+    HAP_power_request_t request;
+    // convert benchmark application power levels to dcvs_v2 clock levels.
+    const uint32_t num_corners = 7;
+    const HAP_dcvs_voltage_corner_t voltage_corner[num_corners]
+    = {
+    HAP_DCVS_VCORNER_DISABLE,
+#if (__HEXAGON_ARCH__ == 66)
+    // file:///C:/Qualcomm/Hexagon_SDK/3.4.2/docs/Hap_power_set_dcvs_2.html
+    HAP_DCVS_VCORNER_TURBO_PLUS,
+#else
+    HAP_DCVS_VCORNER_TURBO,
+#endif
+    HAP_DCVS_VCORNER_NOMPLUS,
+    HAP_DCVS_VCORNER_NOM,
+    HAP_DCVS_VCORNER_SVSPLUS,
+    HAP_DCVS_VCORNER_SVS,
+    HAP_DCVS_VCORNER_SVS2 };
+
+    if ((uint32_t)corner >= num_corners) corner = num_corners - 1;
+
+    memset(&request, 0, sizeof(HAP_power_request_t)); //Remove all votes for NULL context
+    request.type = HAP_power_set_DCVS_v2;
+    request.dcvs_v2.dcvs_enable = TRUE;
+    request.dcvs_v2.dcvs_option = HAP_DCVS_V2_POWER_SAVER_MODE;
+    request.dcvs_v2.latency = latency;
+    (void) HAP_power_set(NULL, &request); //Remove all votes for NULL context
+
+    memset(&request, 0, sizeof(HAP_power_request_t)); //Important to clear the structure if only selected fields are updated.
+    request.type = HAP_power_set_apptype;
+    request.apptype = HAP_POWER_COMPUTE_CLIENT_CLASS;
+    int retval = HAP_power_set(&power_context, &request);
+    if (retval) return errlog(NULL,"unable to set apptype ret=%d", retval);
+
+    // Configure clocks & DCVS mode
+    memset(&request, 0, sizeof(HAP_power_request_t));
+    request.type = HAP_power_set_DCVS_v2;
+    request.dcvs_v2.dcvs_enable = dcvs; // enable dcvs if desired, else it locks to target corner
+    request.dcvs_v2.dcvs_option = HAP_DCVS_V2_POWER_SAVER_MODE;
+    request.dcvs_v2.set_dcvs_params = TRUE;
+    request.dcvs_v2.dcvs_params.min_corner = HAP_DCVS_VCORNER_DISABLE; // no minimum
+    request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_DISABLE; // no maximum
+    request.dcvs_v2.dcvs_params.target_corner = voltage_corner[corner];
+    errlog(NULL, "voltage corner: %d %d", voltage_corner[corner], corner);
+    request.dcvs_v2.set_latency = TRUE;
+    request.dcvs_v2.latency = latency;
+    retval = HAP_power_set(&power_context, &request);
+    if (retval) return errlog(NULL,"unable to set DCVS V2 ret=%d", retval);
+
+    // vote for HVX power
+    memset(&request, 0, sizeof(HAP_power_request_t));
+    request.type = HAP_power_set_HVX;
+    request.hvx.power_up = TRUE;
+    retval = HAP_power_set(&power_context, &request);
+    if (retval) return errlog(NULL,"unable to set HVX ret=%d", retval);
+    return 0;
+}
+
+int hexagon_nn_remove_clocks()
+{
+    HAP_power_request_t request;
+    //To remove any dcvs_v2 vote
+    memset(&request, 0, sizeof(HAP_power_request_t)); //Remove all votes.
+    request.type = HAP_power_set_DCVS_v2;
+    request.dcvs_v2.dcvs_enable = TRUE;
+    request.dcvs_v2.dcvs_option = HAP_DCVS_V2_POWER_SAVER_MODE;
+    int retval= HAP_power_set(&power_context, &request);
+    if (retval) return errlog(NULL,"unable to set DCVS V2 ret=%d", retval);
+    FARF(HIGH, "remove the clock vote! \n");
+    return 0;
+}
+
 #if (__HEXAGON_ARCH__ >= 62)
 static int hexagon_nn_vote(unsigned int level)
 {
@@ -1671,6 +1746,18 @@ int hexagon_nn_domains_set_powersave_details(remote_handle64 h,
 	return hexagon_nn_set_powersave_details(corner, dcvs, latency);
 }
 
+int hexagon_nn_domains_set_clocks(remote_handle64 h,
+	hexagon_nn_corner_type corner, hexagon_nn_dcvs_type dcvs, unsigned int latency)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_set_clocks(corner, dcvs, latency);
+}
+
+int hexagon_nn_domains_remove_clocks(remote_handle64 h)
+{
+	UNUSED_PARAM(h);
+	return hexagon_nn_remove_clocks();
+}
 
 int hexagon_nn_domains_open (const char* uri, remote_handle64* handle)
 {

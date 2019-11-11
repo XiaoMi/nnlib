@@ -7,7 +7,7 @@ int main(){
     printf("Failed.\n");
     return 0;
   }
-  printf("HexagonNN version: %d\n", version);
+  printf("HexagonNN version: 0x%x\n", version);
   printf("Success!\n");
 
   return 0;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -33,17 +33,21 @@
  *
  */
 
-#include "remote.h"
+#ifndef HEXAGON_NN_HEXNN_DSP_CONTROLLER
+#define HEXAGON_NN_HEXNN_DSP_CONTROLLER
 
-#pragma weak remote_session_control
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-int config_unsigned_pd() {
-  struct remote_rpc_control_unsigned_module data;
-  data.enable = 1;
-  data.domain = CDSP_DOMAIN_ID;
-  int retVal = remote_session_control(DSPRPC_CONTROL_UNSIGNED_MODULE,
-                                      (void *) &data,
-                                      sizeof(data));
-  return retVal;
+int hexnn_controller_request_unsigned_pd();
+
+int hexnn_controller_init();
+
+int hexnn_controller_deinit();
+
+#ifdef __cplusplus
 }
+#endif
 
+#endif // HEXAGON_NN_HEXNN_DSP_CONTROLLER

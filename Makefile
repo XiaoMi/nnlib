@@ -48,7 +48,7 @@ else
   ifeq (,$(SNPE_TEST))
    ifeq (,$(GOOG_TEST))
     ifeq (,$(CANPHONE))
-     include controller/$(V_TARGET).mak
+     include hexagon/$(V_TARGET).mak
     else
      include canphone/$(V_TARGET).mak
     endif

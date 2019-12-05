@@ -66,9 +66,7 @@ struct output {
 
 struct perfinfo {
 	uint32_t node_id;
-	uint32_t node_type;
 	uint32_t executions;
-	uint32_t unused;
 	union {
 		uint64_t counter;
 		struct {

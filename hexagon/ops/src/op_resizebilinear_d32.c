@@ -40,7 +40,7 @@
 #include "quantize.h"
 #include "nn_asm_ops.h"
 #include "nn_bufferpool.h"
-#define LRN_MAXTHREADS 2
+#define RESIZE_MAXTHREADS 2
 
 #if defined(__hexagon__)
 #define min(a, b) (((a)<(b)) ? (a) : (b))
@@ -70,6 +70,7 @@ struct resize_plan {
 	int32_t in_height, in_width;
 	int32_t out_height, out_width;
 	int64_t vscale;		// in_height/out_height, with 32 fractional bits
+	int32_t hsplit;		// about half of out_height; or == out_height (if not splitting)
 	// this must be the last entry
 	struct hcontroltab hcontrol[1];	// resized to 'out_width, rounded up to mult. of 4
 };
@@ -206,12 +207,16 @@ static int resize_bilinear_d32_execute(struct nn_node *self, struct nn_graph *nn
 		goto done;
 	}
 	else{
+		// different numbering scheme:
+		// lsb = top or bottom h slice
+		// then batch * (d32_pairs) in the rest.
+		runstate.jobs = 2*(batches * (runstate.tin.nd32+1)/2u);
 		runstate.run_all_func = do_bilin_interp_general_all_HVX;
 		use_hvx_general = 1;
 	}
 	nn_scratch_reset(nn);
 
-	int n_threads = min_i32(2, runstate.jobs);
+	int n_threads = min_i32(RESIZE_MAXTHREADS, runstate.jobs);
 	nn_sem_init( &runstate.done_sem,0);
 
 	if( use_hvx_general){ // need some setup for this
@@ -447,6 +452,16 @@ obtain_scaling_plan(
 	planp->in_width =  wid_in;
 	planp->out_height= ht_out;
 	planp->out_width = wid_out;
+	// split H in two parts, but
+	// not if we have a lot of work in batches and depth
+	{
+		int hsplit = ht_out;
+		int prod = rstp->batches * rstp->tin.nd32;
+		if( prod < RESIZE_MAXTHREADS*4){
+			hsplit = (hsplit+1)/2u;
+		}
+		planp->hsplit = hsplit;
+	}
 	if (rstp->align_corners && ht_out > 1) {
 		ht_in--;
 		ht_out--;
@@ -608,43 +623,65 @@ do_bilin_interp_general_all_HVX( struct nn_graph *nn, void *rstpv )
 	int nvecs_vscale = (in_left_pad + rstp->in_width + 3)>>2;
 	int nvecs_hscale = (rstp->out_width+ 3)>>2;
 
-	// pair-stride to be used on the last d32 slice of a batch, if nd32 is odd
-	// (and it never happens when it's even).
-	int in_wrap_stride = rstp->tin.batch_stride - (nd32-1)*rstp->tin.d32_stride;
-	int out_wrap_stride = rstp->tout.batch_stride - (nd32-1)*rstp->tout.d32_stride;
+	// prefetch stuff
+	uint32_t pf_stride = in_h_stride;
+	uint32_t pf_width = nvecs_vscale *128;
 
-	// take jobs 2 at once;
-	// assume ijob = id32 + nd32 * ibat
-	//
 
+	// vertical acc start for bottom half
+	int64_t vacc_start_lower = planp->vscale*planp->hsplit  + (1<<24);
+
+	// job index is ( batch, nd32_pair, upper/lower)
+	//  0 <= nd32_pair < roundup(nd32/2)
+	//  0 <= upper_lower < 2
+	int job_encoding_inner = (nd32+1)&~1u;	// round up to multiple of 2
 	batchslice_decode bsdecode;
-	batchslice_decode_init( &bsdecode, nd32);
+	batchslice_decode_init( &bsdecode, job_encoding_inner);
+	// if job not split on height, don't even look at the odd ones.
+	int job_step = (planp->hsplit < planp->out_height)? 1 : 2;
 
-	while( ijob = __sync_fetch_and_add( &rstp->next_job, 2), ijob < rstp->jobs ){
+	while( ijob = __sync_fetch_and_add( &rstp->next_job, job_step), ijob < rstp->jobs ){
 		// convert to slice #, batch;
 		id32 = batchslice_decode_update( &bsdecode, ijob);
+		int lower_h = id32 & 1;	// upper or lower?
+		id32 &= ~1u;				// 0,2,.. < nd32
 		ibat = bsdecode.ibatch;
 		// determine the strides across the two work units
-		// first, assume the next one is the next depth slice
-		// (always true when nd32 is even).
+		// if last d32 slice out of an odd #, do it on top of itself.
 		int32_t in_pair_stride = rstp->tin.d32_stride;
 		int32_t out_pair_stride = rstp->tout.d32_stride;
 		if( id32+1 >= nd32){	/// not the next depth slice!
-			if( ibat +1 < rstp->batches ){	// wrap to next batch
-				in_pair_stride = in_wrap_stride;
-				out_pair_stride = out_wrap_stride;
-			}else{
-				in_pair_stride = 0;		// one odd one at the end; do it on top of itself.
-				out_pair_stride = 0;
-			}
+			in_pair_stride = 0;		// one odd one at the end; do it on top of itself.
+			out_pair_stride = 0;
 		}
-		//printf("id32 = %d; ib  = %d; ips = %d\n", id32, ibat, (int)in_pair_stride);
+		//printf("id32 = %d; ib  = %d; ips = %d lower_h=%d\n", id32, ibat, (int)in_pair_stride, lower_h);
 		// get the base pointers for the first unit of the two
 		uint8_t const *in_base_ptr = in_base_ptr0 + ibat * rstp->tin.batch_stride + id32 * rstp->tin.d32_stride;
 		uint8_t  *out_base_ptr = out_base_ptr0 + ibat * rstp->tout.batch_stride + id32 * rstp->tout.d32_stride;
 
 		int64_t vacc = (1<<24);	// rounding bias for 7-bit fraction
-		for( int orow = 0; orow < rstp->out_ht; orow++ ){
+
+
+		int h_start = 0;		// range of h dimension to do
+		int h_end = planp->hsplit;
+		if( lower_h){				// do lower half
+			h_start = h_end;
+			h_end = rstp->out_ht;
+			vacc = vacc_start_lower;
+		}
+		int pf_progress = h_start;		// number loaded
+		int pf_request_min_1 = min_i32(h_start+3,hlim);
+
+		for( int orow = h_start; orow < h_end; orow++ ){
+			if( pf_progress <= pf_request_min_1){
+				int pfn = (pf_request_min_1+1)-pf_progress;
+				uint8_t const * pf_ptr = in_base_ptr + in_h_stride * pf_progress;
+				l2fetch(pf_ptr, pf_stride, pf_width, pfn );
+				if( in_pair_stride){
+					l2fetch(pf_ptr+in_pair_stride, pf_stride, pf_width, pfn );
+				}
+				pf_progress = pf_request_min_1+1;
+			}
 			int iypos = vacc>>32;
 			int yfrac = (uint32_t)vacc >> 25;	// 7-bit frac
 			int yfrac2 = -1;				// yfrac for second op.
@@ -661,6 +698,10 @@ do_bilin_interp_general_all_HVX( struct nn_graph *nn, void *rstpv )
 			}
 			// if yfrac2 >= 0 here, we can vscale two rows from the same pair of input
 			// rows.. this will reduce loop overhead and re-reading of data. (@@@ TODO @@@)
+
+			// look ahead to next prefetch (may or may not be an increase,
+			// depending on scale)
+			pf_request_min_1 = min_i32( (int32_t)(vacc>>32)+3, hlim);
 
 			// note that in_row_ptr advances according to the scale ratio.
 			uint8_t const * in_row_ptr = in_base_ptr + in_h_stride * iypos;

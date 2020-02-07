@@ -1,0 +1,22 @@
+
+# This builds the skel library
+
+include ../hexagon/files.mak
+
+CC_FLAGS += -DNN_LOG_MAXLEV=9 -DUSE_OS_QURT $(MHVX_DOUBLE_FLAG) -I../interface
+ASM_FLAGS += $(MHVX_DOUBLE_FLAG)
+CXX_FLAGS += $(MHVX_DOUBLE_FLAG)
+
+# only build the shared object if dynamic option specified in the variant
+ifeq (1,$(V_dynamic))
+BUILD_DLLS = udoExampleImplLib
+endif
+
+udoExampleImplLib.C_SRCS = udoExampleImplLib.c
+
+# copy final build products to the ship directory
+BUILD_COPIES = \
+   $(DLLS) \
+   $(EXES) \
+   $(LIBS) \
+   $(SHIP_DIR)/ ;

@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -2316,19 +2316,7 @@ supernode_rearrange_for_d32(
   return;
 }
 
-
-
 #endif
-
-static inline void supernode_cleaninv_weights(uint8_t *weights, int size)
-{
-#if defined(V66) && defined(__hexagon__)
-	int i;
-	for (i = 0; i < (size+63); i += 64) {
-		asm volatile ("dccleaninva(%0)" : :"r"(weights+i));
-	}
-#endif
-}
 
 #if 0
 static void __attribute__((unused)) supernode_execute_suma(struct nn_graph *nn, void *vinfo)
@@ -3132,7 +3120,8 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 	int32_t bias_extra = 0;
         if (!info->use_v65 && filt_height==1 && filt_width==1 && ENABLE_FASTSUMA_1x1) bias_extra = info->in_depth*input_offset*filt_offset;
 	logmsg(nn,2,"in_depth_total=%d input_offset=%d filt_offset=%d bias_extra=%d",in_depth_total,input_offset,filt_offset,bias_extra);
-	fill_bias_buf(nn,self,info,bias32,bias_extra);
+	if (fill_bias_buf(nn,self,info,bias32,bias_extra) != 0)
+		return -1;
 
 	/*
 	 * Prepare output tensors
@@ -3987,7 +3976,7 @@ int supernode_recalculate_strategy_v66(struct nn_node *self, struct nn_graph *nn
 	info->stride_width = stride_width;
 
 
-	info->input_base = in + (in_top_pad - required_h_before)*info->in_next_row;
+	info->input_base0 = in + (in_top_pad - required_h_before)*info->in_next_row;
 	info->in_height = in_height + required_h_before + required_h_after;
 	info->weights_base = info->weights;
 
@@ -4011,10 +4000,6 @@ int supernode_recalculate_strategy_v66(struct nn_node *self, struct nn_graph *nn
 	info->filt_width = filt_width;
 	info->filt_height = filt_height;
 
-	// disallow gain > 1.0
-	// since the v66 convs don't support recip_shamt > 0
-	info->recip_shamt_must_be_zero =1;
-
 	// Note: this may expand the output range
 	if (fill_info_minmax_basics(nn,self,info) != 0) return -1;
 	//fill_info_dim_basics(nn,self,info);
@@ -4036,7 +4021,8 @@ int supernode_recalculate_strategy_v66(struct nn_node *self, struct nn_graph *nn
 	int filt_offset = info->weights_offset;
 
 	logmsg(nn,2,"in_depth_total=%d input_offset=%d filt_offset=%d bias_extra=%d",in_depth_total,input_offset,filt_offset,bias_extra);
-	fill_bias_buf(nn,self,info,bias32,bias_extra);
+	if (fill_bias_buf(nn,self,info,bias32,bias_extra) != 0)
+		return -1;
 
 	/* 
 	 * Recompute weights
@@ -4155,8 +4141,8 @@ int supernode_recalculate_strategy_v66(struct nn_node *self, struct nn_graph *nn
 
 	startwork.self = self;
 	startwork.info = info;
-	startwork.zap_top = (uint8_t *)info->input_base;
-	startwork.zap_bot = (uint8_t *)info->input_base
+	startwork.zap_top = (uint8_t *)info->input_base0;
+	startwork.zap_bot = (uint8_t *)info->input_base0
 		+ (required_h_before + in_height)*info->in_next_row;
 	startwork.zap_top_size = info->in_next_row * required_h_before;
 	startwork.zap_bot_size = info->in_next_row * required_h_after;
@@ -5497,7 +5483,8 @@ static int shortin_supernode_execute_everything(struct nn_graph *nn, void *vself
 	 * We will need to recompute the bias buffer any time the input offset changes
 	 */
 	int bias32 = (self->node_type == OP_InputSupernode_8x8p32to8_outd32);
-	fill_bias_buf(nn,self,info,bias32,0);
+	if (fill_bias_buf(nn,self,info,bias32,0) != 0)
+		return -1;
 
 	nn_sem_t donesem;
 

@@ -545,7 +545,59 @@ hvx_sum_hxw_d32_slice( uint8_t const * ptr, int height, int width, int height_st
 	return Q6_Vw_vadd_VwVw( Q6_V_lo_W(shuff),Q6_V_hi_W(shuff)) ;
 }
 
+// return reciprocal sqrt with 2^31 scale factor, scale = 31
+// vin is a signed word vector (leave the highest bit 0), which represents a 16-bit unsigned value (vin >> 15)
+// the 16-bit value has to be in the range of [0x4000, 0x10000)
+// select is a word vector that contains 0s and 1s.
+// If vin is from a vin' that is shifted left, and the number of bits it's shifted is even, the corresponding word in select is 0
+// the number of bits it's shifted is odd, the corresponding word in select is 0
+// Using Newton-Raphson iteration:
+// in each iteration, x = (3/2) * x - (input/2) * (x^3)
+static inline
+HVX_Vector rsqrt_newton_hvx(struct nn_graph *nn, HVX_Vector vin, HVX_Vector select) {
 
+    HVX_Vector half_three = Q6_V_vsplat_R((uint32_t)1610612736);   //1.5 << 30; should << 31, but leave 1 bit for the sign. should be 3221225472
+    HVX_Vector half_input = Q6_Vw_vasr_VwR(vin, 1);// the orginal 16-bit input << (scale - 16) before calling this function, then >> 1
+
+    HVX_Vector x = Q6_V_vsplat_R(8375186);   //0.0039 << 31. 0.0039 is the initial x when input is 65535, which is the max possible input
+                                                //initial x needs to be smaller than res. when an input < 65535, its res is bigger
+    HVX_Vector x3 = Q6_V_vzero(); //x^3
+    HVX_Vector tmp1 = Q6_V_vzero();
+    HVX_Vector tmp2 = Q6_V_vzero();
+    HVX_Vector v_16 = Q6_V_vsplat_R(16);
+    HVX_Vector v_1 = Q6_V_vsplat_R(1);
+
+    HVX_Vector v_2div_sqrt2 = Q6_V_vsplat_R((uint32_t) 759250124);// 2/sart(2) << 30
+
+    for(int i = 0; i < 4; ++i) {
+        x3 = q6op_Vw_vmpy_VwVw_s1_rnd_sat(x, x);// x * x >> 31
+        x3 = q6op_Vw_vmpy_VwVw_s1_rnd_sat(x, x3);
+
+        tmp1 = q6op_Vw_vmpy_VwVw_s1_rnd_sat(half_three, x);
+        tmp1 = Q6_Vw_vasl_VwVw(tmp1, v_1);//<<1 since half_three only has 30 bits scale factor
+
+        tmp2 = q6op_Vw_vmpy_VwVw_s1_rnd_sat(half_input, x3);
+        tmp2 = Q6_Vw_vasl_VwVw(tmp2, v_16);// << 16 since half_input is supposed to be << 31, but it has only been << 15
+        x = Q6_Vw_vsub_VwVw(tmp1, tmp2);
+    }
+    HVX_Vector odd_x = q6op_Vw_vmpy_VwVw_s1_rnd_sat(v_2div_sqrt2, x);//* 2/sart(2) for rounding
+    odd_x = Q6_Vw_vasl_VwVw(odd_x, v_1);//to get 31 bit scale factor
+    x = Q6_V_vmux_QVV(select, odd_x, x);
+
+    return x;
+}
+/* float ref Newton-Raphson iteration
+static inline
+float rsqrt_newton(float vin) {
+    float x = 0.0039;
+    float x3 = 0;
+    for(int i = 0; i < 4; ++i) {
+        x3 = x * x * x;
+        x = 1.5 * x - 0.5 * vin * x3;
+        printf(" x = %f \n", x);
+    }
+    return x;
+}*/
 
 #endif // HVX_MATHOPS_H
 

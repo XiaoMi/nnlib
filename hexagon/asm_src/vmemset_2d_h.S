@@ -74,7 +74,8 @@
 // make 4 calls, each of which fills every 4th row.
 //
 
-#ifndef __HVXDBL__
+#if !( defined(__HVXDBL__) || __HVX_LENGTH__ == 128)
+#warning Probably you don't really want HVX64
 #define VECN 64
 #define VECLOGN 6
 #else

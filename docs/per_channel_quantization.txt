@@ -1,0 +1,194 @@
+/*
+ * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted (subject to the limitations in the
+ * disclaimer below) provided that the following conditions are met:
+ *
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *
+ *    * Redistributions in binary form must reproduce the above
+ *      copyright notice, this list of conditions and the following
+ *      disclaimer in the documentation and/or other materials provided
+ *      with the distribution.
+ *
+ *    * Neither the name of The Linux Foundation nor the names of its
+ *      contributors may be used to endorse or promote products derived
+ *      from this software without specific prior written permission.
+ *
+ * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
+ * GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
+ * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+ * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+ * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ */
+
+========================================================
+| Hook-up Guide for Convolution Ops w/ Channel Scaling |
+========================================================
+
+1 Introduction
+============
+
+For a symmetrically quantized filter tensor of depth d, channel scaling allows
+each channel in the filter tensor to have its own quantization scale. Since
+symmetrically quantized values do not need an offset, it can be represented as:
+
+    Wfloat[i] = Wint8[i] * S[i] for i in range of [0,d)
+
+    Where:
+        - Wint8 is the 8-bit symmetrically quantized weights (filter) tensor
+          with depth d.  Wint8[i] is the ith channel of Wint8 , i.e. the ith
+          depthwise slice, a 2-D matrix.
+        - Wfloat is the dequantized weights tensor, i.e. the "real" weight values.
+        - S is the vector of channel-wise scales for the quantized weights.
+
+2 Interface in Hexagon NN
+=======================
+
+Currently, the following ops in Hexagon NN support channel scaling natively -
+Simply pass the float32 channel scales tensor as the last argument to activate
+channel scaling (see ops.txt):
+
+    OP_QuantizedTransposeConv2d_8x8p32to8
+    OP_QuantizedGroupedConv2d_8x8p32to8
+    OP_QuantizedDilatedConv2d_8x8p32to8
+
+The following ops support channel scaling, but needs to have a
+OP_ChannelScale_32xf node appended afterwards in order to activate channel
+scaling:
+
+    OP_QuantizedConv2d_8x8to32
+    OP_QuantizedDepthwiseConv2d_8x8to32
+
+OP_ChannelScale_32xf has the following interface:
+    Input   in_data (int32)
+            channel_scales (float)
+            in_min (float)
+            in_max (float)
+    Output  out_data (int32)
+            out_min (float)
+            out_max (float)
+
+Although channel scaling is supported in these ops, some work must be done on
+the supplied channel scales and biases before passing the parameters to Hexagon
+NN.  This is outlined in the next section.
+
+3 Work Required for Hook-up
+=========================
+
+For Hexagon NN to use the array of channel scales, they must be converted to
+normalized values.  As well, the weights and biases need to be adjusted to
+account for the normalized channel scales.  These steps are outlined in detail
+below:
+
+    1. Normalize the channel scales
+    2. Adjust filter values and min/max
+    3. Adjust and requantize bias values
+
+3.1 Normalizing scales
+=======================
+
+Given S as the array of channel scales, find Smax , the maximum of the channel
+scales. Then, divide each scale value by Smax to get Snorm, the normalized
+scales vector.
+
+    Smax = max(S)
+
+    Snorm[i] = S[i] / Smax for i in range of [0,d)
+
+3.2 Adjust filter values and min/max
+====================================
+
+If the filter weights are represented by int8 values, to make the filter
+weights Hexagon NN compatible, the values need to be uint8.  To convert the
+int8 filter weights to uint8, just add 128 to every element:
+
+    Wuint8[h][w][c][k] = Wint8[h][w][c][k] + 128
+
+To calculate the float min and max values, the the smallest and largest
+possible weight values are used, by multiplying the int8 extremities (-128,
+127) by the maximum scale value (Smax).
+
+Set filter weights min to be:
+
+    filter_min = -128 * Smax
+
+And set filter weights max to be:
+
+    filter_maxmax =  127 * Smax
+
+3.3 Adjust and requantize biases
+================================
+
+Given symmetrically-quantized 32-bit integer biases and no bias scale
+(implicitly the same as the input scale), the biases need to be dequantized
+using the input scale and channel-wise filter scales.  Then find the min/max,
+then requantize to int32:
+
+First, dequantize the biases (bint32) with consideration for the channel-wise
+filter scales to obtain bfloat :
+
+    bfloat[i] = bint32[i] * input_scale * S[i] for i across all bint32 values
+
+Then, find the largest magnitude in the dequantized biases (bmax) and multiply
+it by 8 (left shift 3 bits):
+
+    bmax = 8 * argmax( |bfloat[i]| ) for i acroess all bfloat values
+
+Set bias_min to be (-bmax), and bias_max to be bmax.
+
+    bias_min = -bmax
+
+    bias_max =  bmax
+
+Finally, symmetrically requantize the float bias values as int32 to obtain
+bint32', the new bias tensor.
+
+    bint32'[i] = round( bfloat[i] * 2^31 / bmax )
+
+Now, everything needed for the Hexagon NN convolution op to work is available:
+
+    - quantized uint8 filter weights tensor (Wuint8)
+    - float32 filter min and max (filter_min and filter_max)
+    - adjusted bias tensor (bint32')
+    - bias min and max (bias_min and bias_max)
+
+4 Performance Caveats
+=====================
+
+There are a couple of performance caveats to keep in mind when using the
+aforementioned conv ops. These may be fixed in future releases:
+
+4.1 Shallow input cases
+=======================
+
+For convolution with channel scaling on input tensors with depth < 5, the
+performance may be slightly slower. This is because OP_InputSupernode, the
+convolution mechanism used for shallow input tensors, is not yet compatible
+with channel scaling, so Hexagon NN resorts to using the regular Supernode
+mechanism.
+
+4.2 3x3x2x2 Filter
+==================
+
+There is a special mechanism in Hexagon NN that handles convolutions with the
+following characteristics:
+
+    - Filter size of 3x3x2x2 (height, width, in_depth, out_depth)
+    - 1x1 stride
+    - Static output min/max
+
+There is a known accuracy issue when using this mechanism (OP_Supernode_3322).
+The output of this operation will be off by up to 2 quantization levels
+compared to a reference implementation.

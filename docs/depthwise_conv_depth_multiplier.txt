@@ -1,0 +1,73 @@
+/*
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted (subject to the limitations in the
+ * disclaimer below) provided that the following conditions are met
+ *
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer
+ *
+ *    * Redistributions in binary form must reproduce the above
+ *      copyright notice, this list of conditions and the following
+ *      disclaimer in the documentation and/or other materials provided
+ *      with the distribution
+ *
+ *    * Neither the name of The Linux Foundation nor the names of its
+ *      contributors may be used to endorse or promote products derived
+ *      from this software without specific prior written permission
+ *
+ * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
+ * GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
+ * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED
+ * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+ * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+ * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
+ *
+ */
+
+# Depthwise Conv2D Depth Multiplier
+
+## Introduction
+
+This document will cover the constraints of the Depthwise Conv2D op's depth multiplier.
+
+## Base Case
+
+Hexagon NN supports Depthwise Conv2D with a depth multiplier of 1 through both
+QuantizedDepthwiseConv2d_8x8to32 op and DepthwiseSupernode_8x8p8to* ops. However, if a depth
+multiplier greater than 1 is required, then the DepthwiseSupernode_8x8p8to* ops will not support
+this configuration.
+
+## Other cases
+There are three cases where the Depth Multiplier is greater than 1. Each case
+has different recommendations along with different performance impacts.
+
+### Case 1: Depth Multiplier > 1, Input Depth = 1:
+
+This case is just a regular Conv2D. It is recommended to append the InputSupernode_8x8p*
+op, unless using channel scales in which case it is recommended to use the regular
+Supernode_8x8p* op for now. This will have the best performance out of all three cases.
+
+### Case 2: Depth Multiplier > 1, Input Depth not 1, followed by standard Conv2D:
+
+Split the Depthwise Conv2D's weights along the depth multiplier, creating chunks of of weights
+with shape [filter_height, filter_width, input_depth, 1]. Next, append a
+DepthwiseSupernode_8x8p8to* op for each weight chunk. Concat the output of all Depthwise
+Conv2D ops together on the depth dimension. Finally, the weights of the following standard Conv2D
+must be transformed by applying a channel shuffle on the weights along the input_depth axis,
+with the original input depth of the depthwise node as the number of groups.
+
+### Case 3: Depth Multiplier > 1, Input Depth not 1, followed by arbitrary op:
+
+Same as Case 2) except that the channel shuffle is applied to the output of the Concat,
+with the number of groups = depth multiplier. Note, this case will have worst performance
+compared to Case 2, since the channel shuffle will be done during execute, rather than only once
+during prepare.

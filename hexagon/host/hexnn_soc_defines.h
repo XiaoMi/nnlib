@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -36,50 +36,63 @@
 #ifndef HEXAGON_NN_HEXNN_SOC_DEFINES_H
 #define HEXAGON_NN_HEXNN_SOC_DEFINES_H
 
-typedef enum
-{
-    UNKNOWN_SOC = 0,
-    SD855,
-    SD845,
-    SD835,
-    SD820,
-    SD710,
-    SD670,
-    SD660,
-    SD6150,
-    SD7150,
-    QCS405,
-    SD6125,
-    QCS403
-} soc_model;
 
+#define V60 "libhexagon_nn_skel.so"
+#define V65 "libhexagon_nn_skel_v65.so"
+#define V66 "libhexagon_nn_skel_v66.so"
+#define ADSP "adsp"
+#define CDSP "cdsp"
 
-#define IS_QTI_SOC_8996(soc) ((soc) == 246 || (soc) == 291 || \
-                              (soc) == 310 || (soc) == 311 || \
-                              (soc) == 305 || (soc) == 312)
+typedef enum {
+    UNSPECIFIED_MODE = 0,
+    NON_DOMAINS,
+    DOMAINS
+} SkelMode;
 
-#define IS_QTI_SOC_8998(soc) ((soc) == 292 || (soc) == 319)
+struct SocSkelTable {
+    unsigned int soc_id;
+    SkelMode mode;
+    const char* skel;
+    const char* dsp_type;
+};
 
-#define IS_QTI_SOC_SDM660(soc) ((soc) == 317 || (soc) == 324 || \
-                                       (soc) == 325 || (soc) == 326 || \
-                                       (soc) == 318 || (soc) == 327)
-
-#define IS_QTI_SOC_SDM845(soc) ((soc) == 321 || (soc) == 341)
-
-#define IS_QTI_SOC_SDM670(soc) ((soc) == 336 || (soc) == 337 || (soc) == 347)
-
-#define IS_QTI_SOC_SDM855(soc) ((soc) == 339 || (soc) == 362 || (soc) == 367)
-
-#define IS_QTI_SOC_SDM710(soc) ((soc) == 360 || (soc) == 393)
-
-#define IS_QTI_SOC_SM6150(soc) ((soc) == 355 || (soc) == 377 || (soc) == 384)
-
-#define IS_QTI_SOC_SM7150(soc) ((soc) == 365 || (soc) == 366)
-
-#define IS_QTI_SOC_QCS405(soc) ((soc) == 352)
-
-#define IS_QTI_SOC_SM6125(soc) ((soc) == 394)
-
-#define IS_QTI_SOC_QCS403(soc) ((soc) == 373)
+const static struct SocSkelTable socSkelInfo [] = {
+    {246, NON_DOMAINS, NULL, NULL},
+    {291, NON_DOMAINS, NULL, NULL},
+    {292, DOMAINS, V60, ADSP},
+    {305, NON_DOMAINS, NULL, NULL},
+    {310, NON_DOMAINS, NULL, NULL},
+    {311, NON_DOMAINS, NULL, NULL},
+    {312, NON_DOMAINS, NULL, NULL},
+    {317, DOMAINS, V60, CDSP},
+    {318, DOMAINS, V60, CDSP},
+    {319, DOMAINS, V60, ADSP},
+    {321, DOMAINS, V65, CDSP},
+    {324, DOMAINS, V60, CDSP},
+    {325, DOMAINS, V60, CDSP},
+    {326, DOMAINS, V60, CDSP},
+    {327, DOMAINS, V60, CDSP},
+    {336, DOMAINS, V65, CDSP},
+    {337, DOMAINS, V65, CDSP},
+    {339, DOMAINS, V66, CDSP},
+    {341, DOMAINS, V65, CDSP},
+    {347, DOMAINS, V65, CDSP},
+    {352, DOMAINS, V66, CDSP},
+    {355, DOMAINS, V66, CDSP},
+    {356, DOMAINS, V66, CDSP},
+    {360, DOMAINS, V65, CDSP},
+    {362, DOMAINS, V66, CDSP},
+    {365, DOMAINS, V65, CDSP},
+    {366, DOMAINS, V65, CDSP},
+    {367, DOMAINS, V66, CDSP},
+    {373, DOMAINS, V66, CDSP},
+    {377, DOMAINS, V66, CDSP},
+    {384, DOMAINS, V66, CDSP},
+    {393, DOMAINS, V65, CDSP},
+    {394, DOMAINS, V66, CDSP},
+    {400, DOMAINS, V66, CDSP},
+    {407, DOMAINS, V66, CDSP},
+    {0, UNSPECIFIED_MODE, NULL, NULL}
+};
 
 #endif // HEXAGON_NN_HEXNN_SOC_DEFINES_H

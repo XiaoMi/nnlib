@@ -50,6 +50,7 @@ hexagon/src/expand_grouped_conv_nodes.c
 hexagon/src/expand_dilated_conv_nodes.c
 hexagon/src/dwconv2dbbb_c.c
 hexagon/src/dwconv2dhhh_c.c
+hexagon/src/nn_pqueue.c
 hexagon/ops/src/op_resizebilinear.c 
 hexagon/ops/src/op_resizebilinear_d32.c 
 hexagon/ops/src/op_batchspace.c 
@@ -82,7 +83,8 @@ hexagon/ops/src/op_add.c
 hexagon/ops/src/op_add_d32.c 
 hexagon/ops/src/op_prod_f.c 
 hexagon/ops/src/op_mul.c 
-hexagon/ops/src/op_pack.c 
+hexagon/ops/src/op_pack.c
+hexagon/ops/src/op_unpack.c
 hexagon/ops/src/op_shape.c 
 hexagon/ops/src/op_sum.c 
 hexagon/ops/src/op_bitwise.c 
@@ -229,3 +231,6 @@ hexagon/ops/src/op_l2normalize_8.c
 hexagon/ops/src/op_dwise_snode_8bit.c
 hexagon/ops/src/op_lsh_projection.c
 hexagon/ops/src/op_correlation1d.c
+hexagon/ops/src/op_l2normalize_8_ref.c
+hexagon/ops/src/op_ssd_detection_out.c
+hexagon/src/udo_infrastructure.c

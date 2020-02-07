@@ -185,6 +185,8 @@ it can be executed.
 
 Returns 0 on success, nonzero otherwise.
 
+Execute the graphs with of one of following execute API's:
+
 	int hexagon_nn_execute(nn_id id, 
 		uint32_t batches_in, 
 		uint32_t height_in, 
@@ -207,6 +209,66 @@ Execution will fail if the network has not been prepared.
 Input is provided to the INPUT node, and output is returned from the OUTPUT node.
 
 Returns 0 on success, nonzero otherwise.
+
+    typedef struct {
+        unsigned int batches;
+        unsigned int height;
+        unsigned int width;
+        unsigned int depth;
+        unsigned char *data; /* Address of data allocation */
+        int dataLen;        /* For input and output. Size of allocation */
+        unsigned int data_valid_len; /* For input and output. Actual amount of data */
+        unsigned int unused;
+    } hexagon_nn_tensordef;
+
+    int hexagon_nn_execute_new(nn_id id,
+        const hexagon_nn_tensordef *inputs,
+        uint32_t n_inputs,
+        hexagon_nn_tensordef *outputs,
+        uint32_t n_outputs)
+
+Executes a network, with multiple inputs and outputs.
+
+Execution will fail if the network has not been prepared.
+
+Input is provided to the INPUT node, and output is returned from the OUTPUT node.
+
+Inputs and Outputs are defined as buffers of hexagon_nn_tensordef structs. 
+
+The number of structs must match n_inputs and n_outputs respectively. 
+
+Returns 0 on success, nonzero otherwise.
+
+        typedef struct {
+                hexagon_nn_execute_result result;
+                unsigned char* extraInfo;
+                int extraInfoLen;
+                int extraInfoValidLen;
+        } hexagon_nn_execute_info;
+
+        int hexagon_nn_execute_with_info(nn_id_t id,
+                const hexagon_nn_tensordef *tensors_in,
+                uint32_t n_tensors_in,
+                hexagon_nn_tensordef *tensors_out,
+                uint32_t n_tensors_out, 
+                hexagon_nn_execute_info *execute_info);
+
+Executes a network, with provided input data and returning output data wrapped
+in hexagon_nn_tensordef.
+
+Execution will fail if the network has not been prepared.
+
+Input is provided to the INPUT node, and output is returned from the OUTPUT node.
+
+Execute_info parameter is used to communicate result and extra information about 
+errors if any on graph executions. If result is NN_EXECUTE_ERROR, NN_EXECUTE_BUFFER_SIZE_ERROR,
+or NN_EXECUTE_UDO_ERROR, extraInfo field from execute_info can be used for 
+returning extra information about the particular execute failure in the form of a 
+struct hexagon_nn_execute_complete_info, if enough memory is allocated by the caller.
+Caller shall then cast extraInfo into struct hexagon_nn_execute_complete_info*, and read
+the information stored there based on execute_info.result.
+
+Always returns 0, unless encountering FastRPC errors.
 
 	int hexagon_nn_teardown(nn_id id);
 

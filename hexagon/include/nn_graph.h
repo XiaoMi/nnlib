@@ -84,6 +84,7 @@ struct nn_node {
 	uint32_t refs;			// time op was referenced by any output
 	uint64_t perfcounter;		// performance counter
 	uint64_t iter_cycles;		// cycles consumed in last execution
+        struct udo_node_info udo_info;  // udo function and data pointers
 };
 
 enum nn_node_flags {			// 'flags' field
@@ -185,6 +186,11 @@ static inline int nn_batchseqstate_loop_update(struct nn_graph_batchseqstate *p)
 //
 struct nn_prepare_state;
 
+struct udo_node {
+        struct nn_node* node;
+        struct udo_node* next;
+};
+
 struct nn_graph {
 	struct nn_node *head;		// First node in graph list
 	struct nn_node *tail;		// 'weak' tail pointer
@@ -240,6 +246,11 @@ struct nn_graph {
 	char *enable_const_print_prefix;
 	char *enable_tensor_print_prefix;
 	char *tensor_print_filter;
+
+        // udo list
+        uint32_t num_udos;
+        struct udo_node* udo_list_start;
+        struct udo_node* udo_list_end;
 };
 
 // this sets the noderefhash field on a node. Call after changing src_id
@@ -501,7 +512,7 @@ struct nn_node_ops {
 };
 extern struct nn_node_ops *optab[];
 
-int do_execute(struct nn_graph *nn);
+int do_execute(struct nn_graph *nn, execute_basic_info* exe_info);
 int do_append_node(
 	struct nn_graph *nn,
 	uint32_t node_id,
@@ -511,6 +522,19 @@ int do_append_node(
 	uint32_t num_outputs,
 	const struct input *inputs,
 	const struct output *outputs);
+int do_append_udo_node(
+        nn_id_t id,
+        struct nn_graph *nn,
+        uint32_t node_id,
+        const char* package_name,
+        char* op_type,
+        void* flattened_static_params,
+        uint32_t flattened_static_params_size,
+        uint32_t num_inputs,
+        uint32_t num_outputs,
+        const struct input *inputs,
+        const struct output *outputs,
+        hexagon_nn_udo_err* err);
 int do_append_const_node(
 	struct nn_graph *nn,
 	uint32_t node_id,
@@ -587,6 +611,7 @@ int node_free_common(struct nn_node *node, struct nn_graph *nn);
 // if you have a (possibly null) opaque pointer which just needs to be free'd, this
 // can be the node dtor.
 int node_free_common_release_opaque(struct nn_node *node, struct nn_graph *nn );
+int node_free_udo_common_release(struct nn_node *node, struct nn_graph *nn );
 
 struct nn_node *node_alloc_common(
 	struct nn_graph *nn,
@@ -598,10 +623,25 @@ struct nn_node *node_alloc_common(
 	const struct input *inputs,
 	const struct output *outputs);
 
+struct nn_node *node_alloc_udo_common(
+        struct nn_graph *nn,
+        uint32_t node_id,
+        uint32_t num_inputs,
+        uint32_t num_outputs,
+        const struct input *inputs,
+        const struct output *outputs,
+        uint32_t ops_flag);
+
 struct nn_node *alloc_node(
 	uint32_t node_id,
 	op_type operation,
 	padding_type padding);
+
+int udo_common_execute (struct nn_node *node, struct nn_graph *nn);
+
+struct nn_node *alloc_udo_node(struct nn_graph *nn, uint32_t node_id,
+        uint32_t num_inputs, uint32_t num_outputs, uint32_t ops_flag);
+
 void set_last_consumers(struct nn_graph *nn);
 
 static inline uint32_t nn_align_up(uint32_t align_amt, uint32_t val)

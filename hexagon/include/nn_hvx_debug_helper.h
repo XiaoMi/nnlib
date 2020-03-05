@@ -43,7 +43,7 @@
 
 //ref code for printing HVX vectors for debug
 //print unsigned byte, 32 bytes per line
-void printHVXu8(HVX_Vector vin, int size) {
+static inline void printHVXu8(HVX_Vector vin, int size) {
     uint8_t * vec = (uint8_t *)nn_memalign(128, 128);
     HVX_Vector * vec1 = (HVX_Vector *)vec;
     *vec1 = vin;
@@ -55,7 +55,7 @@ void printHVXu8(HVX_Vector vin, int size) {
 }
 
 //print signed byte
-void printHVX8(HVX_Vector vin, int size) {
+static inline void printHVX8(HVX_Vector vin, int size) {
     uint8_t * vec = (uint8_t *)nn_memalign(128, 128);
     HVX_Vector * vec1 = (HVX_Vector *)vec;
     *vec1 = vin;
@@ -68,7 +68,7 @@ void printHVX8(HVX_Vector vin, int size) {
 
 //print words
 //size is the number of words
-void printW(HVX_Vector vin, int size) {
+static inline void printW(HVX_Vector vin, int size) {
     int32_t * vec = (int32_t *)nn_memalign(128, 128);
     HVX_Vector * vec1 = (HVX_Vector *)vec;
     *vec1 = vin;

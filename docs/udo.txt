@@ -1,0 +1,352 @@
+/*
+ * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted (subject to the limitations in the
+ * disclaimer below) provided that the following conditions are met:
+ *
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *
+ *    * Redistributions in binary form must reproduce the above
+ *      copyright notice, this list of conditions and the following
+ *      disclaimer in the documentation and/or other materials provided
+ *      with the distribution.
+ *
+ *    * Neither the name of The Linux Foundation nor the names of its
+ *      contributors may be used to endorse or promote products derived
+ *      from this software without specific prior written permission.
+ *
+ * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
+ * GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
+ * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+ * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+ * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ */
+
+=============================
+UDO FEATURE --- ALPHA VERSION
+HexNN V2
+=============================
+
+
+UDO Concept
+
+User defined operation (UDO) is a feature that HexNN v2 supports to allow custom operations to be 
+inserted natively into HexNN graphs on DSP. UDO feature enables users of HexNN to implement and optimize 
+custom operations and to encapsulate confidential information. User defined operations are defined in 
+UDO implementation libraries as shared objects (.so). HexNN supports UDO feature by providing implementation 
+guidelines and standard UDO header files, and HexNN also supports a list of HexNN specific functionalities 
+to UDO libraries as an infrastructure. 
+
+Each UDO implementation library needs to be registered into HexNN before any graph initialization, and user 
+defined operations are appended as UDO nodes along with static parameters into HexNN graphs. During HexNN 
+graph execution time, execution functions defined in UDO implementation libraries are called. And after 
+teardown of all graphs with UDO nodes, UDO libraries need to be released from HexNN.
+
+
+--------------------------------------------------------------------------------------------------------------
+
+
+HexNN API’s for UDO Feature
+
+•	Int hexagon_nn_udo_register_lib (const char* so_path_name, hexagon_nn_udo_err* err)
+	o	Used for registering each UDO library to HexNN
+	o	UDO implementation library path (relative to ADSP_LIBRARY_PATH) and name need to be provided as a string
+
+•	Int hexagon_nn_append_udo_node ( nn_id_t id, uint32_t node_id, const char* package_name, char* op_type, 
+        char* flattened_static_params, uint32_t flattened_static_params_size, const struct input* inputs, 
+        uint32_t num_inputs, const struct output* outputs, uint32_t num_outputs, hexagon_nn_udo_err* err)
+	o	Used for appending UDO nodes to HexNN graphs
+	o	Package name and op type in parameters must match descriptions defined in UDO implementation libraries
+	o	static parameters for UDO nodes should be passed in flattened format (more descriptions below)
+
+•	Int hexagon_nn_free_udo_individual_lib (const char* package_name, hexagon_nn_udo_err* err)
+	o	Used for releasing and un-registering one UDO implementation library specified by package name
+	o	Freeing of a UDO library should only happen after its retirement, i.e. a UDO library shall only 
+                be freed after all HexNN graphs with UDO nodes from this UDO library have been torn down
+
+•	Int hexagon_nn_free_udo_libs (hexagon_nn_udo_err* err)
+	o	Used for releasing and un-registering all registered UDO implementation libraries
+	o	Should only be called after all HexNN graphs with UDO nodes have been torn down
+
+Note: all four new API's in HexNN v2 use return value for fastrpc error code and use hexagon_nn_udo_err* err in the 
+parameter for HexNN error code. HexNN error code in err is defined in enum hexagon_nn_udo_err from interface/hexagon_nn.idl
+
+
+--------------------------------------------------------------------------------------------------------------
+
+
+UDO Implementation Library
+
+UDO implementation libraries are runtime specific libraries that contains implementation of user defined operations. 
+UDO header files located in interface/SnpeUdo/ directory defines standardized data structs and function interfaces that 
+each UDO implementation library need to deploy. HexNN UDO implementation libraries should include UdoImplDspHexNNv2.h 
+header file and provide definitions of functions declared in UdoImplDspHexNNv2.h, UdoShared.h and UdoImpl.h. Note that 
+SnpeUdo_setOpIO function and SnpeUdo_profileOp function declared in UdoImpl.h are currently not used in HexNN, thus 
+function definitions are not required in HexNN v2 UDO implementation libraries. Each HexNN v2 implementation library 
+should have a unique package name defined in the library itself.
+
+Before inserting UDO nodes into HexNN, each implementation library requires HexNN registration using 
+hexagon_nn_udo_register_lib API with the path (relative to ADSP_LIBRARY_PATH) and name of the shared object (.so).
+
+
+--------------------------------------------------------------------------------------------------------------
+
+
+UDO Implementation Library ID
+
+UDO package name defined in each HexNN v2 UDO implementation library serves as a unique identification for that 
+UDO implementation library. Package name is used in hexagon_nn_append_udo_node and hexagon_nn_free_udo_individual_lib
+function calls. The package names being registered in one process are expected to be unique. 
+When trying to register a UDO library with a package name that has already been registered, 
+UDO_LIB_ALREADY_REGISTERED error code will be returned, and no additional UDO library will be registered. 
+However, UDO implementation is responsible for taking care of the cases when SnpeUdo_initImplLibrary is 
+called more than once, UDO implementation libraries should make sure no memory leak and thread-safe.
+
+
+--------------------------------------------------------------------------------------------------------------
+
+
+UDO Standard Header Files
+
+UDO header files are located in interface/SnpeUdo/ directory. HexNN UDO implementation libraries should include 
+UdoImplDspHexNNv2.h and provide function definitions for functions declared in UdoShared.h, UdoImpl.h and UdoImplDspHexNNv2.h.
+
+UdoBase.h
+•	Defines enums and structs used in UDO implementation library and UDO registration library(optional library for HexNN v2)
+
+UdoShared.h
+•	Defines function interfaces shared in both UDO implementation library and UDO registration library
+•	Includes UdoBase.h
+
+UdoImpl.h
+•	Defines structs and function interfaces for UDO implementation library
+•	Includes UdoShared.h
+
+UdoImplDspHexNNv2.h
+•	Defines structs and function interfaces specifically for HexNN v2 UDO implementation library
+•	Includes UdoImpl.h
+
+
+--------------------------------------------------------------------------------------------------------------
+
+
+Infrastructure Functions Supported By HexNN
+
+HexNN supports some functionalities and provides them to UDO implementation library as a global infrastructure. 
+These function interfaces are defined in UdoImplDspHexNNv2.h file. 
+
+•	udoSetOutputTensorSize (void* perOpInfrastructure, uint32_t outIdx, uint32_t size)
+	o	For each output tensor of an operation instance, current tensor size needs to be set explicitly during execute
+	o	perOpInfrastructure is a void pointer that UDO saves thru createOperation function
+
+•	udoGetInputD32Paddings (void* perOpInfrastructure, uint32_t inIdx,
+                                uint32_t* heightPadBefore, uint32_t* heightPadAfter,
+                                uint32_t* widthPadBefore, uint32_t* widthPadAfter,
+                                uint32_t* depthPadBefore, uint32_t* depthPadAfter)
+	o	Depth32 (or D32) data format can be used in vector calculations to achieve better performance
+	o	Paddings of a D32 format udo input tensor can be obtained using this function
+
+•	udoSetOutputD32ShapeSizePaddings (void* perOpInfrastructure, uint32_t outIdx,
+                                          uint32_t batch,
+                                          uint32_t height, uint32_t heightPadBefore, uint32_t heightPadAfter,
+                                          uint32_t width, uint32_t widthPadBefore, uint32_t widthPadAfter,
+                                          uint32_t depth, uint32_t depthPadBefore, uint32_t depthPadAfter,
+                                          SnpeUdo_DataType_t dataType);
+	o	Paddings of a D32 format udo output tensor must be set using this function
+	o	This function also sets dimensions, output data type and output data size for the specified udo output
+	o	Total depth including the paddings must be multiple of 32 for D32 tensors
+	o	Total width including the paddings must be multiple of 4 for D32 tensors
+
+•	udoMemalign (size_t n, size_t size)
+	o	HVX operations can only access data aligned to 128 bytes
+
+•	udoMalloc (size_t size)
+
+•	udoCalloc (size_t n, size_t size)
+
+•	udoFree (void* ptr)
+	o	Frees memory allocated dynamically using udoMemalign, udoMalloc and udoCalloc
+
+•	udoGetVtcmSize(void* perOpInfrastructure)
+	o	returns available vtcm size in bytes when vtcm becomes ready for use
+	o	vtcm size can be accessed in SnpeUdo_createOperation and SnpeUdo_executeOp stages
+
+•	udoGetVtcmPtr(void* perOpInfrastructure)
+	o	returns the vtcm pointer, or NULL if vtcm is not available
+	o	vtcm is only ready for use if vtcm pointer is not NULL regardless of the vtcm size
+	o	vtcm is only available for use during execution time of operations, i.e. SnpeUdo_executeOp
+
+•	udoRunWorkerThreads (void* perOpInfrastructure, uint32_t nThreads, workerThread_t w, void* userData)
+	o	HexNN multithreading functionality
+	o	Calls user provided function w with parameter userData using nThreads number of threads
+	o	Max number of threads is 4 for V66 SOC's and 2 for V60 and V65 SOC's, nThreads greater than 
+                these numbers will be bounded to corresponding max number of threads of certain SOC's
+	o	Returns when all threads are done
+	o	Required for using HVX 
+	o	Function w needs to follow workerThread_t function interface defined in UdoImplDspHexNNv2.h 
+
+
+--------------------------------------------------------------------------------------------------------------
+
+
+Per-op-factory Infrastructure and Per-operation Infrastructure
+
+Per-op-factory Infrastructure: per-op-factory infrastructure is passed into UDO implementation library as a 
+void pointer through createOpFactory function, and it is unique for each op factory created. In HexNN context, 
+per-op-factory infrastructure is defined in the provided header file as a struct containing a single field 
+called graph id. In createOpFactory, UDO library is expected to cast the void pointer to this struct and 
+store graph id information for future use. The void pointer passed into UDO library through createOpFactory 
+function will not be valid after this function call.
+
+Per-operation Infrastructure: per-operation infrastructure is passed into UDO implementation library as a 
+void pointer through createOperation function, and it is unique for each operation instance created. In HexNN 
+context, per-operation infrastructure is defined in the provided header as a void pointer. In createOperation, 
+UDO library is expected to copy and save this pointer for future use. Per-operation infrastructure is needed 
+to be passed into some of the global infrastructure function calls. 
+
+
+--------------------------------------------------------------------------------------------------------------
+
+
+Operation & Op Factory
+
+Operation and op factory are structs defined by UDO implementation libraries.
+
+Op factory: Operation instances in the same HexNN graph with identical graph id are allowed to share op factories. 
+UDO library can choose to keep track of the factories created and reuse some of them within the same graph to 
+avoid duplicate op factories. However, this is optional.
+
+
+--------------------------------------------------------------------------------------------------------------
+
+
+VTCM
+
+VTCM is DSP local memory that enables fast data fetch and can be used for HVX operations. VTCM exists on V65 
+and V66 SOC's, it does not exist on V60 SOC's. UDO can utilize two functions provided in global infrastructure 
+for VTCM access, namely udoGetVtcmSize and udoGetVtcmPtr. udo_getVtcmSize can be used for querying the 
+size of available VTCM in bytes. udoGetVtcmPtr can be used to get a pointer that points to the beginning of 
+VTCM. During the executions of each HexNN node, entire VTCM is made available for use, that is, data on VTCM 
+is only reserved for the period of each node execution.
+
+
+--------------------------------------------------------------------------------------------------------------
+
+
+HVX
+
+HVX intrinsics can differ depending on types of SOC's. Building different .so files for different SOC types 
+(eg. V65, V66) is recommended.
+
+
+--------------------------------------------------------------------------------------------------------------
+
+
+Depth32 Data Format 
+
+Depth32 (or D32) data format is a HexNN data format that optimizes vector calculations, thus it improves performance.
+Depth32 format utilizes paddings around height, width and depth dimensions to convert data into multiple blocks
+of 128 bytes. 
+
+Some basic rules for D32 tensors include: 
+•	Total depth including the paddings must be multiple of 32
+•	Total width including the paddings must be multiple of 4
+
+Some good practice includes:
+•	Padding along width before valid data is typically 4
+•	Paddings along height both before and after valid data are typically 4
+Note: when the good practice above is not followed by UDO, performance and/or accuracy might be affected.
+
+For more information about depth32 format, please refer to documents in HexNN docs/ directory.
+
+UDO operations can leverage D32 data format to achieve better performance. SnpeUdo_queryOperation function queries
+UDO library on data layout (plain vs D32) of each input and output of an operation, and HexNN will take care
+of depth32 converters around UDO nodes during prepare time. UDO library can expect that inputs indicated with D32
+data layout are fed with data in D32 format, and the paddings of a D32 format input can be obtained using 
+udoGetInputD32Paddings function from global infrastructure. UDO library can write D32 format data to outputs
+indicated with D32 data layout, and the paddings of a D32 format output can be set using udoSetOutputD32ShapeSizePaddings
+function from global infrastructure. If NULL pointers are returned from SnpeUdo_queryOperation for inputs and/or
+outputs data layouts, it is assumed that all inputs and/or outputs for this operation have plain data layouts, 
+i.e. no D32 format.
+
+
+--------------------------------------------------------------------------------------------------------------
+
+
+Constructing HexNN v2 Graph with UDO Nodes
+
+Static parameters: static parameters in SnpeUdo_Param_t format need to flattened before passing over fastrpc boundry, 
+flatten function is provided in hexagon/host/UdoFlatten.c, and the corresponding header file is interface/SnpeUdo/UdoFlatten.h. 
+hexagon_nn_append_udo_node API takes flattened static parameters.
+
+Inputs:
+•	For each UDO input that quantization type is SNPE_UDO_QUANTIZATION_NONE, one HexNN input tensor is required.  
+•	For each UDO input that quantization type is SNPE_UDO_QUANTIZATION_TF, three HexNN input tensors are required. 
+        The required order is data, min, max
+•	After all inputs are included based on quantization types, more HexNN input tensors need be appended in 
+        the end to indicate output expected quantization ranges for quantized DLC models (non-quantized DLC is 
+        currently not supported in HexNN UDO feature). Each UDO output with quantization type of SNPE_UDO_QUANTIZATION_TF 
+        requires a pair of HexNN input tensors to represent expected quantization min and max. The pairs must obey 
+        UDO output order, and the order of each pair is min, max. 
+•	HexNN input tensors template: (in_data_1, (in_min_1, in_max_1), in_data_2, (in_min_2, in_max_2), ... 
+        ... (out_min_1, out_max_1, out_min_2, out_max_2, ...))
+
+Outputs:
+•	For each UDO output that quantization type is SNPE_UDO_QUANTIZATION_NONE, one HexNN output tensor is required.  
+•	For each UDO output that quantization type is SNPE_UDO_QUANTIZATION_TF, three HexNN output tensors are required. 
+        The required order is data, min, max
+•	Expected output quantization ranges are set and provided by HexNN, and UDO implementation library should 
+        obey them and cannot modify them.
+•	HexNN output tensors template: (out_data_1, (out_min_1, out_max_1), out_data_2, (out_min_2, out_max_2), ... )
+
+
+--------------------------------------------------------------------------------------------------------------
+
+
+Ownerships of Static Parameters, Inputs and Outputs
+
+Static parameters: static parameters are passed into UDO library through createOpFacory function, UDO 
+implementation library is the expected owner of the static parameters and should allocate and copy them into UDO library.
+
+Inputs and outputs: inputs and outputs tensors are passed into UDO library through createOperation function, 
+HexNN is the expected owner of the tensors, and UDO should copy the pointers for future access.
+
+
+--------------------------------------------------------------------------------------------------------------
+
+
+Example UDO Implementation Library and Sample Test App
+
+In directory udo/
+   Example UDO library Source File: udoExampleImplLib.c
+   Sample test app to demonstrate call flow: udoSampleCallFlow.c
+
+Instructions for building and running test app on device:
+   Build udoExampleImplLib.so for DSP: 
+      cd udo/
+      make tree_clean V=hexagon_Release_dynamic_toolv82_v65
+      make tree V=hexagon_Release_dynamic_toolv82_v65
+   Build sample udo executable:
+      cd (HEXNN-ROOT-DIRECTORY)
+      make VERBOSE=1 V=android_Release_aarch64 CDSP_FLAG=1 UDO_SAMPLE_EXE=1 tree
+   Run
+      (adjust paths written in udo/runUdoSample.sh file accordingly)
+      cd (HEXNN-ROOT-DIRECTORY)
+      ./udo/runUdoSample.sh
+
+
+--------------------------------------------------------------------------------------------------------------
+
+Note: SNPE_UDO_QUANTIZATION_QMN quantization type of inputs and outputs of ops are not supported in HexNN v2 UDO Feature
+

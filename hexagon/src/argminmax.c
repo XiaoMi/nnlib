@@ -212,9 +212,15 @@ void get_4_width_block(int *rowno, int * h_idx, int * b_idx, int dim_w, int dim_
     }
 }
 
-//argmin/max along depth for d32 format
+//argmin/max along depth for d32 format, single thread
 void
 hvx_argmin_or_max_d_8_d32(struct tensor const * data_tensor, int32_t * outp, int find_argmax) {
+    hvx_argmin_or_max_d_8_d32_mt(data_tensor, outp, find_argmax, 1, 0);
+}
+
+//argmin/max along depth for d32 format, multi theading version
+void
+hvx_argmin_or_max_d_8_d32_mt(struct tensor const * data_tensor, int32_t * outp, int find_argmax, int threads_num, int thread_id) {
 
     HVX_Vector indices = *(HVX_Vector const *) const_Count32;        // bytes {0..31, 0..31, 0..31, 0..31}
     indices = Q6_V_vand_VV(indices, Q6_V_vsplat_R(0xFF));            // { 0,4,8,..28, 0..28, 0..28, 0..28 } in w lanes.
@@ -261,15 +267,30 @@ hvx_argmin_or_max_d_8_d32(struct tensor const * data_tensor, int32_t * outp, int
     uint8_t * new_4w0;
     uint8_t * new_4w1;
 
+    int start_rowno = thread_id * 8; // 0, 8, 16, 24
+    int step_rowno = threads_num * 8; // 32
+
     int output_offset = 0;
     int output_increment0 = 0;//dim_w % 4 == 0 ? 16 : (dim_w % 4) * 4;//num of bytes to output per 4 widths
     int output_increment1 = 0;
 
-    for (int rowno = 0; rowno < rows; rowno += 4) {
+    for (int rowno = start_rowno; rowno < rows; rowno += step_rowno) {
+
+        if (threads_num != 1) {
+            // For multi-threads, have to update indices becasuse have bigger step
+            b_idx = rowno / (dim_h * dim_w_aligned);
+            h_idx = (rowno - b_idx * (dim_h * dim_w_aligned)) / dim_w_aligned;
+
+            real_data_h = tensor_location_bhw_d32(data_tensor, b_idx, h_idx, 0);
+
+            output_offset = b_idx*dim_h*dim_w + h_idx*dim_w + (rowno /* 0, 8, 16, 24,... */ % dim_w_aligned);
+            output_offset *= 4;
+        }
 
         // Read data block of every 4 widths. There are 32 quantized 8 values in one width. An HVX Vector can contain 4 widths
         get_4_width_block(&rowno, &h_idx, &b_idx, dim_w, dim_h, data_tensor,
                           dim_w_aligned, h_stride, &real_data_h, &new_4w0, &output_increment0);
+
         only_one = (rowno + 4) >= rows; //only one rwo (4 widths) to be processed
 
         if(only_one) {
@@ -277,10 +298,14 @@ hvx_argmin_or_max_d_8_d32(struct tensor const * data_tensor, int32_t * outp, int
             output_increment1 = 0;
         }
         else {
-            rowno += 4;
-            get_4_width_block(&rowno, &h_idx, &b_idx, dim_w, dim_h, data_tensor,
+            int next_rowno = rowno + 4;
+            get_4_width_block(&next_rowno, &h_idx, &b_idx, dim_w, dim_h, data_tensor,
                               dim_w_aligned, h_stride, &real_data_h, &new_4w1, &output_increment1);
         }
+
+        int fetch_width = threads_num * sizeof(HVX_Vector);
+        if (!only_one) fetch_width *= 2;
+        l2fetch(new_4w0, d32_block_stride, fetch_width, dim_d32blocks);
 
         output_increment0 *= 4;  //num_valid_rows * 4-byte output per row
         output_increment1 *= 4;

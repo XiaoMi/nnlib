@@ -69,7 +69,7 @@ static inline HVX_Vector compute_reduced_sum(HVX_Vector in)
     return cur_sum;
 }
 
-static void reduce_sum_all_axes_hvx(const uint8_t * in_data, int32_t * out_data, const int blob_size)
+static inline void reduce_sum_all_axes_hvx(const uint8_t * in_data, int32_t * out_data, const int blob_size)
 {
     const int leftovers = blob_size % sizeof(HVX_Vector);
     int xd;
@@ -96,7 +96,7 @@ static void reduce_sum_all_axes_hvx(const uint8_t * in_data, int32_t * out_data,
 }
 
 //8 bit input
-static void reduce_sum_single_axis_hvx_8(const uint8_t * in_data, int32_t * out_data, 
+static inline void reduce_sum_single_axis_hvx_8(const uint8_t * in_data, int32_t * out_data,
                                         const int num_batches, const int num_blobs, const int blob_size)
 {
     const int leftovers = blob_size % (sizeof(HVX_Vector) / sizeof(int32_t));
@@ -189,7 +189,7 @@ static void reduce_sum_single_axis_hvx_8(const uint8_t * in_data, int32_t * out_
 }
 
 //32 bit input
-static void reduce_sum_single_axis_hvx_32(const int32_t * in_data, int32_t * out_data, 
+static inline void reduce_sum_single_axis_hvx_32(const int32_t * in_data, int32_t * out_data,
                                          const int num_batches, const int num_blobs, const int blob_size)
 {
     const int leftovers = blob_size % (sizeof(HVX_Vector));

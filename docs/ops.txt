@@ -14,14 +14,14 @@ Theory of execution:
 
 
 INPUT:
-	No input
-	N outputs
-	Input data from hexagon_nn_execute()
+    0 input
+    n outputs
+    The operation inputs data from hexagon_nn_execute().
 
 OUTPUT:
-	N inputs
-	No outputs
-	output data for hexagon_nn_execute()
+    n inputs
+    0 outputs
+    The operation outputs data for hexagon_nn_execute().
 
 Convert_to_aix_d32:
 	4 inputs:
@@ -36,9 +36,9 @@ Convert_to_aix_d32:
         2: Input max
 
 Nop:
-	N inputs
-	N outputs
-	copies input to output
+    n inputs
+    n outputs
+    The operation copies input to output.
 
 Sink:
 	N inputs
@@ -70,9 +70,20 @@ for Close_f:
 
 
 Close_q_quint8:
-	6 inputs: DUT,DUT_min,DUT_max,REF,REF_min,REF_max
+    6 inputs (+2 optional):
+        0: dut tensor (uint8_t)
+        1: dut_min (float)
+        2: dut_max (float)
+        3: ref tensor (uint8_t)
+        4: ref_min (float)
+        5: ref_max (float)
+        6-7(optional): offset_index, for determining the REFval.
+                       error_ratio, by default error_ratio=NULL, 
+                                    in which case the upperbound of error ratio is FUDGE_FACTOR=0.07.
 	No output
-	Dequantizes elements of DUT and REF and checks that they are close
+	Dequantizes elements of input tensors dut and ref and checks that they are close, 
+	input error_ratio defines the upperbound of current error ratio between elements in input tensors, 
+	which 'curr_error_ratio' = abs((DUTval - REFval) / (REF_max - REF_min)).
 
 Close_d32:
 	inputs 0,1,2:   qu8 input (d32 format), scalar min,max
@@ -106,10 +117,10 @@ PPrint_f:
      negative indices). The optional inputs can be used with this, e.g. inps 1..3 = {2,-100,0} will show only
      the 'width left' padding (the implied range of -100 .. -1 is truncated according to the actual dims).
 
-Flatten:
-	1 input
-	No output
-	Flattens into a 1D Tensor. DEPRECATED, changing to "reshape"
+Flatten: 
+    1 input
+    1 output
+    The operation flattens a 4D tensor from [b,h,w,d] into [1,1,1,b*h*w*d].
 
 Shape_int32:
 	1 input:
@@ -138,6 +149,25 @@ Transpose_int32:
     control_tensor = [1,0,2] will transpose the h and w dimensions; and so will [0,2,1,3]. A value such as [0,1,2] has no effect.
 
 Transpose_8:
+    4 inputs:
+        0: Input data (quint8 tensor) 
+        1: Control tensor (int32 tensor) [1,1,1,k]
+        2: Input min (float scalar)
+        3: Input max (float scalar)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar) 
+        2: Output max (float scalar)
+    This operation reorders the dimensions of the input, producing an output with the same data, 
+        but axes reordered. 
+    Control tensor - its a 1D control tensor of shape [1,1,1,k] and must contain the integers 0
+        ...k-1 in some order (no repeats) where k = 2, 3 or 4; these refer to the last n of the 4 
+        dimensions. For instance, control_tensor = [1,0,2] will transpose the h and w dimensions;
+        and so will [0,2,1,3]. A value such as [0,1,2] has no effect. 
+    Output data - same format as input0.
+    Output min - same as input1.
+    Output max - same as input2.
+
 Transpose_16:
 	4 inputs:
 		0: input tensor (qu8,qu16, or qi16)
@@ -166,18 +196,23 @@ Reshape:
 	unchanged.
 
 QuantizedReshape:
-	4 inputs:
-		0:  data tensor,  flat format; could be qu8 or qint32
-		1:  desired shape: flat int32 tensor, [1,1,1,1..4]
-		2:  scalar float, input min
-		3:  scalar float, input max
-
-	3 outputs:
-	    0:  output tensor, flat format. Same size, data as input 0; possibly different shape
-	    1:  scalar float, output min (same as input 2)
-	    2:  scalar float, output max (same as input 3)
-
-	Same as Reshape but with min/max i/o ports.
+    4 inputs:
+        0: Input data (quint8/qint32 tensor)
+        1: Target shape (shape tensor)
+        2: Input min (float scalar)
+        3: Input max (float scalar)
+    3 outputs:
+        0: Output data (quint8/qint32 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    This operation copies the input data but mutates the shape. The new shape is given as 1 to 4 
+        integers; If 4, they are [b,h,w,d]; if less than 4, the shape is padded on the left with 
+        1's.
+    Target shape - At most one of the dimensions may be given as -1, this is taken as a missing dim
+        which will be calculated. In any the case the total number of elements must be unchanged.
+    Output data - same size and data as input0 but possiblity different shape.
+    Output min - same as input1.
+    Output max - same as input2.
 
 
 Convert_from_d32:
@@ -218,7 +253,26 @@ QuantizedFlatten:
 	No output
 	Flattens into a 1D Tensor. DEPRECATED, changing to "reshape"
 
-QuantizedConv2d_8x8to32/QuantizedConv2d_16x16to32:
+QuantizedConv2d_8x8to32:
+    7 inputs:
+        0: Input data (quint8 tensor)
+        1: Filter data (quint8 tensor)
+        2: Input min (float scalar)
+        3: Input max (float scalar)
+        4: Filter min (float scalar)
+        5: Filter max (float scalar)
+        6: Stride shape (shape tensor)
+    3 outputs:
+        0: Output data (qint32 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    The operation performs a quantized 2D convolution. Quantized Convolution requires SAME or 
+        VALID padding refer to "nn_graph_type.h".
+    Input data - input tensor.
+    Filter data - convolution data.
+
+
+QuantizedConv2d_16x16to32:
 	7 inputs:
 		0: Input data (quint8/quint16)
 		1: Filter data (quint8/quint16)
@@ -234,8 +288,41 @@ QuantizedConv2d_8x8to32/QuantizedConv2d_16x16to32:
 	Also requires SAME or VALID padding
 	Quantized Convolution
 
-QuantizedTransposeConv2d_8x8p32to8/QuantizedTransposeConv2d_16x16p32to16:
-	13/14 inputs:
+
+QuantizedTransposeConv2d_8x8p32to8:
+    13..15 inputs:
+        0: Input data (quint8 tensor) 
+        1: Filter data (quint8 tensor) 
+        2: Input min (float scalar)
+        3: Input max (float scalar)
+        4: Filter min (float scalar)
+        5: Filter max (float scalar)
+        6: Explicit pad (int32 tensor) 
+        7: Stride shape (shape tensor)
+        8: Bias data (qint32 tensor) 
+        9: Bias min (float scalar)
+        10: Bias max (float scalar)
+        11: Out min (float scalar)
+        12: Out max (float scalar)
+        13: Channel Scales (float tensor) optional 
+        14: Groups (int scalar) optional  
+    3 outputs:
+        0: Output data (quint8 tensor) 
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    The operation performs quantized transposed 2D convolution. No dilation support.
+    Parameters - weights are assumed to come in as (output channels, height, width, input channels)
+        i.e: [O,H,W,I].
+    Explicit Pad - padding tensor is 1,1,2,2 [pad_top, pad_bottom, pad_left, pad_right].
+    Stride shape - use height and width to determine stride. [1,stride_h,stride_w,1]
+    Out min & max - specify -inf and inf respectively if you don't need output clipping.
+    Channel scales- must all be in the range (1/32,1.0]. The shape is [1,1,1,output channels].
+    Groups - when groups > 1, weights are assumed to come in as [O/groups,H,W,I]; if not specified, 
+        defaults to 1.
+
+
+QuantizedTransposeConv2d_8x8p8to8/QuantizedTransposeConv2d_16x16p32to16:
+	13/15 inputs:
 		0: Input data (quint8/quint16)
 		1: Filter data (quint8/quint16)
 		2: Input min (float)
@@ -244,47 +331,49 @@ QuantizedTransposeConv2d_8x8p32to8/QuantizedTransposeConv2d_16x16p32to16:
 		5: Filter max (float)
 		6: Explicit pad tensor (int32)
 		7: Stride shape (4d tensor, use height and width to determine stride)
-		8: Bias data (int32)
+		8: Bias data (quint8/int32)
 		9: Bias min (float)
 		10: Bias max (float)
 		11: Out min (float)
 		12: Out max (float)
 		13: Channel Scales (float optional) must all be in the range (0,1.0] (16 bit variant doesn't support this)
+		14: Groups (scalar int optional) if not specified, defaults to 1 (16 bit variant doesn't support this)
 	3 outputs:
 		0: Output data (quint8/quint16)
 		1: Output min
 		2: Output max
-	*Weights are assumed to come in as output channels, height, width, input channels
+	Quantized Transposed Convolution.
+	Refer to: https://www.tensorflow.org/versions/r1.14/api_docs/python/tf/nn/conv2d_transpose
+	*Weights are assumed to come in as (output channels, height, width, input channels) i.e: (O,H,W,I)
+	*When groups > 1, weights are assumed to come in as (O/groups,H,W,I)
 	*For out min and out max, specify -inf and inf respectively if you don't need output clipping
 	*Padding tensor is 1,1,2,2 [pad_top, pad_bottom, pad_left, pad_right]
 
-	Quantized Transposed Convolution
-
-    No dilation
-    No groups (by extension, no depthwise)
+    No dilation support
 
 QuantizedGroupedConv2d_8x8p32to8:
-	13/14 inputs:
-        0: Input data (quint8)
-        1: Filter data (quint8)
-        2: Bias data (qint32)
-        3: Input min
-        4: Input max
-        5: Filter min
-        6: Filter max
-        7: Bias min
-        8: Bias max
-        9: Stride shape
-        10: Number of groups
-        11: Specified output min
-        12: Specified output max
-		13: Channel Scales (float optional) must all be in the range (0,1.0]
+    13..14 inputs:
+        0: Input data (quint8 tensor) 
+        1: Filter data (quint8 tensor) 
+        2: Bias data (qint32 tensor) 
+        3: Input min (float scalar)
+        4: Input max (float scalar)
+        5: Filter min (float scalar)
+        6: Filter max (float scalar)
+        7: Bias min (float scalar)
+        8: Bias max (float scalar)
+        9: Stride shape (shape tensor)
+        10: Number of groups (int32 scalar)
+        11: Specified output min (float scalar)
+        12: Specified output max (float scalar)
+        13: Channel Scales (float tensor) optional
     3 outputs:
-        0: Output data (quint8)
-        1: Output min
-        2: Output max
-    Also requires SAME or VALID padding
-    Quantized Grouped Convolution
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    The operation performs quantized 2D convolution for groups. Quantized grouped convolution 
+        requires SAME or VALID padding refer to "nn_graph_type.h".
+    Channel scales -  must all be in the range (1/32,1.0]. The shape is [1,1,1,output channels].
 
 QuantizedDilatedConv2d_8x8p32to8:
 	13/14 inputs:
@@ -311,67 +400,84 @@ QuantizedDilatedConv2d_8x8p32to8:
     Also requires SAME or VALID padding
 	Quantized Dilated Convolution
 
+
 QuantizedMatMul_8x8to32:
-	6 inputs:
-		0: A data (quint8)
-		1: B data (quint8)
-		2: A min
-		3: A max
-		4: B min
-		5: B max
-	3 outputs:
-		0: Output data (qint32)
-		1: Output max
-		2: Output min
-	Matrix Multiply.  2D matrix in W and D dimensions.
+    6 inputs:
+        0: Input A data (quint8 tensor)
+        1: Input B data (quint8 tensor)
+        2: Input A min (float scalar)
+        3: Input A max (float scalar)
+        4: Input B min (float scalar)
+        5: Input B max (float scalar)
+    3 outputs:
+        0: Output data (qint32 tensor)
+        1: Output max (float scalar)
+        2: Output min (float scalar)
+    The operation performs quantized matrix multiplication.  
+    Input A&B data - 2D matrix in W and D dimensions.
 
 QuantizedBiasAdd_8p8to32:
-	6 inputs:
-		0: Input data (quint8)
-		1: Bias data (quint8)
-		2: Input min
-		3: Input max
-		4: Bias min
-		5: Bias max
-	3 outputs:
-		0: Output data (qint32)
-		1: Output max
-		2: Output min
-	Add bias values.
+    6 inputs:
+        0: Input data (quint8 tensor)
+        1: Bias data (quint8 tensor)
+        2: Input min (float scalar)
+        3: Input max (float scalar)
+        4: Bias min (float scalar)
+        5: Bias max (float scalar)
+    3 outputs:
+        0: Output data (qint32 tensor)
+        1: Output max (float scalar)
+        2: Output min (float scalar)
+    The operation adds quantized bias values to quantized input data.
+
+QuantizedBiasAdd_32p32to32:
+    6 inputs:
+        0: Input data (qint32 tensor)
+        1: Bias data (qint32 tensor)
+        2: Input min (float scalar)
+        3: Input max (float scalar)
+        4: Bias min (float scalar)
+        5: Bias max (float scalar)
+    3 outputs:
+        0: Output data (qint32 tensor)
+        1: Output max (float scalar)
+        2: Output min (float scalar)
+    The operation adds quantized int32 bias values to quantized int32 input tensor.
 
 QuantizedRelu_8:
-	3 inputs:
-		0: Input data (quint8)
-		1: Input min
-		2: Input max
-	3 outputs:
-		0: Output data
-		1: Output min
-		2: Output max
-	For each element x: result is max(x,0)
+    3 inputs:
+        0: Input data (quint8 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+    3 outputs:
+        0: Output data (qunit8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    The operation performs: for each element x, result is max(x,0).
 
 QuantizedReluX_8:
-	4 inputs:
-		0: Input data (quint8)
-		1: Input min
-		2: Input max
-		3: X (floating point value)
-	3 outputs:
-		0: Output data
-		1: Output min
-		2: Output max
-	For each element x: result is min(max(x,0),X)
+    4 inputs:
+        0: Input data (quint8 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+        3: Threshold value (float scalar)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    The operation performs: for each element x, result is min(max(x,0),X).
+    Threshold value - the value of X in ReluX.
 
 QuantizeDownAndShrinkRange_32to8:
-	3 inputs:
-		0: Input data (qint32)
-		1: Input min
-		2: Input max
-	3 outputs:
-		0: Output data (quint8)
-		1: Output min
-		2: Output max
-	Calculate the min & maximum value and requantize the data into 8 bit
+    3 inputs:
+        0: Input data (qint32 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    The operation performs: Calculate the min & maximum value and requantize the data into 8 bit.
 
 QuantizeDownAndShrinkRange_32to16:
 	3 inputs:
@@ -400,33 +506,32 @@ RequantizationRange_32:
 	Note that output min will always be <=0, max will be >= 0.
 
 Requantize_32to8:
-	5 inputs:
-		0: Input data (qint32)
-		1: Input min
-		2: Input max
-		3: specified output min
-		4  specified output max
-	3 outputs:
-		0: Output data (quint8)
-		1: Output min
-		2: Output max
-	Requantize the int32 data to qu8, based on the supplied range. The range may be expanded
-	a little to get an exact zero. Data values are clipped to the output range.
+    5 inputs:
+        0: Input data (qint32 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+        3: Specified output min (float scalar)
+        4  Specified output max (float scalar)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    The operation requantizes the int32 data to quint8, based on the supplied range. The range may 
+        be expanded a little to get an exact zero. Data values are clipped to the output range.
 
 Requantize_8to8:
-	5 inputs:
-		0: Input data (quint8)
-		1: Input min (float)
-		2: Input max (float)
-		3: specified output min (float)
-		4  specified output max (float)
-	3 outputs:
-		0: Output data (quint8)
-		1: Output min (float)
-		2: Output max (float)
-	Requantize qu8 data to a new quantization range.
-    The range may be expanded a little to get an exact zero.
-    Data values are clipped to the output range.
+    5 inputs:
+        0: Input data (quint8 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+        3: Specified output min (float scalar)
+        4  Specified output max (float scalar)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    The operation requantizes quint8 data to a new quantization range. The range may be expanded a
+        little to get an exact zero. Data values are clipped to the output range.
 
 Requantize_32to16:
 	5 inputs:
@@ -444,7 +549,35 @@ Requantize_32to16:
 	(note that you cannot use this to deliberalely clip to a range unless that range is symmetric).
 
 QuantizedMaxPool_8:
+    5 inputs:
+        0: Input data (quint8 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+        3: Window shape (shape tensor)
+        4: Stride shape (shape tensor)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    The operation performs max pooling on quint8 input data.
+    Windows shape - the shape of pooling windows.
+    Stride shape - use height and width to determine stride.
+
 QuantizedAvgPool_8:
+    5 inputs:
+        0: Input data (quint8 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+        3: Window shape (shape tensor)
+        4: Stride shape (shape tensor)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    The operation performs average pooling on quint8 input data.
+    Windows shape - the shape of pooling windows.
+    Stride shape - use height and width to determine stride.
+
 QuantizedL2Pool_8:
 	5 inputs:
 		0: input data (quint8)
@@ -546,6 +679,27 @@ DepthwiseSupernode_8x8p32to8_d32:
 	Depthwise convolution (each 'd' index in output depends on spatial filter of only one 'd' index in input).
 
 QuantizedBatchNorm_8x8p8to8:
+    11 inputs:
+        0: Input data (quint8 tensor) [b,h_in,w_in,d_in]
+        1: Weights (quint8 tensor) [1,1,1,d_in] or [1,1,1,1]
+        2: Input min (float scalar)
+        3: Input max (float scalar)
+        4: Weights min (float scalar)
+        5: Weights max (float scalar)
+        6: Bias data (quint8 tensor) [1,1,1,d_in] or [1,1,1,1]
+        7: Bias min (float scalar)
+        8: Bias max (float scalar)
+        9: Output min (float scalar)
+        10: Output max (float scalar)
+    3 outputs:
+        0: Output data (quint8 tensor) [b,h_in,w_in,d_in]
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    The operation performs out[b,h,w,d] = in[b,h,w,d] * scale[d] + bias[d].
+    Output min - auto: -inf.
+    Output max - auto: inf.
+
+
 QuantizedBatchNorm_8x8p8to8_d32:
 QuantizedBatchNorm_8x8p32to8:
 QuantizedBatchNorm_8x8p32to8_d32:
@@ -567,7 +721,23 @@ QuantizedBatchNorm_8x8p32to8_d32:
 		2: output max
 	Does out[b,h,w,d] = in[b,h,w,d]*scale[d] + bias[d]
 
+
 QuantizedResizeBilinear_8:
+    4..5 inputs:
+        0: Input data (quint8 tensor) [b,h_in,w_in,d]
+        1: Dimension (int32 tensor) [1,1,1,2]
+        2: Input min (float scalar)
+        3: Input max (float scalar)
+        4: Align_corners (float scalar) optional
+    3 outputs:
+        0: Output data (quint8 tensor) [b,h_out,w_out,d]
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    The operation resize (resample) in h & w dimensions.
+    Dimension - shape is [1,1,1,2]; {h_out,w_out} in last dimension.
+    Align_corners - default is 0.
+
+
 QuantizedResizeBilinear_8_d32:
 	4 inputs:
 		0: input data (quint8);  shape [b,h_in,w_in,dep] 	 	- d32 format if QuantizedResizeBilinear_8_d32
@@ -605,19 +775,21 @@ ConcatV2_f:
 ConcatV2_int32:
 	(same as Concat_V2_f, but operates on int32)
 
+
 QuantizedConcat_8:
-	3N+1 inputs:
-		0: Dimension tensor.  Currently only depthwise concatenation (3) is supported.
-		1-N: Input data tensors (quint8)
-		N+1-2N: minima
-		2N+1-3N: maxima
-	3 outputs:
-		0: Output data (quint8)
-		1: Output min
-		2: Output max
-	Concatenate tensors.  Currently we only support along the depth dimension.
-	This requantizes values.  In the future we will remove the requantization work if
-	all the minima/maxima are the same (or require that will be true?).
+    3n+1 inputs:
+        0: Dimension (int32 scalar)
+        1-n: Input data tensors (quint8 tensor)
+        n+1-2n: Input min (float scalar)
+        2n+1-3n: Input max (float scalar)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    The operation concatenate tensors. Currently we only support along the depth dimension. The 
+        operation also requantizes values. 
+    Dimension - Currently only depthwise concatenation (3) is supported.
+
 
 QuantizedConcat_8_d32:
 	3N+1 inputs:
@@ -644,32 +816,37 @@ Split_int32:
      	0..N-1 : Output data tensor.
     The input tensor shape must be evenly divisible by N along the specified dimension; it is split into N equal parts.
 
-QuantizedSplit_8:
-     4 inputs:
-		0: Dimension tensor.   Single integer specifying split dimension. 0=batches,1=height,2=width,3=depth
-		1: Input data tensor (flat qu8)
-		2: scalar float 'min'
-		3: scalar float 'max'
-     N+2 outputs:
-     	0..N-1 : Output data tensor.
-     	N: scalar float 'min' (copied from input)
-     	N+1: scalar float 'max' (copied from input)
-    The input tensor shape must be evenly divisible by N along the specified dimension; it is split into N equal parts.
 
+QuantizedSplit_8:
+    4 inputs:
+        0: Dimension (int32 scalar) 
+        1: Input data (quint8 tensor)
+        2: Input min (float scalar)
+        3: Input max (float scalar)
+    n+2 outputs:
+        0..n-1 : Output data (quint8 tensor)
+        n: Output min (float scalar)
+        n+1: Output max (float scalar)
+    The input tensor shape must be evenly divisible by N along the specified dimension; it is 
+        split into N equal parts.
+    Dimension - Single integer specifying split dimension. 0=batches,1=height,2=width,3=depth.
+    Output min - copied from input.
+    Output max - copied from input.
 
 QuantizedMul_8x8to32:
-	6 inputs:
-		0: Input A data (qint8)
-		1: Input B data (qint8)
-		2: Input A min
-		3: Input A max
-		4: Input B min
-		5: Input B max
-	3 outputs:
-		0: Output data (qint32)
-		1: Output min
-		2: Output max
-     Elementwise Multiply
+    6 inputs:
+        0: Input A data (quint8 tensor)
+        1: Input B data (quint8 tensor)
+        2: Input A min (float scalar)
+        3: Input A max (float scalar)
+        4: Input B min (float scalar)
+        5: Input B max (float scalar)
+    3 outputs:
+        0: Output data (quint32 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    The operation elementwisely multiplies Input A and Input B together.
+
 
 QuantizedMul_8x8to8
 	6 inputs:
@@ -703,21 +880,20 @@ QuantizedMul_8x8to8_d32
      only supported when B input has batches=1, height=1.
 
 QuantizedAdd_8p8to8:
-	8 inputs:
-		0: Input A data (qint8)
-		1: Input B data (qint8)
-		2: Input A min
-		3: Input A max
-		4: Input B min
-		5: Input B max
-		6: Output min
-		7: Output max
-	3 outputs:
-		0: Output data (quint8)
-		1: Output min
-		2: Output max
-     Elementwise Add
-
+    6..8 inputs:
+        0: Input A data (quint8 tensor)
+        1: Input B data (quint8 tensor)
+        2: Input A min (float scalar)
+        3: Input A max (float scalar)
+        4: Input B min (float scalar)
+        5: Input B max (float scalar)
+        6: Output min (float scalar) optional
+        7: Output max (float scalar) optional
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    The operation elementwisely adds Input A and Input B together.
 
 QuantizedAdd_8p8to8_d32:
 	8 inputs:
@@ -849,13 +1025,14 @@ Convert_u16_8:
 
 
 AutoQuantize:
-	Finds the range of the input float values, and quantizes them to quint8
-	Inputs:
-		0: input tensor with float data
-	Outputs:
-		0: Output tensor quint8, same shape
-		1: Output min
-		1: Output max
+    1 input:
+        0: input data (float tensor)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    The operation finds the range of the input float values, and quantizes them to quint8.
+    Output data - has the same shape as input data.
 
 AutoQuantize_d32:
 	Finds the range of the input float values, and quantizes them to quint8, with
@@ -875,27 +1052,25 @@ AutoQuantize_d32:
 	The width-right padding is determined by rounding the minimum up to make the total a muliple of 4. If
 	this results in right-padding exceeding 7, it is reduced by 4.
 
-
 Quantize:
-	3 inputs:
-		0: Input data (float)
-		1: Input min
-		2: Input max
-	3 outputs:
-		0: Output data (quint8)
-		1: Output min
-		2: Output max
-	Quantize floating point data to quantized type
+    3 inputs:
+        0: Input data (float tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    The operation quantizes floating point data to quantized type.
 
 Dequantize:
-	3 inputs:
-		0: Input data (quint8)
-		1: Input min
-		2: Input max
-	1 output:
-		0: Output data (float)
-	Dequantize back to floating point
-
+    3 inputs:
+        0: Input data (quint8 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+    1 output:
+        0: Output data (float tensor)
+    The operation dequantizes uqint8 data back to floating point.
 
 Quantize_16:
 	3 inputs:
@@ -907,6 +1082,36 @@ Quantize_16:
 		1: Output min
 		2: Output max
 	Quantize floating point data to quantized type. The output min = -output max.
+
+Quantize_int32:
+	3 inputs:
+		0: input tensor (float)
+		1: input min (float)
+		2: input max (float)
+	3 outputs:
+		0: output tensor (qint32)
+		1: output min (float)
+		2: output max (float)
+	Quantize floating point tensor to int32.
+
+QuantizedDiv_8:
+    6..8 inputs: 
+        0: Input A data (quint8 tensor)
+        1: Input B data (quint8 tensor)
+        2: Input A min (float scalar)
+        3: Input A max (float scalar)
+        4: Input B min (float scalar)
+        5: Input B max (float scalar)
+        6: Static min (float scalar) optional
+        7: Static max (float scalar) optional
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    The operation performs a quantized division: a/b, where b is expected as (1,1,1,d), b tensor
+        and a tensor must of the same depth. 
+    Static min/max - are optional for setting the min/max of the quantized output tensor.
+
 
 QuantizeForTest_d32:
     This is the same as AutoQuantize_d32 (without the hvx accel) but it also
@@ -977,7 +1182,6 @@ Add_f:
 Sub_f:
 Mul_f:
 Minimum_f:
-Maximum_f:
 	2 inputs:
 		0: input data A (float)
 		1: input data B (float)
@@ -987,6 +1191,16 @@ Maximum_f:
     Apply function (a+b), (a-b), (a*b), min(a,b), max(a,b) elementwise. A,B shapes
     must match on each dimension, except where one of them is 1; it will be broadcast
     to the other.
+
+
+Maximum_f:
+    2 inputs:
+        0: Input data A (float tensor)
+        1: Input data B (float tensor)
+    1 output:
+        0: Output data (float tensor)
+    The operation applies function max(a,b) elementwisely. The shape of A/B must match on each 
+        dimension, except where one of them is 1 and it will be broadcast to the other.
 
 QuantizedMinimum:
 QuantizedMaximum:
@@ -1008,12 +1222,9 @@ QuantizedMaximum:
 	A,B shapes must match on each dimension, except where one of them is 1;
 	it will be broadcast to the other.
 
-
 Sum_f:
 Prod_f:
 Prod_int32:
-Min_f:
-Max_f:
     1..3 inputs:
         0:  input tensor [b,h,w,d] to be reduced
         1:  int32 [1,1,1,n]: optional list of dims to be reduced along
@@ -1031,14 +1242,62 @@ Max_f:
     - In addition, if padding == NN_PAD_VALID, then the reduced dimensions are 'squeezed' to the end, e.g.
        a [2,5,7,32] tensor reduced on H & W becomes [1,1,2,32] rather than [2,1,1,32].
 
+Min_f:
+    1..3 inputs:
+        0: Input data (float tensor) 
+        1: Input list (int32 tensor) [1,1,1,n] optional 
+        2: Rank (int32 scalar) optional - default is 4 
+    1 output:
+        0: Output result (float tensor)
+    The operation performs reduction by 'min' along specified dims of the input tensor.
+    Input list - optional list of dims to be reduced along. If there is no list of reduction dims 
+    or the reduction dims is < 0, the entire input is reduced to a scalar [1,1,1,1]. In addition: 
+    if padding == NN_PAD_VALID, then the reduced dimensions are 'squeezed' to the end. 
+    e.g. [2,5,7,32] tensor reduced on H & W becomes [1,1,2,32] rather than [2,1,1,32].
+    Input list - optional list of dims to be reduced along
+    Rank - 'true'rank input determines how indices in the dim list are intepreted:
+        true_rank = 4 => values 0,1,2,3 indicate dimensions B,H,W,D
+        true_rank = 3 => values 0,1,2 indicate dimensions H,W,D
+        true_rank = 2 => values 0,1 indicate dimensions W,D
+        true_rank = 1 => 0 indicates dimension D.
+
+Max_f:
+    1..3 inputs:
+        0: Input data (float tensor) 
+        1: Input list (int32 tensor) [1,1,1,n] optional 
+        2: Rank (int32 scalar) optional - default is 4 
+    1 output:
+        0: Output result (float tensor)
+    The operation performs reduction by 'max' along specified dims of the input tensor.
+    Input list - optional list of dims to be reduced along. If there is no list of reduction dims 
+    or the reduction dims is < 0, the entire input is reduced to a scalar [1,1,1,1]. In addition: 
+    if padding == NN_PAD_VALID, then the reduced dimensions are 'squeezed' to the end. 
+    e.g. [2,5,7,32] tensor reduced on H & W becomes [1,1,2,32] rather than [2,1,1,32].
+    Input list - optional list of dims to be reduced along
+    Rank - 'true'rank input determines how indices in the dim list are intepreted:
+        true_rank = 4 => values 0,1,2,3 indicate dimensions B,H,W,D
+        true_rank = 3 => values 0,1,2 indicate dimensions H,W,D
+        true_rank = 2 => values 0,1 indicate dimensions W,D
+        true_rank = 1 => 0 indicates dimension D.
 
 Softmax_f:
-	1 input:
-		0: input data (float)
+    1 input:
+        0: Input data (float tensor)
+    1 output:
+        1: Output data (float tensor)
+	Softmax operator: renormalize data exponentially.
+    Currently only supports 1D data.
+
+Softmax_uint8:
+	3 or 4 inputs:
+		0: input data (quint8)
+		1: min (float)
+		2: max (float)
+		3: beta (float optional)
 	1 output:
 		1: output data (float)
-	Softmax operator, renormalize data exponentially.
-	Currently only supports 1D data.  Should be easy to allow any depthwise.
+	Softmax operator for uint8
+
 
 LRN_f:
 	5 inputs:
@@ -1060,71 +1319,129 @@ LRN_f:
 	Beta values of 1 and 0.5 are common, but any value is allowed.
 
 Tanh_f:
-	1 input:
-		0: input data (float)
-	1 output:
-		0: output data (float)
-	The tanh(x) function.
-
+    1 input:
+        0: Input data (float tensor)
+    1 output:
+        0: Output data (float tensor)
+    The tanh(x) function.
 
 QuantizedTanh_8:
+    3 inputs:
+        0: Input data (quint8 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Quantized Tanh function
+    Output min - always -1
+    Output max - always +0.992188
+
 QuantizedTanh_8_d32:
 	3 input:
 		0: input qu8  (d32 format for the _d32 variant)
 		1: input min
 		2: input max
 	3 output:
-		0: output qu8  (d3 format for the _d32 variant)
+		0: output qu8 (d3 format for the _d32 variant)
 		1: output min (always -1)
 		2: output max (always +0.992188)
 	Quantized Tanh function
 
 Sigmoid_f:
-	1 input:
-		0: input data (float)
-	1 output:
-		0: output data (float)
-	The Logistic function (1.0 + tanh(x/2))/2
+    1 input:
+        0: Input data (float tensor)
+    1 output:
+        0: Output data (float tensor)
+    The Logistic function (1.0 + tanh(x/2))/2
 
 QuantizedSigmoid_8:
-QuantizedSigmoid_8_d32:
-	3 input:
-		0: input qu8  (d32 format for the _d32 variant)
-		1: input min
-		2: input max
-	3 output:
-		0: output qu8  (d3 format for the _d32 variant)
-		1: output min (always 0.0)
-		2: output max (always 1.0)
-	Quantized Logistic function  (1.0 + tanh(x/2))/2
+    3 inputs:
+        0: Input data (quint8 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Quantized Logistic function: (1.0 + tanh(x/2))/2
+    Output min - always 0.
+    Output max - always 1.0
 
+QuantizedSigmoid_8_d32:
+    3 inputs:
+        0: Input quint8 (d32 format for the _d32 variant)
+        1: Input min
+        2: Input max
+    3 outputs:
+        0: Output quint8 (d3 format for the _d32 variant)
+        1: Output min (always 0.0)
+        2: Output max (always 1.0)
+    Quantized Logistic function: (1.0 + tanh(x/2))/2
 
 Neg_f:
-Relu_f:
 	1 input:
-		0: input data (float)
+		0: input tensor (float)
 	1 output:
-		0: output data (float)
-	The functions -x, and max(0,x)
+		0: output tensor (float)
+	Takes a tensor of float and returns its negation in float.
+
+Neg_int32:
+	1 input:
+		0: input tensor (int32)
+	1 output:
+		0: output tensor (int32)
+	Takes a tensor of int32 and returns its negation in int32.
+
+Abs_f:
+	1 input:
+		0: input tensor (float)
+	1 output:
+		0: output tensor (float)
+	Takes a tensor of float and returns its absolute value in float.
+
+Abs_int32:
+	1 input:
+		0: input tensor (int32)
+	1 output:
+		0: output tensor (int32)
+	Takes a tensor of int32 and returns its absolute value in int32.
+
+QuantizedNeg_8:
+	3 inputs:
+		0: input tensor (quint8)
+		1: input min (float)
+		2: input max (float)
+	3 outputs:
+		0: output tensor (quint8)
+		1: output min (float)
+		2: output max (float)
+	Takes a tensor of quantized uint8 and returns its negation in quantized uint8.
+
+Relu_f:
+    1 input:
+        0: Input data (float tensor)
+    1 output:
+        0: Output data (float tensor)
+    Performs following function: -x, and max(0,x)
 
 ReluX_f:
-	2 input:
-		0: input data (float)
-		1 : input limit (scalar float)
-	1 output:
-		0: output data (float)
-	The functions  min(max(0,x), limit)
+    2 inputs:
+        0: Input data (float tensor)
+        1: Input limit (float scalar)
+    1 output:
+        0: Output data (float tensor)
+    Performs following function: min(max(0,x), limit)
 
 Clamp_f:
-	2 input:
-		0: input data (float)
-		1 : input min_clamp (scalar float)
-		1 : input max_clamp (scalar float)
-	1 output:
-		0: output data (float)
-	The functions  min(max(0,min_clamp), max_clamp)
-
-
+    3 inputs:
+        0: Input data (float tensor)
+        1: Input min_clamp (float scalar)
+        2: Input max_clamp (float scalar)
+    1 output:
+        0: Output data (float tensor)
+    Performs following function: min(max(input,min_clamp), max_clamp)
 
 AddN_f:
 	N inputs (>=1):
@@ -1163,29 +1480,29 @@ HeatmapMaxKP_f:
         NOTE: the rectangle input shape may also be [batches,1,1,4], in which case the result shapes are
         [batches,1,1,hmaps] and [batches, 1, hmaps,2 ]
 
-
 QuantizedHeatmapMaxKP_8:
     5 inputs:
-        0 : tensor of heatmaps (qu8) [batches, hm_ht, hm_wid, hmaps ]   or [ batches, hmaps, hm_ht, hm_wid ]
-        1 : scalar float: min for heatmaps
-        2 : scalar float: max for heatmaps
-        3 : tensor of rectangles (uint16)  [ 1, 1, batches,4 ]    each is {xlo, ylo, xhi, yhi }
-        4 : scalar int : is_NCHW, which selects the shape of input #0
-
+        0: Input data (quint8 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+        3: Rectangles (uint16 tensor) 
+        4: Selector (int32 scalar) is_NCHW, which selects the shape of input #0
     4 outputs:
-        0 : tensor of peak results (qu8)    [ 1, 1, batches, hmaps ]
-        1 : scalar float: min for peak
-        2 : scalar float: max for peak
-        3 : tensor of x,y results  (uint16) [ 1, batches, hmaps, 2 ]  each is {x,y}
-
-        input #0 shape is [batches, hm_ht, hm_wid, hmaps ] if is_NCHW=0, and [ batches, hmaps, hm_ht, hm_wid ] if is_NCHW!=0
-        Within each heatmap, find the peaks value; estimate a subpixel position for the true peak, correct it for
-        hm_ht,hm_wid must each be >=2
-        NOTE: the rectangle input shape may also be [batches,1,1,4], in which case the result shapes are
-        [batches,1,1,hmaps] and [batches, 1, hmaps,2 ]
-
-        The quantization for input #3 and output #3 are nominally: zero = 0, step = 0.125; but the two are on the same scale,
-        so in effect the output is quantized in the same way as in the input.
+        0: Output data peak (quint8 tensor) 
+        1: Output min of peak (float scalar)
+        2: Output max of peak (float scalar)
+        3: Output results x,y (uint16 tensor)
+    Within each tensor of heatmap, find the peaks value. Estimate a subpixel position for the true 
+    peak, correct it for hm_ht,hm_wid must each be >=2
+    The quantization for input Rectangles and output results x,y are nominally: zero = 0, 
+    step = 0.125; but the two are on the same scale, so in effect the output is quantized in the 
+    same way as in the input.
+	Input data - tensor of heatmaps. Shape is [batches,hm_ht,hm_wid,hmaps] if is_NCHW=0, 
+        and [batches,hmaps,hm_ht,hm_wid] if is_NCHW!=0
+    Rectangles - tensor of rectangles. e.g. [1,1,batches,4] and each is {xlo,ylo,xhi,yhi}
+        This input shape may also be [batches,1,1,4] and the result shapes are [batches,1,1,hmaps] 
+        and [batches,1,hmaps,2]
+    Output results x,y - tensor [1, batches, hmaps, 2 ] each is {x,y}
 
 Pack_f:
 Pack_int32:
@@ -1213,37 +1530,39 @@ Pad_f:
     Pad the input tensor on the edges, in any or all dimensions as specified, with zero values.
 
 QuantizedPad_8:
-    4 or 5 inputs:
-        0 : input tensor, qu8
-        1 : scalar float (input min)
-        2 : scalar float (input max)
-        3 : 'padding' tensor, int32 [1,1,n,2] where n = 1..4  (see input #1 of Pad_f)
-        4 : (optional) scalar float, value to pad (default 0.0).
-    3 output:
-        0: output tensor, qu8
-        1 : scalar float (output min)
-        2 : scalar float (output max)
-
-    Pad the input tensor on the edges, in any or all dimensions as specified, with specified value. The min & max
-    are copied from the input. The qu8 value used for padding is calculated from the supplied value (input 4,
-    or 0.0 if only 4 inputs) and the input min/max values. Note: if the 'pad' value is too far outside the min/max
-    range, an error will be raised. If it quantizes to -2 .. 257, it will be clipped to 0..255. Also, padval =  -inf
-    or +inf is allowed and will become 0 or 255.
+    4...6 inputs:
+        0: Input data (quint8 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+        3: Padding (int32 tensor)
+        4: Pad value (float scalar) optional default 0.0
+        5: Supplied value (int32 tensor) optional
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Pad the input tensor on the edges, in any or all dimensions as specified with specified value. 
+    The min & max are copied from the input. The Pad value used for padding is calculated from the 
+    supplied value or 0.0 if only 5 inputs arguments.
+    Padding - a int32 tensor [1,1,n,2] where n is in range 1..4.
+    Pad value - Padval=-inf or +inf is allowed and will become 0 or 255. If it is too far outside 
+        the min/max range, an error will be raised. If quantizes to -2..257 it will be clipped 
+        to 0..255 
 
 QuantizedPad_V2_8:
     5 inputs:
-        0 : input tensor, qu8
-        1 : scalar float (input min)
-        2 : scalar float (input max)
-        3 : 'padding' tensor, int32 [1,1,n,2] where n = 1..4  (see input #1 of Pad_f)
-        4 : scalar uint8, value to pad.
-    3 output:
-        0: output tensor, qu8
-        1 : scalar float (output min)
-        2 : scalar float (output max)
-
-    Pad the input tensor on the edges, in any or all dimensions as specified, with specified value. The min & max
-    are copied from the input. The scalar u8 value is used for padding (other pad ops used float). The scalar pad argument is not optional (its optional in other pad ops).
+        0: Input data (quint8 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+        3: Padding (int32 tensor)
+        4: Pad value (quint8 scalar)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Pad the input tensor on the edges, in any or all dimensions as specified with specified value. 
+    The min & max are copied from the input. The input quint8 Pad value used for padding is
+    calculated and this argument is not optional(its optional in other pad ops).
 
 QuantizedPad_u16:
 QuantizedPad_16:
@@ -1264,7 +1583,6 @@ QuantizedPad_16:
     range, an error will be raised. If it quantizes to a code which is <= 1536 codes out of range, it will be clipped
     to range. Also, padval =  -inf or +inf is allowed and will become the min or max code.
 
-
 MirrorPad_f:
     2 inputs:
         0 : input tensor, float
@@ -1278,84 +1596,100 @@ MirrorPad_f:
     Pad the input tensor on the edges, in any or all dimensions as specified, using 'mirror' padding.
     The 'padding' must be either NN_PAD_MIRROR_REFLECT or NN_PAD_MIRROR_SYMMETRIC.
 
+
 MirrorPad_8:
     4 inputs:
-        0 : input tensor, qu8
-        1 : 'padding' tensor, int32 [1,1,n,2] where n = 1..4
-               indicates before/after padding for each of 4 dimensions.
-               if [1,1,4,2] :  { { b_before, b_after}, {h_before, h_after}, {w_before,w_after}, {d_before, d_after}}
-               if n < 4, only the first 'n' of b,h,w,d are set, and the rest assumed to be zero.
-		2 : input min
-		3 : input max
+        0: Input data (quint8 tensor)
+        1: Padding (int32 tensor)
+        2: Input min (float scalar)
+        3: Input max (float scalar)
     3 outputs:
-        0: output tensor
-	1: output min
-	2: output max
-
-    Pad the input tensor on the edges, in any or all dimensions as specified, using 'mirror' padding.
-    The 'padding' must be either NN_PAD_MIRROR_REFLECT or NN_PAD_MIRROR_SYMMETRIC.
-
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+	Pad the input tensor on the edges, in any or all dimensions as specified using 'mirror' padding
+	If [1,1,4,2]:{{b_before,b_after},{h_before,h_after},{w_before,w_after},{d_before,d_after}} 
+    If n < 4, only the first 'n' of b,h,w,d are set, and the rest assumed to be zero.
+    Padding - a int32 tensor [1,1,n,2] where n is in range 1..4 indicates before/after padding for
+        each of 4 dimensions. Padding must be either NN_PAD_MIRROR_REFLECT or NN_PAD_MIRROR_SYMMETRIC
 
 Gather_f:
 Gather_int32:
-	2..4 inputs:
-		0 : index tensor (always int32)
-		1 : table tensor (float, or int32 according)
-		2 : (optional) index_dim,  dim of table which is the 'table index' (0..3, or -1 to ignore)
-		3 : (optional) index_rank,  actual rank of  index tensor (0..4, or -1 to ignore)
-     1 output:
-     	0 : output tensor (same type as table input tensor)
-    Generalized table lookup; 'index_tensor' contains indices, and 'table_tensor' is a lookup table.
-  - Rank of index tensor is inferred by stripping leading 1's (can be increased by 'index_rank')
-  - Rank of table tensor is inferred by stripping leading 1's; the 'index dimension' is by default the
-    first dim >1, but 'index_dim' can specify a different one. The table's index_dim is usually size >1
-    but it is not required to be. When the number of leading 1's in the table shape is > index_dim, then
-    the table rank is assumed to be (4-index_dim).
-  - Output shape is formed by removing the 'index dim' from the table shape, replacing it with the shape of the
-    index tensor (with leading 1's stripped, and according to index_rank). The lookups are done accordingly.
-  - Output rank is thus index_rank + table_rank-1, and this must be <=4. 1's will added on the left if <4.
-  - The values in the 'index tensor' are normally 0..TABN-1, where TABN is the size of the table tensor
-    on the index dimension. If values are outside this range, results depend on padding:
-    		NN_PAD_NA - whatever is fastest (while still 'safe'); use this if all values are in range.
-    		NN_PAD_SAME - will raise an error if any out of range
-    		NN_PAD_VALID :  out-of-range indices will be clipped to range
-    		Others are reserved.
-   - By providing an index_dim input, you can force use of a table dimension which is size 1;
-     in this case the index input must be all 0 (or will be ignored, if range-clipping is used).
-   - Note that index_rank has no effect unless index_dim is used to select an index dimension *after* the
-     first one which is >1, so that some table dimensions appear before the index dimensions in the output shape.
-     Examples:
-              index     table     ->  result.
-     		(1,1,1,6)  (1,32,5,9)  ->  (1,6,5,9)		# 6 lookup in table of 32 of [5,9]
-     		(1,1,4,7)  (1,32,5,9)  ->  (4,7,5,9)        # 4x7 lookup in table of 32 of [5,9]
-     		(2,5,5,12) (1,1,1,256) -> (2,5,5,12)       # 2x5x5x12 lookups in one linear table [256]
-     		(1,1,4,20) (1,5,64,12), index_dim = 2
-     								-> (5,4,20,12)		# 4x20 lookup in table of 64 of [5,*,12]
-     		(1,1,1,8) (1,5,64,12), index_dim = 2
-     								-> (1,5,8,12)		# 8 lookup in table of 64 of [5,*,12]
-     		(1,1,1,1) (1,5,64,12), index_dim = 2		# (index is taken to be rank 0 here)
-     								-> (1,1,5,12)		# 1 lookup in table of 64 of [5,*,12]
-     		(1,1,1,8) (1,5,64,12), index_dim = 2, index_rank =2    # force index to be seen as (1,8)
-     								-> (5,1,8,12)		# 1x8 lookup in table of 64 of [5,*,12]
-     		(1,1,1,9) (1,1,5,12), index_dim=0,          # 5 lookup on table of 1 of (1,5,12)
-     								-> (9,1,5,12)
-      The last example uses index_dim to increase the rank of the table to 4 (the output will be
-      9 copies of the table, since the lookup dimension is of size 1)
+    2..4 inputs:
+        0: : index tensor (always int32)
+        1: : table tensor (float, or int32 according)
+        2: : (optional) index_dim, dim of table which is the 'table index' (0..3, or -1 to ignore)
+        3: : (optional) index_rank, actual rank of index tensor (0..4, or -1 to ignore)
+    1 output:
+        0: : output tensor (same type as table input tensor)
+	Generalized table lookup; 'index_tensor' contains indices, and 'table_tensor' is a lookup table.
+	- Rank of index tensor is inferred by stripping leading 1's (can be increased by 'index_rank')
+	- Rank of table tensor is inferred by stripping leading 1's; the 'index dimension' is by default the
+	first dim >1, but 'index_dim' can specify a different one. The table's index_dim is usually size >1
+	but it is not required to be. When the number of leading 1's in the table shape is > index_dim, then
+	the table rank is assumed to be (4-index_dim).
+	- Output shape is formed by removing the 'index dim' from the table shape, replacing it with the shape of the
+	index tensor (with leading 1's stripped, and according to index_rank). The lookups are done accordingly.
+	- Output rank is thus index_rank + table_rank-1, and this must be <=4. 1's will added on the left if <4.
+	- The values in the 'index tensor' are normally 0..TABN-1, where TABN is the size of the table tensor
+	on the index dimension. If values are outside this range, results depend on padding:
+	NN_PAD_NA - whatever is fastest (while still 'safe'); use this if all values are in range.
+	NN_PAD_SAME - will raise an error if any out of range
+	NN_PAD_VALID : out-of-range indices will be clipped to range
+	Others are reserved.
+	- By providing an index_dim input, you can force use of a table dimension which is size 1;
+	in this case the index input must be all 0 (or will be ignored, if range-clipping is used).
+	- Note that index_rank has no effect unless index_dim is used to select an index dimension *after* the
+	first one which is >1, so that some table dimensions appear before the index dimensions in the output shape.
+Examples:
+	index table -> result.
+	(1,1,1,6) (1,32,5,9) -> (1,6,5,9) # 6 lookup in table of 32 of [5,9]
+	(1,1,4,7) (1,32,5,9) -> (4,7,5,9) # 4x7 lookup in table of 32 of [5,9]
+	(2,5,5,12) (1,1,1,256) -> (2,5,5,12) # 2x5x5x12 lookups in one linear table [256]
+	(1,1,4,20) (1,5,64,12), index_dim = 2
+	-> (5,4,20,12) # 4x20 lookup in table of 64 of [5,*,12]
+	(1,1,1,8) (1,5,64,12), index_dim = 2
+	-> (1,5,8,12) # 8 lookup in table of 64 of [5,*,12]
+	(1,1,1,1) (1,5,64,12), index_dim = 2 # (index is taken to be rank 0 here)
+	-> (1,1,5,12) # 1 lookup in table of 64 of [5,*,12]
+	(1,1,1,8) (1,5,64,12), index_dim = 2, index_rank =2 # force index to be seen as (1,8)
+	-> (5,1,8,12) # 1x8 lookup in table of 64 of [5,*,12]
+	(1,1,1,9) (1,1,5,12), index_dim=0, # 5 lookup on table of 1 of (1,5,12)
+	-> (9,1,5,12)
+	The last example uses index_dim to increase the rank of the table to 4 (the output will be
+        9: Copies of the table, since the lookup dimension is of size 1)
 
 Gather_8:
-	4..6 inputs:
-		0 : index tensor (int32)
-		1 : table tensor (quint8)
-		2 : table min
-		3 : table max
-		4 : (optional) index_dim,  dim of table which is the 'table index' (0..3, or -1 to ignore)
-		5 : (optional) index_rank,  actual rank of  index tensor (0..4, or -1 to ignore)
-     3 outputs:
-     	0 : output tensor (quint8)
-     	1 : output min
-     	2 : output max
-     See description of Gather_f. The output min/max are copied from the table min/max
-
+    4..6 inputs:
+        0: Input index (int32 tensor)
+        1: Input table (quint8 tensor)
+        2: Table min (float scalar)
+        3: Table max (float scalar)
+        4: Index_dim (int scalar) optional
+        5: Index_rank (int scalar) optional
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Generalized table lookup; 'index_tensor' contains indices, and 'table_tensor' is a lookup table
+    - Rank of index tensor is inferred by stripping leading 1's(can be increased by'index_rank')
+    - Rank of table tensor is inferred by stripping leading 1's;the 'index dimension' is by default
+    	the first dim >1, but 'index_dim' can specify a different one. The table's index_dim is 
+    	usually size>1 but it is not required to be. When the number of leading 1's in the table 
+    	shape is > index_dim, then the table rank is assumed to be (4-index_dim).
+    - Output shape is formed by removing the 'index dim' from the table shape, replacing it 
+        with the shape of the index tensor(with leading 1's stripped, and according to index_rank).
+        The lookups are done accordingly.
+    - Output rank is thus index_rank + table_rank-1, and this must be <=4. 1's will added 
+    	on the left if <4.
+    - The values in the 'index tensor' are normally 0..TABN-1, where TABN is the size of the table
+    	tensor on the index dimension. If values are outside this range, results depend 
+       	on padding:
+            NN_PAD_NA: whatever is fastest(while still 'safe'); use this if all values are in range
+            NN_PAD_SAME: will raise an error if any out of range
+            NN_PAD_VALID: out-of-range indices will be clipped to range
+    Index_dim - dim of table which is the 'table index' (0..3, or -1 to ignore)
+    Index_rank - actual rank of index tensor (0..4, or -1 to ignore)
 
 Table_f:
 Table_int32:
@@ -1366,7 +1700,6 @@ Table_int32:
 		3 : (optional) int32 which gives partition strategy (0=mod; 1 = div)
      1 output:
      	0 : output tensor (same type as table input tensor)
-
     This supports partitioned table lookup. If only 2 inputs given, effect is the same as Gather.
 
 
@@ -1404,18 +1737,24 @@ Slice_8:
      			   - same as previous example
 
 QuantizedSlice_8:
-	5 inputs:
-		0: input tensor, qu8, flat format
-		1: 'start' tensor , ints, shape [1,1,1,4] (or smaller)
-		2: 'size' tensor, ints, same shape as start tensor
-		3: input min val
-		4: input max val
-	3 outputs:
-		0: sliced output array, qu8, flat format
-		1: outut min val
-		2: output max val
-
-	The same as Slice_8; but also copies min and max from input to output.
+    5 inputs:
+        0: Input data (quint8 tensor)
+        1: Start (int32 tensor)
+        2: Size (int32 tensor)
+        3: Input min (float scalar)
+        4: Input max (float scalar)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)   
+    Each of the 4 value in 'start' and 'size' gives a start index and len for the slice.
+    A 'size' of -1 means the remainder of the dim starting at the given position.
+    If start and slice are less than 4 in length, full slices are padded on the left.
+    Example:
+        start = [0,0,2,0] size = [-1,-1,4,-1] - extract width from 2...5 inclusive
+        start = [2,0] size = [4,-1]
+    Start - shape [1,1,1,4] or smaller
+    Size - same shape as start tensor
 
 StridedSlice_f:
 StridedSlice_int32:
@@ -1448,18 +1787,42 @@ StridedSlice_uint8:
      if '1' in begin_mask: the 'begin' value is forced to 0 (if step> 0) and insize-1 (if step < 0)
      if '1' in end_mask: the 'end' value is forced to insize (if step> 0) and -1 (if step < 0)
 
-
-
 QuantizedStridedSlice_8:
-	9 inputs
-		0: input tensor, qu8
-		1...6: same as StridedSlice_f, optional parameters are required
-		7: input min val, float
-		8: input max val, float
-	3 outputs
-		0: sliced output tensor, qu8
-		1: output min val
-		2: output max val
+    9 inputs
+        0: Input data (quint8 tensor)
+        1: Begin (int32 tensor)
+        2: End (int32 tensor)
+        3: Step (int32 tensor)
+        4: Begin_mask (int32 scalar)
+        5: End_mask (int32 scalar)
+        6: Shrink_mask (int32 scalar)
+        7: Input min (float scalar)
+        8: Input max (float scalar)
+    3 outputs
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)    
+        2: Output max (float scalar)
+    Each dimension's slicing is defined by begin, end, step values. step cannot be 0.
+    If step >=1, end must be > begin and the size of the output dim is (end-begin)/step rounded up;
+    For reverse slicing: step <= -1, end must be < begin, and the size of the output is 
+    (begin-end)/(-step), rounded up. When k <4, the begin/end/step are applied to the *last* dims, 
+    (e.g. when k=2, applied to width and depth) andthe other dims have begin=0,end=(indimsize),
+    step=1 to preserve the whole input.
+    The input is sampled at 'begin', 'begin+step', 'begin+2*step' ... and all of these must be 
+    in range for the input tensor. Following is a sufficient (but not quite necessary) condition 
+    for that: 0 <= begin < end <= indimsize (when step>=1) and -1 <= end < begin <= indimsize-1 
+    (when step <=-1).
+    The 3 mask inputs must be either all present, or all absent; default is 0 if absent.
+    The 'masks' modify the slices as follows. Note that bit 0,1,2,3 in the masks apply to 
+    B,H,W,D regardless of k. If '1' in shrink_mask: 'step' is forced to 1, and 'end' to begin+1, 
+    so the output dim=1. ALSO: the dimension is 'squeezed out' of the output shape, 
+    e.g (b,h,w,d) -> (1,b',h',d') if 'shrink_mask' = 4
+    When there is a '1' in shrink_mask, the begin_mask and end_mask are ignored for that dim.
+    if '1' in begin_mask: the 'begin' value is forced to 0 (if step> 0) and insize-1 (if step < 0)
+    if '1' in end_mask: the 'end' value is forced to insize (if step> 0) and -1 (if step < 0)
+    Begin - [1,1,1,k] where k = 1...4; start index for slicing
+    End - same shape as begin
+    Step - same shape as begin
 
 SpaceToBatchND_f:
 	3 inputs:
@@ -1497,31 +1860,52 @@ BatchToSpaceND_f:
             The 'crop' values must all be >=0 and leave a non-empty result;
 
 SpaceToBatchND_8:
-	5 inputs:
-		0: input tensor, flat format, q8;
-		1: scalar int32, blocksizeH;             or array [2]: [blocksizeH, blocksizeW])
-        2: array int32 [2] [top_crop,bot_crop];  or  [2,2] [[top_crop,bot_crop],[left_crop,right_crop]]
-        3: input min val, float
-        4: input max val, float
-	3 outputs:
-		0: reformed tensor [batches_in*(blocksizeH*blocksizeW), (t_pad+height_in+b_pad)/blocksizeH, (l_pad+wid_in+r_pad)/blocksizeW, depth_in]
-		1: output min val, float  (these are same as input range)
-		2: output max val, float
-    See SpaceToBatchND_f. If padding is applied, the padding bytes are the 'zero code' for the input range.
+    5 inputs:
+        0: Input data (quint8 tensor)
+        1: Block size (int32 tensor)
+        2: Padding (int32 tensor) 
+        3: Input min (float scalar)
+        4: Input max (float scalar)
+    3 outputs:
+        0: Output data (quint8 tensor) 
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    If the block size has only one entry BlocksizeH, then BlockSizeW is taken as 1.
+    Input height, after padding, must be a multiple of blocksizeH; likewise input width and blocksizeW.
+    Equiv to:
+        -add zero-padding on all edges according to the padding info.
+        -restate shape as [b_in,h_in/blocksizeH,blocksizeH,w_id_in/blocksizeW,blocksizeW,d_in]
+        -transpose to [blocksizeH,blocksizeW,b_in,h_in/blocksizeH,wid_in/blocksizeW,d_in]
+        -restate shape as [blocksizeH*blocksizeW*b_in,h_in/blocksizeH,w_id_in/blocksizeW,d_in]
+    The 'crop' values must all be >=0.
+    Block size - array [2]: [blocksizeH, blocksizeW]
+    Padding - the padding bytes are the 'zero code' for the input range.
+    Output data - Reformed tensor [b_in*(blocksizeH*blocksizeW),(t_pad+height_in+b_pad)/blocksizeH,
+       (l_pad+wid_in+r_pad)/blocksizeW, d_in]
 
 BatchToSpaceND_8:
-	5 inputs:
-		0: input tensor, flat format, qu8;
-		1: scalar int32, blocksizeH;             or array [2]: [blocksizeH, blocksizeW])
-        2: array int32 [2] [top_crop,bot_crop];  or  [2,2] [[top_crop,bot_crop],[left_crop,right_crop]]
-        3: input min val, float
-        4: input max val, float
-	1 output:
-		0: reformed tensor [batches_in/(blocksizeH*blocksizeW), height_in*blocksizeH, wid_in*blocksizeW, depth_in]
-		   (H and W outputs are reduced by 'crop' amounts)
-		1: output min val, float  (these are same as input range)
-		2: output max val, float
-    See BatchToSpace_f
+    5 inputs:
+        0: Input data (quint8 tensor)
+        1: Block size (int32 tensor)
+        2: Padding (int32 tensor) 
+        3: Input min (float scalar)
+        4: Input max (float scalar)
+    3 outputs:
+	0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    If the block size has only one entry BlocksizeH, then BlockSizeW is taken as 1.
+    Input batches must be a multiple of blocksizeH * blocksizeW
+    Equiv to:
+        -restate shape as [blocksize_H,blocksize_W,b_in/(blocksizeH*blocksizeW),h_in, w_id_in,d_in]
+        -transpose to [b_in/(blocksizeH*blocksizeW),h_in, blocksize_H,w_id_in,blocksize_W, d_in]
+        -restate shape as [b_in/(blocksizeH*blocksizeW), h_in*blocksizeH,w_id_in*blocksizeW, d_in]
+        -if applicable, crop top/bottom/left/right.
+    The 'crop' values must all be >=0 and leave a non-empty result;
+    Block size - array [2]: [blocksizeH, blocksizeW]
+    Padding - the padding bytes are the 'zero code' for the input range.
+    Output data - reformed tensor [b_in/(blocksizeH*blocksizeW),h_in*blocksizeH,wid_in*blocksizeW,
+       depth_in] (H and W outputs are reduced by 'crop' amounts)
 
 SpaceToDepth_f:
 	2 inputs:
@@ -1554,6 +1938,22 @@ DepthToSpace_f:
 
 
 SpaceToDepth_8:
+   4 inputs:
+        0: Input data (quint8 tensor)
+        1: Block size (int32 tensor)
+        2: Input min (float scalar)
+        3: Input max (float scalar)
+    3 outputs:
+      	0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Input data height and width must both be multiples of blocksizeH, blocksizeW resp.
+    Equiv to:
+        -restate shape as [b_in, h_in/blocksizeH,blocksizeH,w_id_in/blocksizeW, blocksizeW*d_in]
+        -transpose 2 dims to [b_in,h_in/blocksizeH,w_id_in/blocksizeW,blocksizeH, blocksizeW*d_in]
+        -restate shape as [b_in,h_in/blocksizeH,w_id_in/blocksizeW, blocksizeH*blocksizeW*d_in]
+    Output data - reforme: [b_in,h_in/blocksizeH,w_id_in/blocksizeW, blocksizeH*blocksizeW*d_in]
+
 SpaceToDepth_16:
 	2 inputs:
 		0: input tensor, flat format  (qu8, qu16, or qi16)
@@ -1568,6 +1968,25 @@ SpaceToDepth_16:
 	Input height and width must both be multiples of blocksize.
 
 DepthToSpace_8:
+    4..5 inputs:
+        0: Input data (quint8 tensor)
+        1: Block size (int32 tensor)
+        2: Input min (float scalar)
+        3: Input max (float scalar)
+        4: Input array (int32 scalar) optional 
+    3 outputs:
+      	0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Input data depth must be a multiple of blocksizeH * blocksizeW
+    Equiv to:
+        -restate shape as [b_in,h_in/blocksizeH,blocksizeH,wid_in/blocksizeW,blocksizeW*d_in]
+        -transpose 2d to [b_in,h_in/blocksizeH,w_id_in/blocksizeW,blocksizeH,blocksizeW*depth_in]
+        -restate shape as  [b_in,h_in/blocksizeH,w_id_in/blocksizeW,blocksizeH*blocksizeW*depth_in]
+    Output data - reformed tensor to 
+        [b_in,h_in*blocksizeH,w_id_in*blocksizeW,depth_in/(blocksizeH*blocksizeW)] 
+    Input array - [top_crop,bottom_crop,left_crop,right_crop]
+
 DepthToSpace_16:
 	4 or 5 inputs:
 		0: input tensor, flat format (qu8, qu16, or qi16)
@@ -1637,41 +2056,52 @@ Assign:
 	A single Assign node may write any number of Variables.
 
 RgbaToRgb_8:
-	4 inputs:
-		0	input tensor [b,h,w,4] of quint8
-		1	 scalar int32, mode
-		2	input min val (scalar float)
-		3	input max val (scalar float)
-	3 outputs:
-		0	input tensor [b,h,w,3] of quint8
-		1	output min val (scalar float - same as input min)
-		2	output max val (scalar float - same as input max)
-	Transform RGBA to RGB (or RGBA to GBR, or GBRA to BGR or GBR).
-	If 'mode' is 1, the order of the first 3 channels is reversed to the output; if 0, the order is maintained.
+    4 inputs:
+        0: Input data (quint8 tensor)
+        1: Mode (int32 scalar)
+        2: Input min (float scalar)
+        3: Input max (float scalar)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Transform RGBA to RGB (or RGBA to GBR, or GBRA to BGR or GBR).
+    Mode - If 'mode' is 1: the order of the first 3 channels is reversed to the output; 
+       If 'mode' is 0, the order is maintained.
 
 Argb32ToRgb_8:
-	4 inputs:
+    4 inputs:
 		0	input tensor [b,h,w,4] of quint8
 		1	 scalar int32, mode
 		2	input min val (scalar float)
 		3	input max val (scalar float)
 	3 outputs:
-		0	input tensor [b,h,w,3] of quint8
+		0	output tensor [b,h,w,3] of quint8
 		1	output min val (scalar float - same as input min)
 		2	output max val (scalar float - same as input max)
 	Transform ARGB to RGB (or ARGB to GBR, or AGBR to BGR or GBR).
 	If 'mode' is 1, the order of the last 4 channels is reversed to the output; if 0, the order is maintained.
 
+Nv21ToRgb_8:
+	2 inputs:
+		0	input tensor of uint8
+		1	scalar int32, mode (0 for RGB output, 1 for BGR output)
+	3 outputs:
+		0	output tensor [b,h,w,3] of quint8
+		1	output min val (scalar float 0.0)
+		2	output max val (scalar float 255.0)
+	Transform Nv21 to RGB (or BRG). The Nv21 format is documented here: https://en.wikipedia.org/wiki/YUV#Y%E2%80%B2UV420p_(and_Y%E2%80%B2V12_or_YV12)_to_RGB888_conversion
+
 ImageTransform_f:
-	2 inputs:float32
-		0	image tensor [b,h,w,d] (float)
-		1 	projective transform tensor [b,1,1,8] (float)
-	1 output:
-		0 	output tensor [b,h,w,d] (float)
-	Applies the transform(s) provided in transform tensor to the image(s).
-	Transformed coordinates outside of the input image will be filled with zeros.
-	Always uses bilinear interpolation for the transformation. Assumes input shape == output shape
-	and input batch == transform batch.
+    2 inputs:
+        0: Input image (float tensor)
+        1: Projective transform (float tensor)
+    1 output:
+        0: Output data (float tensor)
+    Applies the transform(s) provided in transform tensor to the image(s).
+    Transformed coordinates outside of the input image will be filled with zeros.
+    Always uses bilinear interpolation for the transformation. Assumes input shape == output shape
+    and input batch == transform batch.
 
 QuantizedSum_8to32 (Reducing Sum):
     4 inputs:
@@ -1702,7 +2132,6 @@ QuantizedMean_8 (Reducing Mean):
     to taking the mean over all elements in the input tensor.
 
 TopK_f:
-TopK_8:
 	2 inputs:
 		0: input tensor [b, h, w, d] of uint8 (for _8) (or float for _f)
 		1: scalar int32 for k, number of top elements to look for, along the depth
@@ -1722,66 +2151,84 @@ TopK_8:
 	If depth is smaller than k, then the depth dimension size is unchanged. The values along depth
 	are sorted in the output tensor and the index tensor is the corresponding indices from the input tensor.
 
+TopK_8:
+    4 inputs:
+        0: Input data (quint8 tensor)
+        1: K top (int32 scalar)
+        2: Input min (float scalar)
+        3: Input max (float scalar)
+    4 outputs:
+        0: Output data (quint8 tensor)
+        1: Index (quint8 tensor)
+        2: Output min (float scalar)
+        3: Output max (float scalar)
+   Finds values and indices of the k largest entries for the depth dimension.
+   The values are sorted in descending order, and their corresponding index along the depth in
+   the input tensor is in the index tensor.(in_tensor_val[index_tensor_val]==out_tensor_val)
+   The depth dimension size of the output tensor and index tensor is k.
+   If depth is smaller than k, then the depth dimension size is unchanged. The values along depth
+   are sorted in the output tensor and the index tensor is the corresponding indices from the 
+   input tensor.  
+
 CastFloat32ToInt32:
     1 input:
-        0   input tensor
+        0: Input data (float tensor)
     1 output:
-        0   output tensor
-    Assumes that the data in the input tensor is of type float32 and casts it to int32.
+        0: Output  data (int32 tensor)
+    Assumes that the data in the input tensor is of type float and casts it to int32.
 
 CastFloat32ToUInt8:
     1 input:
-        0   input tensor
+        0: Input data (float tensor)
     1 output:
-        0   output tensor
-    Assumes that the data in the input tensor is of type float32 and casts it to uint8.
+        0: Output  data (uint8 tensor)
+    Assumes that the data in the input tensor is of type float and casts it to uint8.
 
 CastInt32ToFloat32:
     1 input:
-        0   input tensor
+        0: Input data (int32 tensor)
     1 output:
-        0   output tensor
-    Assumes that the data in the input tensor is of type int32 and casts it to float32.
+        0: Output  data (float tensor)
+    Assumes that the data in the input tensor is of type int32 and casts it to float.
 
 CastInt32ToUInt8:
     1 input:
-        0   input tensor
+        0: Input data (int32 tensor)
     1 output:
-        0   output tensor
+        0: Output data (uint8 tensor)
     Assumes that the data in the input tensor is of type int32 and casts it to uint8.
 
 CastUInt8ToFloat32:
     1 input:
-        0   input tensor
+        0: Input data (uint8 tensor)
     1 output:
-        0   output tensor
-    Assumes that the data in the input tensor is of type uint8 and casts it to float32.
+        0: Output data (float tensor)
+    Assumes that the data in the input tensor is of type uint8 and casts it to float.
 
 CastUInt8ToInt32:
     1 input:
-        0   input tensor
+        0: Input data (uint8 tensor)
     1 output:
-        0   output tensor
+        0: Output data (int32 tensor)
     Assumes that the data in the input tensor is of type uint8 and casts it to int32.
 
 AxisShuffle_8:
     5 inputs:
-        0   input data       (uint8_t) Need to set up the input shape
-        1   axis             (int32_t)
-        2   number of groups (int32_t)
-        3   input min val    (scalar float)
-        4   input max val    (scalar float)
-    3 output:
-        0   output data      (uint8_t)
-        1	output min val   (scalar float - same as input min)
-        2	output max val   (scalar float - same as input max)
+        0: Input data (quint8 tensor)
+        1: Axis (int32 scalar)
+        2: Number of groups (int32 scalar)
+        3: Input min (float scalar)
+        4: Input max (float scalar)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
     Group and transpose along a given axis
     Support negative axis
     The operation is equivalent to doing the following (e.g. axis is w):
-    [b,h,wa*wb,d] -> [b,h,wa,wb,d]  (reshape)
-    [b,h,wb,wa,d]                   (transpose)
-    [b,h,wb*wa,d]                   (reshape)
-
+    [b,h,wa*wb,d] -> [b,h,wa,wb,d] (reshape)
+    [b,h,wb,wa,d] (transpose)
+    [b,h,wb*wa,d] (reshape)
 
 AxisShuffle_16:
     5 inputs:
@@ -1808,15 +2255,14 @@ AxisShuffle_int32:
     Same as AxisShuffle_8, but for float or int32 data.
 
 
-
 ArgMax_8toInt32:
     4 inputs:
-       0   input data       (uint8_t)
-       1   axis             (int32_t)
-       2   input min val    (scalar float)
-       3   input max val    (scalar float)
+        0: Input data (quint8 tensor)
+        1: Axis (int32 scalar)
+        2: Input min (float scalar)
+        3: Input max (float scalar)
     1 output:
-       0   output data      (int32_t)
+        0: Output data (int32 tensor)
     Returns the indices of the maximum values along an axis.
 
 ArgMax_ftoInt32:
@@ -1828,56 +2274,58 @@ ArgMax_ftoInt32:
     Returns the indices of the maximum values along an axis.
 
 ResizeNearestNeighbor_8:
-    4 inputs:
-        0   input tensor [b, h, w, d] of quint8
-        1   output dimensions height and width (2d tensor of 2 values: h and w)
-        1   input min val (scalar float)
-        2   input max val (scalar float)
-        3   (optional): align_corners const. Default is False
-    1 output:
-        0   output tensor [b, h, w, d] of quint8
-        1   output min val (scalar float - same as input min)
-        2   output max val (scalar float - same as input max)
+    4..5 inputs:
+        0: Input data (quint8 tensor)
+        1: New Dimension (int32 tensor)
+        2: Input min (float scalar)
+        3: Input max (float scalar)
+        4: Align_corners (int32 tensor) (optional) Default: False
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
     Resizes the input to the output height and width using resize nearest algorithm.
     Implements tf.resize_nearest_neighbor.
+    New Dimension - 2d tensor with only height and width
 
 QuantizedTile_8:
     4 inputs:
-        0   input tensor of quint8
-        1   multiples - an array of at most 4 elements containing the replication factors for batches, height, width and depth respectively. If the array size is shorter than 4 it is left-filled with 1s.
-        2   input min
-        3   input max
+        0: Input data (quint8 tensor)
+        1: Multiples (int32 tensor) 
+        2: Input min (float scalar)
+        3: Input max (float scalar)
     3 outputs:
-        0   output tensor
-        1   output min
-        2   output max
-    Replicates the input tensor data along each dimension as specified by the multiples. The input min and max are
-    passed through to the output min and max.
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Replicates the input tensor data along each dimension as specified by the multiples.
+    Multiples - an array of at most 4 elements containing the replication factors for batches,
+        height, width and depth respectively. If the array size is shorter than 4 it is 
+        left-filled with 1s.
 
 Moments_8to32:
     4 inputs:
-       0   input data       (uint8_t)
-       1   axis             (int32_t)
-       2   input min val    (scalar float)
-       3   input max val    (scalar float)
-    6 output:
-       0   mean data        (uint8_t)
-       1   variance data    (int32_t)
-       2   mean min val     (scalar float)
-       3   mean max val     (scalar float)
-       4   variance min val (scalar float)
-       5   variance max val (scalar float)
+        0: Input data (quint8 tensor)
+        1: Axis (int32 tensor)
+        2: Input min (float scalar)
+        3: Input max (float scalar)
+    6 outputs:
+        0: Output Mean data (quint8 tensor)
+        1: Output Variance data (qint32 tensor)
+        2: Output Mean min val (float scalar)
+        3: Output Mean max val (float scalar)
+        4: Output Variance min val (float scalar)
+        5: Output Variance max val (float scalar)
     Compute the mean and variance of the input along the axis.
-    Implements tf.nn.moments.
 
 ArgMin_8:
     4 inputs:
-       0   input data       (uint8_t)
-       1   axis             (int32_t)
-       2   input min val    (scalar float)
-       3   input max val    (scalar float)
+        0: Input data (quint8 tensor)
+        1: Axis (int32 scalar)
+        2: Input min (float scalar)
+        3: Input max (float scalar)
     1 output:
-       0   output data      (int32_t)
+        0: Output data (int32 tensor)
     Returns the indices of the minimum values along an axis.
 
 Select_f:
@@ -1891,91 +2339,162 @@ Select_f:
      All input tensors must have the same shape.
 
 Select_8:
-     7 inputs:
-        0   condition tensor [b h w d]  (quint8)
-        1   input tensor x [b h w d]    (quint8)
-        2   x min val                   (float)
-        3   x max val                   (float)
-        4   input tensor y [b h w d]    (quint8)
-        5   y min val                   (float)
-        6   y max val                   (float)
-     3 outputs:
-        0   output tensor [b h w d]     (quint8)
-        1   output min                  (float)
-        2   output max                  (float)
-     Selects value of x (if true) or value of y (if false) for each corresponding position based on the condition tensor.
-     All input tensors must have the same shape.
-     Partially implements tf.where .
+    7 inputs:
+        0: Condition Input (quint8 tensor)
+        1: Input data X (quint8 tensor)
+        2: Input X min (float scalar)
+        3: Input X max (float scalar)
+  	4: Input data Y (quint8 tensor)
+        5: Input Y min (float scalar)
+        6: Input Y max (float scalar)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Selects value of X (if true) or value of Y (if false) for each corresponding position based 
+    on the condition tensor. All input tensors must have the same shape.
 
 QuantizedPRelu_8:
-	4 inputs:
-		0	input tensor	(quint8)
-		1	input min	(float)
-		2	input max	(float)
-		3	alphas tensor	(float)
-	3 outputs:
-		0	output tensor 	(quint8)
-		1	out min		(float)
-		2	out max		(float)
-	Performs a quantized PRelu (alpha values given as float)
+    4 inputs:
+        0: Input tensor (quint8 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+        3: Alphas (float tensor)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Performs a quantized PRelu with given alpha values
 
 QuantizedPRelu_8_V2:
-	6 or 8 inputs:
-		0	input tensor	(quint8)
-		1	input min	(float)
-		2	input max	(float)
-		3	alphas tensor	(quint8)
-		4	alpha min	(float)
-		5	alpha max	(float)
-		6       out min         (float optional)
-		7       out max         (float optional)
-	3 outputs:
-		0	output tensor 	(quint8)
-		1	out min		(float)
-		2	out max		(float)
-	Performs a quantized PRelu (alpha values are quantized)
-	* Also supports changing the alpha values on each execute,
-	  as long as the alpha tensor size remains the same
+    6..8 inputs:
+        0: Input data (quint8 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+        3: Alphas tensor (quint8 tensor)
+        4: Alpha min (float scalar)
+        5: Alpha max (float scalar)
+        6: Out min (float scalar) optional
+        7: Out max (float scalar) optional
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Performs a quantized PRelu with given alpha tensor
+    Support changing alpha values on each execute as long as the alpha tensor size remains the same
 
 QuantizedRoiAlignV2_8:
-    4 inputs:
-        0   feature tensor        [b,h,w,d] :: quint8
-        1   feature tensor min    [1,1,1,1] :: float
-        2   feature tensor max    [1,1,1,1] :: float
-        3   RoIs tensor           [1,1,num_rois,4] :: qint16 w/ step=.125, qzero=0
-        4   Batch Index Tensor    [1,1,1,num_rois] :: int32
-        5   output height         [1,1,1,1] :: int32
-        6   output width          [1,1,1,1] :: int32
-        7   spacial scale height  [1,1,1,1] :: float  height of feature map/height of original image
-        8   spacial scale width   [1,1,1,1] :: float  width of feature map/width of original image
-        9   sampling ratio height [1,1,1,1] :: int32  number of sampling points used per output pixel in height dimension
-        10  sampling ratio width  [1,1,1,1] :: int32  number of sampling points used per output pixel in width dimension
-        11  output tensor min     [1,1,1,1] :: float
-        12  output tensor max     [1,1,1,1] :: float
-
+    13 inputs:
+        0: Feature input tensor (quint8 tensor) 
+        1: Feature min (float scalar)
+        2: Feature max (float scalar)
+        3: RoIs (quint16 tensor)
+        4: Batch Index (int32 tensor)
+        5: Pooled height (int32 tensor)
+        6: Pooled width (int32 tensor)
+        7: Spacial scale height (float scalar) 
+        8: Spacial scale width (float scalar)
+        9: Sampling ratio height (int32 scalar) 
+        10: Sampling ratio width (int32 scalar)
+        11: Output exp min (float scalar) 
+        12: Output exp max (float scalar)
     3 outputs:
-        0   output tensor         [num_rois,output_h,output_w,d] :: quint8
-        1   output tensor min     [1,1,1,1] :: float  same as input[11]
-        2   output tensor max     [1,1,1,1] :: float  same as input[12]
-    Average pool using bilinear interpolation to produce an output with fixed output height and output width. Supports different quantization ranges between input and output feature maps. Sampling ratio height/width can be set to 0 for adaptive value of ceil(roi_width/out_width).
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Average pool using bilinear interpolation to produce an output with fixed output height and 
+    output width. Supports different quantization ranges between input and output feature maps. 
+    Sampling ratio height/width can be set to 0 for adaptive value of ceil(roi_width/out_width).
+    RoIs - tensor [1,1,num_rois,4] 
+    Batch Index - [1,1,1,num_rois]
+    Spacial scale height - float height of feature map/height of original image
+    Spacial scale width - float width of feature map/width of original image
+    Sampling ratio height - number of sampling points used per output pixel in height dimension
+    Sampling ratio width - number of sampling points used per output pixel in width dimension
 
 QuantizedEqual_8:
+    6 inputs:
+        0: Input data A (quint8 tensor)
+        1: Input data B (quint8 tensor)
+        2: Input min A (float scalar)
+        3: Input max A (float scalar)
+        4: Input min B (float scalar)
+        5: Input max B (float scalar)
+    1 output:
+        0: Output data (uint8 tensor)
+    Compares 2 tensors using the specified operation: Quantized Equal 
+    Supports broadcasting
+    Output data - where each value is [0,1]
+
 QuantizedNotEqual_8:
+    6 inputs:
+        0: Input data A (quint8 tensor)
+        1: Input data B (quint8 tensor)
+        2: Input min A (float scalar)
+        3: Input max A (float scalar)
+        4: Input min B (float scalar)
+        5: Input max B (float scalar)
+    1 output:
+        0: Output data (uint8 tensor)
+    Compares 2 tensors using the specified operation: Quantized Not Equal 
+    Supports broadcasting
+    Output data - where each value is [0,1]
+
 QuantizedLess_8:
+    6 inputs:
+        0: Input data A (quint8 tensor)
+        1: Input data B (quint8 tensor)
+        2: Input min A (float scalar)
+        3: Input max A (float scalar)
+        4: Input min B (float scalar)
+        5: Input max B (float scalar)
+    1 output:
+         0: Output data (uint8 tensor)
+    Compares 2 tensors using the specified operation: Quantized Less
+    Supports broadcasting
+    Output data - where each value is [0,1]
+
 QuantizedLessEqual_8:
+    6 inputs:
+        0: Input data A (quint8 tensor)
+        1: Input data B (quint8 tensor)
+        2: Input min A (float scalar)
+        3: Input max A (float scalar)
+        4: Input min B (float scalar)
+        5: Input max B (float scalar)
+    1 output:
+         0: Output data (uint8 tensor)
+    Compares 2 tensors using the specified operation: Quantized Less Equal
+    Supports broadcasting
+    Output data - where each value is [0,1]
+
 QuantizedGreater_8:
+    6 inputs:
+        0: Input data A (quint8 tensor)
+        1: Input data B (quint8 tensor)
+        2: Input min A (float scalar)
+        3: Input max A (float scalar)
+        4: Input min B (float scalar)
+        5: Input max B (float scalar)
+    1 output:
+         0: Output data (uint8 tensor)
+    Compares 2 tensors using the specified operation: Quantized Greater
+    Supports broadcasting
+    Output data - where each value is [0,1]
+
 QuantizedGreaterEqual_8:
-	6 inputs:
-	    0   input tensor A        [b,h,w,d] :: quint8
-	    1   input tensor B        [b,h,w,d] :: quint8
-	    2   input A min           [1] :: float
-	    3   input A max           [1] :: float
-	    4   input B min           [1] :: float
-	    5   input B max           [1] :: float
-	1 output:
-	    0   output tensor         [b,h,w,d] :: quint8 (where each value is [0,1])
-	*Compares 2 tensors using the specified operation
-	*Supports broadcasting
+    6 inputs:
+        0: Input data A (quint8 tensor)
+        1: Input data B (quint8 tensor)
+        2: Input min A (float scalar)
+        3: Input max A (float scalar)
+        4: Input min B (float scalar)
+        5: Input max B (float scalar)
+    1 output:
+         0: Output data (uint8 tensor)
+    Compares 2 tensors using the specified operation: Quantized Greater Equal
+    Supports broadcasting
+    Output data - where each value is [0,1]
 
 Ceil_f:
 	1 input:
@@ -2032,18 +2551,21 @@ AxisAlignedBBoxTransform_f:
     Adjusts box dimensions based on the deltas and image info.
 
 AxisAlignedBBoxTransform_q8q16:
-    6 inputs:
-        0   box dimensions      (quint16)
-        1   deltas              (quint8)
-        2   batch splits        (int)
-        3   image info          (quint16)
-        4   deltas min          (float)
-        5   deltas max          (float)
-        6   image info min      (float)
-        7   image info max      (float)
+    8 inputs:
+        0: Box dimensions (quint16 tensor)
+        1: Deltas (quint8 tensor)
+        2: Batch splits (int32 scalar)
+        3: Image info (quint16 tensor)
+        4: Deltas min (float scalar)
+        5: Deltas max (float scalar)
+        6: Image info min (float scalar)
+        7: Image info max (float scalar) 
     1 output:
-        0   new box dimensions  (quint16)
-    Adjusts box dimensions based on the deltas and image info.
+        0: Output box dimensions (quint16 tensor)
+    Transform axis-aligned bounding box proposals using bounding box deltas. Given the positions
+    of bounding box proposals and the corresponding bounding box deltas for each class, return the
+    refined bounding box regions. The resulting bounding boxes are cliped against the edges of
+    the image.
 
 QuantizedHashtableLookup_8:
         5 inputs:
@@ -2065,41 +2587,47 @@ QuantizedHashtableLookup_8:
 
 Proposal_q8q16:
     18 inputs:
-        0   score tensor [b,feat_h,feat_w,a](uint8) probability score associated with each box
-        1   score_min (scalar float)
-        2   score_max (scalar float)
-        3   deltas tensor [b,feat_h,feat_w,4*a)](uint8) coordinate deltas from the anchors to generate proposals from
-        4   deltas_min (scalar float)
-        5   deltas_max (scalar float)
-        6   anchors [b,1,a,4] (int16) containing constant anchors around which proposals are generated
-        7   anchors_min (scalar float)
-        8   anchors_max (scalar float)
-        9   im_size [b,1,1,2] (uint16) containing image width, image height for each batch
-        10 	im_size_min (scalar float)
-        11  im_size_max (scalar float)
-        12  im_stride_h (scalar float) ratio of image height to feat_h
-        13  im_stride_w (sclar float) ratio of image width to feat_w
-        14  max_proposal_num (scalar int32) maximum number of proposed boxes to filter with nms
-            must be a constant that is greater than 0.
-        15  max_roi_num (scalar int32) maximum number of rois after nms
-        16  threshold (scalar float)  intersection over union threshold for overlap between proposed bboxes
-        17  min bbox size (scalar float) minimum box size to propose
+        0: Score (quint8 tensor) 
+        1: Score min (float scalar)
+        2: Score max (float scalar)
+        3: Deltas (quint8 tensor) 
+        4: Deltas min (float scalar)
+        5: Deltas max (float scalar)
+        6: Anchors (quint16 tensor)
+        7: Anchors min (float scalar)
+        8: Anchors max (float scalar)
+        9: Image size (quint16 tensor) 
+        10: Image size_min (float scalar)
+        11: Image size_max (float scalar)
+        12: Image stride_h (float scalar) 
+        13: Image stride_w (float scalar) 
+        14: Max proposal_num (int32 scalar) 
+        15: Max_roi_num (int32 scalar) 
+        16: Threshold (float scalar) 
+        17: Min bbox size (float scalar)
     7 outputs:
-        0   output score tensor [1,1,1,total_roi_num] (uint8) probability score associated with each roi. total_roi_num is variable. total_roi_num <= b*max_num_roi
-            total_roi_num must be set to 0
-        1   output score min (scalar float) copy of score_min
-        2   output score max (scalar float) copy of score_max
-        3   output roi tensor [1,1,total_roi_num,4] (int16) the coordinates of rois.
-            total_roi_num must be set to 0
-        4   output roi min (scalar float) copy of anchors_min
-        5   output roi max (scalar float) copy of anchors_max
-        6   output num boxes (1,1,1,total_roi_num)  number of output boxes for each image
-            total_roi_num must be set to 0
-    Generates proposed region of interests (rois) based on feature map and deltas, from a given set of anchors. Filters out small boxes and overlapping boxes.
-    Bounding box proposals are generated by applying transformation on a set
-    of predefined anchors with the bounding box deltas from bounding box
-    regression. A final step of hard NMS is applied to limit the number of
-    returned boxes.
+        0: Output score (quint8 tensor)
+        1: Output score min (float scalar) 
+        2: Output score max (float scalar) 
+        3: Output roi (quint16 tensor) 
+        4: Output roi min (float scalar) 
+        5: Output roi max (float scalar) 
+        6: Output num boxes (int32 tensor)
+    Generates proposed region of interests (rois) based on feature map and deltas, from a given set
+    of anchors. Filters out small boxes and overlapping boxes.
+    Bounding box proposals are generated by applying transformation on a set of predefined anchors
+    with the bounding box deltas from bounding box regression. A final step of hard NMS is applied 
+    to limit the number of returned boxes. The total_roi_num must be set to 0
+    Score - [b,feat_h,feat_w,a] probability score associated with each box
+    Deltas - [b,feat_h,feat_w,4*a)] coordinate deltas from the anchors to generate proposals from
+    Anchors - [b,1,a,4] containing constant anchors around which proposals are generated
+    Image size - [b,1,1,2] containing image width, image height for each batch
+    Image stride_h - ratio of image height to feat_h
+    Image stride_w - ratio of image width to feat_w
+    Max proposal_num - maximum number of proposed boxes to filter with nms must be a constant 
+    that is greater than 0.
+    Max_roi_num - maximum number of rois after nms
+    Threshold - intersection over union threshold for overlap between proposed bboxes
 
 BoxWithNmsLimit_f:
     11 inputs:
@@ -2158,41 +2686,43 @@ BoxWithNmsLimit_f:
 
 BoxWithNmsLimit_q8q16:
     13 inputs:
-        0   scores             uint8       A tensor of scores for each box and class combination. The width must equal
-                                           to the number of boxes and depth must be equal to the number of classes
-        1   boxes              uint16      A tensor that specifies the box coordinates per class. The coordinates are
-                                           specified as [x1, y1, x2, y2] where (x1,y1) is the bottom-left vertex and
-                                           (x2, y2) is the upper-right vertex. The width of the tensor must be
-                                           4 x number of classes and the depth must be equal to the number of boxes.
-        2   batch splits       int32       A 1-D tensor indicating the batch index for every box.  Boxes from the same
-                                           batch index are grouped.
-        3   score threshold    float32     1-element tensor containing the score threshold.
-        4   detections per     int32       1-element tensor containing the maximum number of detections per image.
-            image                          must be a constant that is greater than 0.
-        5   soft nms           int32       1-element tensor specifying a flag for soft nms. 0 if hard nms,
-            method                         1 if linear soft nms,2 if gaussian soft nms
-        6   nms threshold      float32     1-element tensor containing the nms threshold.
-        7   sigma              float32     1-element tensor containing the sigma for gaussian soft nms
-        8   score threshold    float32     1-element tensor containing the score threshold for soft nms.
-            for soft nms
-        9   scores min         float32     Minimum for scores.
-        10  scores max         float32     Maximum for scores.
-        11  boxes min          float32     Minimum for boxes.
-        12  boxes max          float32     Maximum for boxes.
+    	0: Score (quint8 tensor) 
+    	1: Boxes (quint16 tensor)
+    	2: Batch (int32 tensor)
+    	3: Score threshold (float scalar)
+    	4: Detections (int32 scalar)
+    	5: Soft nms (int32 scalar)
+    	6: Nms threshold (float scalar)
+    	7: Sigma (float scalar)
+    	8: Score threshold (float scalar)
+    	9: Scores min (float scalar)
+        10: Scores max (float scalar)
+        11: Boxes min (float scalar)
+        12: Boxes max (float scalar)
     8 outputs:
-	    NOTE: This op supports variable number of selected boxes.  The maximum is defined by
-	    (num_unique_indices from batch splits) * detection_per_image.  This may affect the size required at the output
-	    of the network.  If the network output buffer is not large enough, execute will fail.
-        0   scores          uint8       1-D tensor containing scores of selected boxes.
-        1   boxes           uint16      Tensor containing the coordinates of selected boxes. The format is the same as
-                                        the format given in input 1.
-        2   classes         int32       1-D tensor containing the classes the selected boxes belong to.
-        3   batch splits    int32       1-D tensor indicating the batch index for every output box.  Boxes from the same batch
-                                        index are grouped.
-        4   scores min      float32     Minimum for scores.
-        5   scores max      float32     Maximum for scores.
-        6   boxes min       float32     Minimum for boxes.
-        7   boxes max       float32     Maximum for boxes.
+        0: Output score (quint8 tensor)
+        1: Output Boxes (quint16 tensor)
+        2: Classes (int32 tensor)
+        3: Output Batch splits (int32 tensor)
+        4: Output score min (float scalar) 
+        5: Output score max (float scalar) 
+        6: Output boxes min (float scalar) 
+        7: Output Boxes max (float scalar) 
+    Greedily selects a subset of bounding boxes in descending order of score.This op applies NMS 
+    algorithm to each class. In each loop of execution, the box with maximum score gets selected 
+    and removed from the pending set. The scores of the rest of boxes are lowered according to the 
+    intersection-over-union (IOU) overlapping with the previously selected boxes and a specified 
+    NMS kernel method. Any boxes with score less than a threshold are removed from the pending set.
+    Scores - A tensor of scores for each box and class combination. The width must equal to the 
+    	number of boxes and depth must be equal to the number of classes
+    Boxes - A tensor that specifies the box coordinates per class.The coordinates are specified 
+    	as [x1, y1, x2, y2] where (x1,y1) is the bottom-left vertex and (x2, y2) is the upper-right
+    	vertex. The width of the tensor must be 4 x number of classes and the depth must be equal 
+    	to the number of boxes.
+    Detections - 1-element tensor containing the maximum number of detections per image. 
+    	Image must be a constant that is greater than 0.
+    Soft nms int32 1-element tensor specifying a flag for soft nms. 0 if hard nms, method 1 
+    	if linear soft nms,2 if gaussian soft nms
 
 L2Normalize_8:
     Independently normalizes each 1-D slice along the given axis. Axis is depth by default
@@ -2207,7 +2737,6 @@ L2Normalize_8:
         0   output data         (uint8_t)
         1   output min val       (scalar float)
         2   output max val       (scalar float)
-
 
 LSHProjection:
     Locality Sensitive Hashing projection, bucketize input items.  Works on data as char array; known to support
@@ -2246,45 +2775,44 @@ ArgMax_8:
 
 QuantizedExtractGlimpse_8:
     9 inputs:
-	    0 input data      (uint8_t)
-    	1 offsets		      (float)
-    	2 input min val 	(float)
-    	3	input max val 	(float)
-    	4	glimpse width 	(int)
-    	5	glimpse height	(int)
-    	6	centered	(int)
-    	7	normalized 	(int)
-    	8	uniform noise 	(int)
+        0: Input data (quint8 tensor)
+        1: Offsets (float tensor)
+        2: Input min val (float scalar)
+        3: Input max val (float scalar)
+        4: Glimpse width (int32 scalar)
+        5: Glimpse height (int32 scalar)
+        6: Centered (int32 scalar)
+        7: Normalized (int32 scalar)
+        8: Uniform noise (int32 scalar)
     3 outputs:
-    	0	output data	(uint8_t)
-    	1	output min	(float)
-    	2	output max	(float)
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
     Returns a set of windows called glimpses extracted at location offsets from the input tensor.
-    If the windows only partially overlaps the inputs, the non overlapping areas will be filled with random noise.
-    Refer to https://www.tensorflow.org/api_docs/python/tf/image/extract_glimpse
+    If the windows only partially overlaps the inputs, the non overlapping areas will be filled 
+    with random noise.
 
 Convert_int32_f:
     1 input:
-        0 input data (int32_t)
+        0: Input data (int32 tensor)
     1 output:
-        0 output data (float)
+        0: Output data (float tensor)
     Cast the input data from type int32_t to type float.
-    Note: it does force cast directly, which will lose LSB accuracy.
-          not suggested for large int range input (> 2^23)
+    Note: it does force cast directly, which will lose LSB accuracy. Not suggested for large int 
+    range input (> 2^23)
 
 QuantizedChannelScale_32xf:
     4 inputs:
-      	0  input data  (uint32_t)
-      	1  scale       (float)
-      	2  input min   (float)
-      	3  input max   (float)
+      	0: Input data (qint32 tensor)
+      	1: Scale value (float tensor)
+        2: Input min (float scalar)
+        3: Input max (float scalar)
     3 outputs:
-        0   output data    (int32_t)
-        1   output min val (float)
-        2   output max val (float)
+        0: Output data (qint32 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
     Apply channel-wise scaling to input data.
     Scale is a tensor of shape (1,1,1,k) where k == depth of input data.
-
 
 QuantizedInstanceNorm_8:
     3 inputs:
@@ -2297,7 +2825,6 @@ QuantizedInstanceNorm_8:
         2: output max (float)
     Applies instance normalization. Finds per-channel mean and variance and computes:
     out = (in - mean) / sqrt(variance + variance_epsilon)
-
 
 Sub_int32:
 Add_int32:
@@ -2330,151 +2857,259 @@ ExpandDims_f:
 
 
 QuantizedAdd_8p8to32:
+    6 inputs:
+        0: Input A data (quint8 tensor)
+        1: Input B data (quint8 tensor)
+        2: Input A min (float scalar)
+        3: Input A max (float scalar)
+        4: Input B min (float scalar)
+        5: Input B max (float scalar)
+    3 outputs:
+        0: Output data (qint32 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Quantized Add elementwise. The shapes of A, B must match or if A or B has a dimension
+    with size 1, then the add will be broadcasted along that axis.
+
 QuantizedSub_8p8to32:
     6 inputs:
-        0: input A data (quint8)
-        1: input B data (quint8)
-        2: input A min (float)
-        3: input A max (float)
-        4: input B min (float)
-        5: input B max (float)
+        0: Input A data (quint8 tensor)
+        1: Input B data (quint8 tensor)
+        2: Input A min (float scalar)
+        3: Input A max (float scalar)
+        4: Input B min (float scalar)
+        5: Input B max (float scalar)
     3 outputs:
-        0: output data (qint32)
-        1: output min (float)
-        2: output max (float)
-    Quantized Add/Subtract elementwise. The shapes of A, B must match or if A or B has a dimension with size 1,
-    then the add/sub will be broadcasted along that axis.
+        0: Output data (qint32 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Quantized Subtract elementwise. The shapes of A, B must match or if A or B has a dimension 
+    with size 1, then the sub will be broadcasted along that axis.
 
 
 QuantizedSoftmax_8:
-    4 inputs:
-        0: input tensor (quint8)
-        1: input min (float)
-        2: input max (float)
-        3(Optional): beta (scalar float) (default 1.0f)
+    3..4 inputs:
+        0: Input data (quint8 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+        3: Beta (float scalar) (Optional) default 1.0f
     3 outputs:
-        0: output tensor (quint8)
-        1: output min (float)
-        2: output max (float)
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
     Softmax operation applied on quantized uint8 input.
 
 
 QuantizedLRN_8:
     7 inputs:
-        0: input tensor (quint8)
-        1: input min (float)
-        2: input max (float)
-        3: window shape (int_32)
-        4: bias (scalar float)
-        5: alpha (scalar float)
-        6: beta (scalar float)
+        0: Input data (quint8 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+        3: Window (shape tensor)
+        4: Bias (float scalar)
+        5: Alpha (float scalar)
+        6: Beta (float scalar)
     3 outputs:
-        0: output data (quint8)
-        1: output min (float)
-        2: output max (float)
-    Refer to: https://www.tensorflow.org/api_docs/python/tf/nn/local_response_normalization
-    Normalizes input by normalizing variance in a local areas specified by the window tensor's shape.
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Normalize input by normalizing variance in a local areas specified by the window tensor's shape
     Applies the following calculation as defined in the LRN Paper:
-    out = in / (bias + ((alpha/window_size) * (sum(foreach (input element determined by window_shape)**2))))**beta
+    out=in/(bias+((alpha/window_size)*(sum(for each(in_ele determined by window_shape)**2))))**beta
 
 
 
 QuantizedDepthwiseConv2d_8x8to32:
     7 inputs:
-        0: input tensor (quint8)
-        1: filter tensor (quint8)
-        2: input min (float)
-        3: input max (float)
-        4: filter min (float)
-        5: filter max (float)
-        6: Stride shape (4d tensor, uses height and width to determine stride)
+        0: Input data (quint8 tensor)
+        1: Filter tensor (quint8 tensor)
+        2: Input min (float scalar)
+        3: Input max (float scalar)
+        4: Filter min (float scalar)
+        5: Filter max (float scalar)
+        6: Stride (shape tensor) 
     3 outputs:
-        0: output tensor (int32)
-        1: output min (float)
-        2: output max (float)
-    refer to: https://www.tensorflow.org/api_docs/python/tf/nn/depthwise_conv2d
+        0: Output data (qint32 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Given a 4D input tensor ('NHWC' or 'NCHW' data formats) and a filter tensor of shape 
+    [filter_h,filter_w,in_channels,channel_multiplier] containing in_channels convolutional filters 
+    of depth 1, depthwise_conv2d applies a different filter to each input channel(expanding from 1 
+    channel to channel_multiplier channels for each), then concatenates the results together. 
+    Stride - an 4d tensor, uses height and width to determine stride
+    Output data - in_channels * channel_multiplier channels.
 
 
 QuantizedClamp_8:
     5 inputs:
-        0: input tensor (quint8)
-        1: input min (float)
-        2: input max (float)
-        3: clamped min (float)
-        4: clamped max (float)
+        0: Input data (quint8 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+        3: Clamped min (float scalar)
+        4: Clamped max (float scalar)
     3 outputs:
-        0: output tensor (quint8)
-        1: output max (float)
-        2: output min (float)
-    Clamp quantized tensor to a new range.
-    refer to: https://www.tensorflow.org/api_docs/python/tf/clip_by_value
-
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Clamp quantized tensor to a new range. Any values less than clip_value_min are set to 
+    clip_value_min. Any values greater than clip_value_max are set to clip_value_max.
 
 QuantizedInstanceNormBG_8:
     10 inputs:
-        0: input tensor (quint8)
-        1: input min (float)
-        2: input max (float)
-        3: epsilon (scalar float)
-        4: gamma tensor (quint8)
-        5: gamma min (float)
-        6: gamma max (float)
-        7: beta tensor (quint8)
-        8: beta min (float)
-        9: beta max (float)
+        0: Input data (quint8 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+        3: Epsilon (float scalar)
+        4: Gamma (quint8 tensor)
+        5: Gamma min (float scalar)
+        6: Gamma max (float scalar)
+        7: Beta (quint8 tensor)
+        8: Beta min (float scalar)
+        9: Beta max (float scalar)
     3 outputs:
-        0: output tensor (quint8)
-        1: output min (float)
-        2: output max (float)
-    refer to: https://caffe.berkeleyvision.org/tutorial/layers/batchnorm.html with use_global_stats=0
-    refer to: https://caffe2.ai/docs/operators-catalogue.html#instancenorm
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Applies instance normalization to the input tensor. The values in the output tensor are 
+    computed as: output[b,h,w,c] = input[b,h,w,c] - mean[b,c])*gamma/sqrt(var[b,c]+epsilon) + beta
+    Where the mean and variance are computed across the spatial dimensions: 
+    mean[b,c] = sum_{h,w}(input[b,h,w,c])/sum(1) 
+    var[b,c] = sum_{h,w}(pow(input[b,h,w,c] - mean[b,c],2))/sum(1)
 
 MultiClassNms_8:
-    Mobilenet ssd multi-class non max supression
-    Sort the boxes descendingly by the scores. Select the boxes based on the thresholds and max detections
     8 inputs:
-        0: input tensor of boxes coordinates (float)
-        1: input tensor of scores (quint8)
-        2: input scores min (float)
-        3: input scores max (float)
-        4: input tensor of score threshold (float)
-        5: input tensor of iou threshold (float)
-        6: input tensor of maximum number of detected boxes per class
-        7: input tensor of maximum number of total detected boxes
+        0: Input tensor of boxes coordinates (float tensor)
+        1: Input scores (quint8 tensor)
+        2: Input scores min (float scalar)
+        3: Input scores max (float scalar))
+        4: Score threshold (float scalar)
+        5: Iou threshold (float scalar)
+        6: Max number of detected boxes per class (int32 scalar)
+        7: Max number of total detected boxes (int32 scalar)
     5 outputs:
-        0: output tensor of boxes coordinates (float)
-        1: output tensor of scores (quint8)
-        2: output scores min (float)
-        3: output scores max (float)
-        4: output classes (float)
+        0: Output tensor of boxes coordinates (float tensor)
+        1: Output scores (quint8 tensor)
+        2: Output scores min (float scalar)
+        3: Output scores max (float scalar)
+        4: Output classes (float tensor)
+    Mobilenet ssd multi-class non max supression.
+    Sort the boxes descendingly by the scores. Select the boxes based on the thresholds and max 
+    detections.
 
 QuantizedMin_8:
+    6..8 inputs:
+        0: Input A data (quint8 tensor)
+        1: Input B data (quint8 tensor)
+        2: Input A min (float scalar)
+        3: Input A max (float scalar)
+        4: Input B min (float scalar)
+        5: Input B max (float scalar)
+        6: Output min (float scalar) (optional)
+        7: Output max (float scalar) (optional)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Computes the elementwise minimum of tensors A and B. The shapes of A and B must match or if
+    A or B has a dimension of size 1 then the minimum will be broadcast along that axis.
+
 QuantizedMax_8:
     6..8 inputs:
-        0: input A tensor (quint8)
-        1: input B tensor (quint8)
-        2: input A min (float)
-        3: input A max (float)
-        4: input B min (float)
-        5: input B max (float)
-        6: (optional) output min (float)
-        7: (optional) output max (float)
+        0: Input A data (quint8 tensor)
+        1: Input B data (quint8 tensor)
+        2: Input A min (float scalar)
+        3: Input A max (float scalar)
+        4: Input B min (float scalar)
+        5: Input B max (float scalar)
+        6: Output min (float scalar) (optional)
+        7: Output max (float scalar) (optional)
     3 outputs:
-        0: output tensor (quint8)
-        1: output min (float)
-        2: output max (float)
-    Computes the elementwise minimum of tensors A and B. The shapes of A and B must match or if
-    A or B has a dimension of size 1 then the minimum/maximum will be broadcast along that axis.
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Computes the elementwise maximum of tensors A and B. The shapes of A and B must match or if
+    A or B has a dimension of size 1 then the maximum will be broadcast along that axis.
 
 QuantizedSqrt_8:
     3 inputs:
-        0: input tensor (quint8)
-        1: input min (float)
-        2: input max (float)
+        0: Input data (quint8 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
     3 outputs:
-        0: output tensor (quint8)
-        1: output min (float)
-        2: output max (float)
-    Computes the square root of each element in the input tensor. To enforce the requirement that all
-    inputs be positive, input min must be greater than or equal to zero.
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Computes the square root of each element in the input tensor. To enforce the requirement that 
+    all inputs be positive, input min must be greater than or equal to zero.
 
+Box_Decoder_f:
+    3 inputs:
+        0: Box deltas (float tensor)
+        1: Anchor boxes (float tensor)
+        2: Scale factors (float tensor)
+    1 output:
+        0: Box dimensions (float tensor)
+    Restore box dimensions from anchor box dimensions based on delta and scale factor.
+
+QuantizedRecip_8:
+    3 inputs:
+        0: Input data (quint8 tensor)
+        1: Input min (float scalar)
+        1: Input max (float scalar)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Computes the reciprocal elementwise for quantized values.
+
+
+SsdDetectionOutput:
+	17 inputs:
+         	0: location tensor (quint8 tensor)
+		1: location min (float scalar)
+		2: location max (float scalar)
+		3: confidence tensor (quint8 tensor)
+		4: confidence min (float scalar)
+		5: confidence max (float scalar)
+		6: number of classes (int32 scalar)
+		7: share location (int32 scalar) 
+		8: background label id (int32 scalar)
+		9: nms threshold (float scalar)
+		10: nms top k (int32 scalar)
+		11: nms eta (float scalar)
+		12: code type (int32 scalar)
+				0 == CORNER
+				1 == CENTER_SIZE
+				2 == CORNER_SIZE
+		13: prior data (float scalar)
+		14: keep top k (int32 scalar)
+		15: variance encoded in target (int32 scalar)
+		16: confidence threshold (float scalar)
+	9 outputs:
+	    0: batch indices tensor (int32 tensor)
+	    1: number of classes (int32 tensor)
+	    2: confidence tensor (quint8 tensor)
+	    3: confidence min (float scalar)
+	    4: confidence max (float scalar)
+	    5: location xmin tensor (float tensor)
+	    6: location ymin tensor (float tensor)
+	    7: location xmax tensor (float tensor)
+	    8: location ymax tensor (float tensor)
+	If number of boxes output is less than the "keep top k" parameter above,the remainder of the output tensors will be
+	filled with zeros.To determine the number of valid outputs, scan outputs until an index i such that:
+	location xmin tensor[i] == location, xmax tensor[i] == location ymin tensor[i] == location 
+	ymax tensor[i] == 0 number of valid outputs = i - 1
+
+QuantizedChannelShuffle_8:
+    4 inputs:
+        0: number of groups (int32 scalar)
+        1: input data (quint8 tensor)
+        2: input min (float scalar)
+        3: input max (float scalar)     
+    3 outputs:
+        0: output data (quint8 tensor)
+        1: output min (float scalar)
+        2: output max (float scalar)
+    Given an input tensor and an integer value of num_groups, CHANNEL_SHUFFLE divide the channel 
+    dimension into num_groups groups, and reorganize the channels by grouping channels with the 
+    same index in each group.

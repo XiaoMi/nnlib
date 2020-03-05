@@ -554,6 +554,114 @@ static int close_execute_q_i16(struct nn_node *self, struct nn_graph *nn)
 	return 0;
 }
 
+static int close_execute_q_i32(struct nn_node *self, struct nn_graph *nn)
+{
+#ifdef TIMING_MODE
+	return 0;
+#endif
+	const struct tensor *dut = self->inputs[0];
+	const struct tensor *dut_min = self->inputs[1];
+	const struct tensor *dut_max = self->inputs[2];
+	const struct tensor *ref = self->inputs[3];
+	const struct tensor *ref_min = self->inputs[4];
+	const struct tensor *ref_max = self->inputs[5];
+	const struct tensor *error_ratio = (self->n_inputs == 7 && nn->loopstack.n == 0) || (self->n_inputs == 8 && nn->loopstack.n > 0)? self->inputs[self->n_inputs-1] : NULL;
+	float dut_min_float = tensor_get_float(dut_min,0);
+	float dut_max_float = tensor_get_float(dut_max,0);
+	float ref_min_float = tensor_get_float(ref_min,0);
+	float ref_max_float = tensor_get_float(ref_max,0);
+	float error_ratio_float = (NULL != error_ratio) ? tensor_get_float(error_ratio,0) : FUDGE_FACTOR;
+	float dut_range = (dut_max_float - dut_min_float);
+	float ref_range = (ref_max_float - ref_min_float);
+	float dut_stepsize = dut_range /  4294967295.0f;
+	float ref_stepsize = ref_range /  4294967295.0f;
+	float max_error_ratio = 0.0;
+	float curr_error_ratio = 0.0;
+	const int32_t *dutdata = dut->data;
+	const int32_t *refdata = ref->data;
+	float dutval,refval;
+	int count = dut->data_size / sizeof(int32_t);
+	int i;
+	int max_error_idx = 0;
+	uint32_t offset = 0;
+	int32_t offset_index;
+
+	logmsg(nn,2,"close q execute. self=%p ",self);
+	if(nn->loopstack.n == 0){
+		CHECK(shape.batches);
+		CHECK(shape.height);
+		CHECK(shape.width);
+		CHECK(shape.depth);
+		CHECK(data_size);
+	}
+	else{
+		offset_index = tensor_get_int32(self->inputs[self->n_inputs-2],0);
+		offset = nn_loopstack_get_offset(nn, offset_index);
+		CHECK_LE(shape.batches);
+		CHECK_LE(shape.height);
+		CHECK_LE(shape.width);
+		CHECK_LE(shape.depth);
+		CHECK_LE_WITH_OFFSET(data_size);
+	}
+
+	logmsg(nn,2,"Closeness checking... dut min/max: %f/%f ref min/max: %f/%f",
+		dut_min_float,dut_max_float,ref_min_float,ref_max_float);
+	for (i = 0; i < count; i++) {
+		dutval = dutdata[i] * dut_stepsize ;
+		refval = refdata[i+offset] * ref_stepsize;
+		curr_error_ratio = fabsf((dutval-refval)/ref_range);
+
+		if (curr_error_ratio > error_ratio_float) {
+			logmsg(nn,2,"%d, h/w/d=%d/%d/%d dut=%f ref=%f",
+				i,
+				i/(dut->shape.depth*dut->shape.width),
+				(i/dut->shape.depth)%dut->shape.width,
+				i%(dut->shape.depth),
+				dutval,
+				refval);
+		} else if (max_error_ratio > error_ratio_float) {
+			logmsg(nn,9,"%d, h/w/d=%d/%d/%d dut=%f ref=%f",
+				i,
+				i/(dut->shape.depth*dut->shape.width),
+				(i/dut->shape.depth)%dut->shape.width,
+				i%(dut->shape.depth),
+				dutval,
+				refval);
+		}
+		if (curr_error_ratio > max_error_ratio) {
+			max_error_ratio = curr_error_ratio;
+			max_error_idx = i;
+		}
+
+	}
+	if (max_error_ratio > error_ratio_float) {
+		errlog(nn, "max error ratio / test error ratio = %f/%f, max error index %d count %d",
+			max_error_ratio,
+			error_ratio_float,
+			max_error_idx,
+			count);
+		errlog(nn, "dut min/max = %f/%f ref min/max = %f/%f",
+			dut_min_float,
+			dut_max_float,
+			ref_min_float,
+			ref_max_float);
+		errlog(nn, "dut q/f = %d/%f ref q/f = %d/%f",
+			dutdata[max_error_idx],
+			dutdata[max_error_idx] * dut_stepsize + dut_min_float,
+			refdata[max_error_idx],
+			refdata[max_error_idx] * ref_stepsize + ref_min_float);
+		return errlog(nn,"data mismatch");
+	}
+	
+	if(nn->loopstack.n > 0)
+	{
+		nn_loopstack_increment_offset(nn, offset_index, count);
+	}
+	
+	logmsg(nn,2,"close qi32 node %p OK",self);
+	return 0;
+}
+
 static int close_execute_q_u16(struct nn_node *self, struct nn_graph *nn)
 {
 #ifdef TIMING_MODE
@@ -715,6 +823,15 @@ struct nn_node_ops nn_ops_for_Close_quint16 = {
 
 struct nn_node_ops nn_ops_for_Close_q_quint8 = {
 	.execute = close_execute_q_u8,
+	.check = NULL,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT_RANGE(6,8),
+	.n_outputs = NN_IOCOUNT(0),
+};
+
+struct nn_node_ops nn_ops_for_Close_q_qint32 = {
+	.execute = close_execute_q_i32,
 	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,

@@ -85,16 +85,19 @@
 
 //** start of farmhash::Fingerprint64 from "thirdparty/libtextclassifier/utils/hash/farmhash"
 
-// assume 4 bytes aligned access, hexagon is small endian
-// ported 64 bits version (Fetch64), need to fetch from 2 locations in case of 4 bytes rolling access
+// hexagon is small endian: copy 8 bytes
 static inline uint64_t
 Fetch(const char * x) {
-	return ((((uint64_t) *((uint32_t *) (x+4))) << 32) + ((uint64_t) *((uint32_t *) (x))));
+	uint64_t result = 0;
+	memcpy(&result, x, 8);
+	return result;
 }
-// fetch just reads
+// hexagon is small endian: copy 4 bytes
 static inline uint64_t
 Fetch32(const char * x) {
-	return (*((uint32_t *)(x)));
+	uint64_t result = 0;
+	memcpy(&result, x, 4);
+	return result;
 }
 // ported 64 bits version (BasicRotate64)
 static inline uint64_t

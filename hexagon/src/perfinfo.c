@@ -121,7 +121,6 @@ int do_perfinfo_get(struct nn_graph *nn, struct perfinfo *info, uint32_t info_le
 		if (i >= info_len) return -1;
 		if( node->node_type != OP_Const){
 			info[i].node_id = node->node_id;
-			info[i].node_type = node->node_type;
 			info[i].executions = node->executions;
 			info[i].counter = node->perfcounter;
 			i++;

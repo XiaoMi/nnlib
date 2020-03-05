@@ -150,6 +150,8 @@ static void transpose_thread_deal2( struct nn_graph *nn , void *rstpv );
 
 static void transpose_thread_bulktranspose( struct nn_graph *nn , void *rstpv );
 
+static void transpose_thread_shuf2_6b( struct nn_graph *nn , void *rstpv );
+
 typedef void (*nn_stride_scalar_copy_fp)(uint8_t * outp, uint8_t const *inp, int h, int w, int hsi, int wsi, int hso, int wso);
 
 
@@ -409,6 +411,12 @@ int nn_transpose_analyze_direct( struct nn_transpose_desc * tdp,
 			if(dsize <= 64 && h == 2 && w*dsize >= 128){
 				tdp->execute_fp = transpose_execute_HVXFUNC;
 				tdp->funcp = transpose_thread_deal2;
+				return 0;
+			}
+		}else if( dsize == 6 ){	// special case: [N,2,k*64,6] -> [N,k*64,2,6] is supported
+			if( w==2 && h>=4 ){	// can use it.
+				tdp->execute_fp =transpose_execute_HVXFUNC;
+				tdp->funcp = transpose_thread_shuf2_6b;
 				return 0;
 			}
 		}
@@ -1307,6 +1315,261 @@ transpose_thread_A8xB8x16( struct nn_graph *nn , void *rstpv )
 			}
 			input += group_stride;
 			output += group_stride;
+		}
+	}
+	if(nn!=NULL)
+		nn_sem_post(&rstp->done_sem);
+}
+
+////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////
+// code to support [N,2,64*K,6] -> [N,64*K,2,6]
+// (this should also support 3 or 12 etc instead of 6, mostly by changing the tables?)
+/////////
+// These tables are used to interleave 6-byte elements from 2 vectors:
+
+//   v0, v1 each contain 21 * {6}  followed by 2 garbage bytes
+//   desired result: out1:out0 contains 21 x { 6, 6 }  followed by 4 garbage bytes
+//
+//   v1r = vdelta(v1, vsplat(-1))
+//   v1x:v0x = vswap( vsetq(66), v0, v1r)
+//   out0 = vdelta( v0x, shuff2_64_6b_consts[0])
+//   out1 = vdelta( v1x, shuff2_64_6b_consts[1])
+//
+//  For a right-justified operation (same, but the garbage bytes are at the start of the
+//  input regs, and the start of the output reg), the operation is the the same but table
+//  entries [2], [3] are used instead of [0],[1]
+//
+
+
+static const uint8_t shuff2_64_6b_consts[4][128] __attribute__((aligned(128))) = {
+{ // vdelta for first output of 'left-justified' shuffle
+0x00,0x00,0x00,0x00,0x00,0x00,0x09,0x09,0x05,0x05,0x11,0x11,0x16,0x16,0x1A,0x1A,
+0x0A,0x0A,0x2B,0x2B,0x23,0x23,0x23,0x23,0x2C,0x2C,0x3C,0x3C,0x34,0x34,0x35,0x35,
+0x11,0x11,0x55,0x55,0x52,0x52,0x5E,0x5E,0x46,0x46,0x47,0x47,0x47,0x47,0x4F,0x4F,
+0x58,0x58,0x78,0x78,0x78,0x78,0x71,0x71,0x6D,0x6D,0x69,0x69,0x6E,0x6E,0x62,0x62,
+0x22,0x22,0x23,0x23,0x2B,0x2B,0x2B,0x2B,0x24,0x24,0x34,0x34,0x3C,0x3C,0x3D,0x3D,
+0x09,0x09,0x0D,0x0D,0x0A,0x0A,0x06,0x06,0x0E,0x0E,0x1F,0x1F,0x1F,0x1F,0x17,0x17,
+0x30,0x30,0x70,0x70,0x70,0x70,0x79,0x79,0x75,0x75,0x61,0x61,0x66,0x66,0x6A,0x6A,
+0x5A,0x5A,0x5B,0x5B,0x53,0x53,0x53,0x53,0x5C,0x5C,0x4C,0x4C,0x44,0x44,0x45,0x45},
+{ // vdelta for second output
+0x41,0x41,0x45,0x45,0x42,0x42,0x4E,0x4E,0x56,0x56,0x57,0x57,0x57,0x57,0x5F,0x5F,
+0x48,0x48,0x68,0x68,0x68,0x68,0x61,0x61,0x7D,0x7D,0x79,0x79,0x7E,0x7E,0x72,0x72,
+0x12,0x12,0x13,0x13,0x1B,0x1B,0x1B,0x1B,0x14,0x14,0x04,0x04,0x0C,0x0C,0x0D,0x0D,
+0x19,0x19,0x3D,0x3D,0x3A,0x3A,0x36,0x36,0x3E,0x3E,0x2F,0x2F,0x2F,0x2F,0x27,0x27,
+0x60,0x60,0x60,0x60,0x60,0x60,0x69,0x69,0x65,0x65,0x71,0x71,0x76,0x76,0x7A,0x7A,
+0x6A,0x6A,0x4B,0x4B,0x43,0x43,0x43,0x43,0x4C,0x4C,0x5C,0x5C,0x54,0x54,0x55,0x55,
+0x31,0x31,0x35,0x35,0x32,0x32,0x3E,0x3E,0x26,0x26,0x27,0x27,0x27,0x27,0x2F,0x2F,
+0x38,0x38,0x18,0x18,0x18,0x18,0x11,0x11,0x0D,0x0D,0x09,0x09,0x0E,0x0E,0x03,0x03},
+
+{// vdelta for first output of 'left-justified' shuffle
+0x00,0x00,0x05,0x05,0x02,0x02,0x0E,0x0E,0x16,0x16,0x17,0x17,0x17,0x17,0x1F,0x1F,
+0x08,0x08,0x28,0x28,0x28,0x28,0x21,0x21,0x3D,0x3D,0x39,0x39,0x3E,0x3E,0x32,0x32,
+0x52,0x52,0x53,0x53,0x5B,0x5B,0x5B,0x5B,0x54,0x54,0x44,0x44,0x4C,0x4C,0x4D,0x4D,
+0x59,0x59,0x7D,0x7D,0x7A,0x7A,0x76,0x76,0x7E,0x7E,0x6F,0x6F,0x6F,0x6F,0x67,0x67,
+0x20,0x20,0x20,0x20,0x20,0x20,0x29,0x29,0x25,0x25,0x31,0x31,0x36,0x36,0x3A,0x3A,
+0x2A,0x2A,0x0B,0x0B,0x03,0x03,0x03,0x03,0x0C,0x0C,0x1C,0x1C,0x14,0x14,0x15,0x15,
+0x71,0x71,0x75,0x75,0x72,0x72,0x7E,0x7E,0x66,0x66,0x67,0x67,0x67,0x67,0x6F,0x6F,
+0x78,0x78,0x58,0x58,0x58,0x58,0x51,0x51,0x4D,0x4D,0x49,0x49,0x4E,0x4E,0x42,0x42},
+{ // vdelta for second output
+0x42,0x42,0x43,0x43,0x4B,0x4B,0x4B,0x4B,0x44,0x44,0x54,0x54,0x5C,0x5C,0x5D,0x5D,
+0x69,0x69,0x6D,0x6D,0x6A,0x6A,0x66,0x66,0x6E,0x6E,0x7F,0x7F,0x7F,0x7F,0x77,0x77,
+0x50,0x50,0x10,0x10,0x10,0x10,0x19,0x19,0x15,0x15,0x01,0x01,0x06,0x06,0x0A,0x0A,
+0x3A,0x3A,0x3B,0x3B,0x33,0x33,0x33,0x33,0x3C,0x3C,0x2C,0x2C,0x24,0x24,0x25,0x25,
+0x61,0x61,0x65,0x65,0x62,0x62,0x6E,0x6E,0x76,0x76,0x77,0x77,0x77,0x77,0x7F,0x7F,
+0x68,0x68,0x48,0x48,0x48,0x48,0x41,0x41,0x5D,0x5D,0x59,0x59,0x5E,0x5E,0x52,0x52,
+0x72,0x72,0x33,0x33,0x3B,0x3B,0x3B,0x3B,0x34,0x34,0x24,0x24,0x2C,0x2C,0x2D,0x2D,
+0x39,0x39,0x1D,0x1D,0x1A,0x1A,0x16,0x16,0x1E,0x1E,0x0F,0x0F,0x0F,0x0F,0x07,0x07},
+};
+
+
+// Interleave 6-byte elements.
+// This operation is given two vectors, each with N x 6byte , N can be up to 21.
+// (last 128-6*N bytes in each vare don't-care).
+// We shuffle these into N x 2 x 6, which are packed into the two return
+// vectors (last 256-12*N are garbage)
+//
+// if 'rjust' is 1, the operation is the same, but the garbage bytes are at the start
+// of each register instead of the end.
+
+static inline HVX_VectorPair shuff_16_6b( HVX_Vector va, HVX_Vector vb , int rjust)
+{
+	HVX_Vector vrdctl_flip = Q6_V_vsplat_R(-1);
+
+	HVX_Vector vdctl_0 = *(HVX_Vector const*) shuff2_64_6b_consts[rjust?2:0];
+	HVX_Vector vdctl_1 = *(HVX_Vector const*) shuff2_64_6b_consts[rjust?3:1];
+	//
+	// reverse the second vector; swap them in lanes 66..127
+	//
+	HVX_VectorPair vtmp = Q6_W_vswap_QVV( Q6_Q_vsetq_R(66), va, Q6_V_vrdelta_VV(vb,vrdctl_flip) );
+
+	// apply deltas
+	return Q6_W_vcombine_VV(
+			Q6_V_vdelta_VV( Q6_V_hi_W(vtmp), vdctl_1),
+			Q6_V_vdelta_VV( Q6_V_lo_W(vtmp), vdctl_0));
+
+}
+
+
+// inner operation:
+// input represents an array [2,64,6] of bytes; split into two sets of 3 vectors.
+// output is [64,2,6] of the same data, in 6 contiguous vectors
+// I.e. we are shuffling 2 arrays, each of 64 6-byte elements.
+//
+// The result is generated in chunks, each [16,2,6]; each chunk occupies 1-1/2 vectors,
+// so we need to splice them together with 'mux' operations, and this is why we
+// have two modes of the inner shuffle: left justifed for res0, res2, and right-justified for res1, res3
+// The 6 output vectors are formed from the 4 results as below:
+//
+//  0000000000000000
+//  0000000011111111	# spliced from second word of res0, first of res1
+//  1111111111111111
+//  2222222222222222
+//  2222222233333333    # spliced from second word of res2, rfirst of res3
+/// 3333333333333333
+
+static inline void  __attribute__((unused)) shuff2_64_6b(
+    HVX_Vector * pout,        // points to 6 output vecs
+    HVX_Vector const *pin0,     // first 3 input vectors
+    HVX_Vector const *pin1 )    // second 3 input vectors
+{
+    HVX_Vector v0 = pin0[0];
+    HVX_Vector v3 = pin1[0];
+    HVX_VectorPair res0 = shuff_16_6b( v0, v3, 0 );
+    pout[0] = Q6_V_lo_W(res0);      // first vector result
+    HVX_Vector v1 = pin0[1];        // get next vector
+    HVX_Vector v4 = pin1[1];
+    HVX_VectorPair res1 = shuff_16_6b( Q6_V_valign_VVR(v1,v0,64), Q6_V_valign_VVR(v4,v3,64), 1 );
+
+    HVX_Vector v2 = pin0[2];        // get next vector
+    HVX_Vector v5 = pin1[2];
+
+    // second and third vector results.
+    pout[1] = Q6_V_vmux_QVV( Q6_Q_vsetq_R(64), Q6_V_hi_W(res0), Q6_V_lo_W(res1));
+    pout[2] = Q6_V_hi_W(res1);
+
+    HVX_VectorPair res2 = shuff_16_6b( Q6_V_valign_VVR(v2,v1,64), Q6_V_valign_VVR(v5,v4,64), 0 );
+    pout[3] = Q6_V_lo_W(res2);      // first vector result
+
+    HVX_VectorPair res3 = shuff_16_6b( v2, v5, 1 );
+    // final vector results.
+    pout[4] = Q6_V_vmux_QVV( Q6_Q_vsetq_R(64), Q6_V_hi_W(res2), Q6_V_lo_W(res3));
+    pout[5] = Q6_V_hi_W(res3);
+}
+
+//
+//  cases [ b, 2, h, 6] -> [ b, h, 2, 6]
+//
+//
+//  3 row table looks like this:
+//     0:    6     1       1
+//     1     2     6      h*6
+//     2     h    12       6
+//
+//        n_outer 12*h    12*h  <- row removed to 'outer'
+//
+// if h is a multiple of 64, we have an 'aligned' loop which processes 64 at a time
+// Otherwise, we process 21 at a time using unaligned operations.
+//
+//
+static void
+transpose_thread_shuf2_6b( struct nn_graph *nn , void *rstpv )
+{
+	struct transpose_hvx_runstate *rstp = (struct transpose_hvx_runstate*) rstpv;
+	struct nn_transpose_desc const * tdp = rstp->tdp;
+
+	const int d = 6;
+	const unsigned pervec = 128/d;
+
+	int h =  tdp->table[2].n;
+	int group_stride = d*2*h;
+
+	int is_aligned = (h&63)==0;
+	int inner_loops;
+	int remnant = 0;
+
+	if( is_aligned){
+		inner_loops = h/64u;	// each loop processes 64, in 4 sets of 16.
+	}else{
+		// unaligned case:
+		// Each inner loop processes 'pervec' (21) of h
+		// So it reads 2 vectors each with 21*6 = 126; interleaves them,
+		// and the result is 21*2*6 = 252 = 128+124
+		// Normally this is stored using 2 unaligned stores; the extra 4
+		// garbage bytes in the second vector
+		// are overwritten on the next loop. The 'remnant'
+		// is handled outside the loop, using masked store.
+		// If h is an exact multiple, we need to break out a full 21 as
+		// the 'remnant' to avoid having those extra bytes possibly
+		// corrupting the output of another thread.
+
+		inner_loops = (h-1)/pervec;		// >= 0
+		remnant = h-pervec*inner_loops;	// 1..pervec
+	}
+
+	int in_stride = tdp->table[1].in_stride;	// k*384
+
+	int njobs = tdp->n_outer;
+	int outer_chunk = rstp->n_outer_chunk;
+	uint8_t const * input0 = rstp->input;
+	int job0;
+	while( job0 = __sync_fetch_and_add( &rstp->job_index,outer_chunk),   job0 < njobs ){
+		int job1 = min_i32( job0 + outer_chunk, njobs);
+
+		// do jobs job0 ... job1-1
+		uint8_t const * input = input0 + group_stride * job0;
+		unsigned npf = ((job1-job0)*group_stride+127)/128u;
+		l2fetch(input,128,128,npf);
+		uint8_t * output = rstp->output + group_stride * job0;
+		if( is_aligned){
+			for( int ih = 0; ih < job1-job0; ih++ ){
+				uint8_t const * inp = input;
+				uint8_t  * outp = output;
+				for( int iv = 0; iv < inner_loops; iv++){
+					shuff2_64_6b( (HVX_Vector*)(outp),
+								(HVX_Vector const*)( inp),
+								(HVX_Vector const*)( inp+in_stride));
+					inp += 6*64;
+					outp += 12*64;
+				}
+				input += group_stride;
+				output += group_stride;
+			}
+		}else{ // unaligned case
+			for( int ih = 0; ih < job1-job0; ih++ ){
+				uint8_t const * inp = input;
+				uint8_t  * outp = output;
+
+				HVX_Vector v0 = q6op_V_vldu_A( (HVX_Vector const*) inp);
+				HVX_Vector v1 = q6op_V_vldu_A( (HVX_Vector const*)( inp+in_stride));
+				inp += d*pervec;
+				for( int iv = 0; iv < inner_loops; iv++){
+					HVX_VectorPair shuf = shuff_16_6b(v0,v1,0);
+					v0 = q6op_V_vldu_A( (HVX_Vector const*) inp);
+					v1 = q6op_V_vldu_A( (HVX_Vector const*)( inp+in_stride));
+					inp += d*pervec;
+					q6op_vstu_AV((HVX_Vector *)outp,   Q6_V_lo_W(shuf));	// first 128 bytes
+					q6op_vstu_AV((HVX_Vector *)outp+1, Q6_V_hi_W(shuf));    // 124 + 4 garbage
+					outp += 2*d*pervec;
+				}
+				// read remnant*d, store remnant*6*2
+				{
+					HVX_VectorPair shuf = shuff_16_6b(v0,v1,0);
+					unsigned rembytes = remnant*d*2;	// 12..252
+					HVX_Vector vout = Q6_V_lo_W(shuf);
+					if( rembytes >128){
+						q6op_vstu_AV((HVX_Vector *)outp,  vout);	// first 128 bytes
+						vout = Q6_V_hi_W(shuf);
+						outp += 128;
+						rembytes -= 128;	// 4 ..124
+					}
+					// store rembytes at outp
+					q6op_vstu_variable_ARV(outp, rembytes,vout);
+				}
+				input += group_stride;
+				output += group_stride;
+			}
+
 		}
 	}
 	if(nn!=NULL)

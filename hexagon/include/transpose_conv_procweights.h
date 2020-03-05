@@ -48,7 +48,11 @@ struct transpose_conv_filter_parms {
   uint8_t *out_data;
   uint32_t zero_offset;      			// byte to fill when padding
   uint32_t data_size;
+  uint32_t groups;
   nn_sem_t done_sem;
+  uint32_t use_subkerneling;
+  uint32_t use_depthwise;
+  uint32_t chmul;
 };
 
 static inline uint32_t roundup(uint32_t numToRound, uint32_t multiple)

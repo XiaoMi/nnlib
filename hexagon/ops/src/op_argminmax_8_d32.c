@@ -45,8 +45,15 @@
 
 #include <stdlib.h>
 #include <nn_graph.h>
+#include <quantize.h>
 #include "nn_gentranspose.h"
 #include "nn_axis.h"
+
+#ifdef HEXAGON_V66
+#define ARGMAX_MAX_THREADS 4
+#else
+#define ARGMAX_MAX_THREADS 2
+#endif
 
 #define OP_ARGMINMAX_INPUT_NUM 4
 #define OP_ARGMINMAX_OUTPUT_NUM 1
@@ -68,6 +75,8 @@ struct argminmax_8_d32_info {
     struct tensor const * in_data_tensor;
     int32_t axis;
     int32_t find_max; //0 - find argmin; 1 - find argmax
+    int threads_num;
+    int thread_id;
 };
 
 static void find_argminmax_8_d32(struct nn_graph *nn,  void * rstpv) {
@@ -79,9 +88,11 @@ static void find_argminmax_8_d32(struct nn_graph *nn,  void * rstpv) {
     int32_t * out_data = info->out_data;
     int32_t find_max = info->find_max;
     int32_t  axis = info->axis;
+    int threads_num = info->threads_num;
+    int thread_id = info->thread_id;
 
     if( AXIS_DEPTH_IDX == axis ) {
-        hvx_argmin_or_max_d_8_d32(in_data_tensor, out_data, find_max);
+        hvx_argmin_or_max_d_8_d32_mt(in_data_tensor, out_data, find_max, threads_num, thread_id);
     }else {
         hvx_argmin_or_max_whb_8_d32(in_data_tensor,  out_data, axis, find_max);
     }
@@ -107,18 +118,41 @@ static int argminmax_8_d32_execute(struct nn_node *self, struct nn_graph *nn, in
 
     if (tensor_out_prepare_normal_fromshape(out_data_tensor, &outshape, NN_TYPE_INT32) !=0) return errlog(nn,"argminmax_8_d32 out too small");
 
-    struct argminmax_8_d32_info info;
-    info.out_data = out_data;
-    info.in_data_tensor = in_data_tensor;
-    info.find_max = find_max;
-    info.axis = in_axis;
+    struct argminmax_8_d32_info info[ARGMAX_MAX_THREADS];
+    struct argminmax_8_d32_runstate rst[ARGMAX_MAX_THREADS];
+    int threads_num = 1; // single thread by default
 
-    struct argminmax_8_d32_runstate rst;
-    rst.info = &info;
+    if (AXIS_DEPTH_IDX == in_axis) {
+        // Enabled multi-thread for argmax on depth
+        int dim_b = in_data_tensor->shape.batches;
+        int dim_w = in_data_tensor->shape.width;
+        int dim_h = in_data_tensor->shape.height;
 
-    nn_sem_init( &rst.done_sem, 0);
-    nn_os_work_for_vector(nn,  find_argminmax_8_d32, &rst );
-    nn_sem_wait( & rst.done_sem);
+        int dim_w_aligned = (dim_w+3) & ~0x03; //round up dim_w to multiple of 4
+        int rows = dim_b * dim_h * dim_w_aligned; //number of rows with paddings
+
+        threads_num = min_i32(rows/8, ARGMAX_MAX_THREADS);
+        if (threads_num < 1) {
+            threads_num = 1;
+        }
+    }
+
+    for(int i = 0; i < threads_num; i++) {
+        info[i].out_data = out_data;
+        info[i].in_data_tensor = in_data_tensor;
+        info[i].find_max = find_max;
+        info[i].axis = in_axis;
+        info[i].threads_num = threads_num;
+        info[i].thread_id = i;
+
+        rst[i].info = &info[i];
+        nn_sem_init(&rst[i].done_sem, 0);
+        nn_os_work_for_vector(nn, find_argminmax_8_d32, &rst[i]);
+    }
+
+    for(int i = 0; i < threads_num; i++) {
+        nn_sem_wait(&rst[i].done_sem);
+    }
 
     return 0;
 }

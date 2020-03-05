@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -385,6 +385,16 @@ static inline int32_t fast_roundf(float f)
 	return roundf(f);
 #endif
 }
+
+static inline int64_t fast_i64_roundf(float f)
+{
+#if defined(__hexagon__)
+       return Q6_P_convert_sf2d_R (f);
+#else
+       return roundf(f);
+#endif
+}
+
 
 void gvmsumimw_asm(
 	const uint8_t * x, 
@@ -1379,7 +1389,8 @@ void fullconnlayerbatch_asm(
         int32_t        fixed_recip_level_size,  //reciprocal of max for quatnization
         const int32_t *  biasadd,
         int32_t       *  batch_sum,
-        int32_t          weight_offset
+        int32_t          weight_offset,
+        int32_t          recip_shamt
 );
 void fullconnlayerbatch1_asm(
         const uint8_t *  ptr_in_batches,
@@ -1391,7 +1402,8 @@ void fullconnlayerbatch1_asm(
         int32_t        fixed_recip_level_size,  //reciprocal of max for quatnization
         const int32_t *  biasadd,
         int32_t       *  batch_sum,
-        int32_t          weight_offset
+        int32_t          weight_offset,
+        int32_t          recip_shamt
 );
 
 

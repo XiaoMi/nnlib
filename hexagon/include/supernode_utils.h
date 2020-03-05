@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -37,6 +37,7 @@
 #define SUPERNODE_UTILS_H 1
 
 #include <nn_graph.h>
+#include <limits.h>
 #include <string.h>
 #include <quantize.h>
 #include <stdlib.h>
@@ -674,7 +675,7 @@ static void supernode_execute_zap_left(struct nn_graph *nn, void * vinfo)
 	int i;
 	logmsg(nn,2,"zapping left: %d*%d bytes @ %p rl_depths=%d next_d32=%d next_row=%d val=%d height=%d",work->zap_batches,32*work->zap_left_size,rowstart,work->zap_rl_depths,in_next_d32,in_next_row,val,work->zap_height);
 	for (i = 0; i < n_batches; i++) {
-		padzap_part(rowstart,val,in_next_d32,work->zap_rl_depths,in_next_row,work->zap_height+2,work->zap_left_size);
+		padzap_part(rowstart,val,in_next_d32,work->zap_rl_depths,in_next_row,work->zap_height,work->zap_left_size);
 		rowstart += batch_stride;
 	}
 	if (work->zap_checkpoint) nn_checkpoint_arrival(nn,work->self,work->zap_checkpoint);
@@ -1227,8 +1228,8 @@ static int fill_bias_buf(
 	float bias_fval;
 	float minout_bias_fval;
 	int32_t gemsumb_val;
-	int32_t final;
-  
+	int64_t final;
+
 	logmsg(nn,3,"in_offset=%f bias_levelsize=%f prod_level_size=%f ratio=%f",info->in_offset,bias_level_size,info->prod_level_size,bias_to_prod_ratio);
 
 	int per_chan_scaling = info->has_channel_scale || info->has_weight_scale;
@@ -1243,7 +1244,10 @@ static int fill_bias_buf(
 			minout_bias_fval *= info->k_factor_recip[i];
 		}
 		gemsumb_val = info->gemsumb[i];
-		final = fast_roundf(minout_bias_fval - (float)gemsumb_val * info->in_offset) + extra;
+		final = fast_i64_roundf(minout_bias_fval - gemsumb_val * info->in_offset) + extra;
+		if ( (int32_t)final != final){
+			return errlog(nn, "Final too big, will cause overflow.");
+		}
 		logmsg(nn,3,"i=%d biasval%d=%d fval=%f minout_fval=%f gemsumb_val=%d extra=%d final=%d",
 			i,bias32?32:8,biasval,bias_fval,minout_bias_fval,gemsumb_val,extra,final);
 		info->biasbuf[i] = final;
@@ -1325,7 +1329,7 @@ check_channelscale_present(struct nn_graph *nn, struct nn_node *self, int filt_b
 
 //
 // load the channel scales from float tensor into k_factor
-// As coded this allow values in range 1/32 .. 1.0.
+// As coded this allow values in range 1/2048 .. 1.0.
 // any 'padded' values are set to  of 1.0
 // it also sets info->has_channel_scale = 1
 //
@@ -1349,7 +1353,7 @@ load_channel_scales(struct nn_graph *nn,struct supernode_info_new *info,
 	int out_depth_roundup = (out_depth + 31) & ~31;
 	for( int i =0; i < out_depth; i++){
 		float scval = channel_scale_flts[i];
-		if( !( scval <= 1.0f && scval >= (float)(1./32.))){
+		if( !( scval <= 1.0f && scval >= (float)(1./2048.))){
 			return errlog(nn,"bad channel scale[%d]= %.8f",i,scval);
 		}
 		outp[i] = scval;
@@ -1457,7 +1461,7 @@ supernode_check_error_return (struct nn_graph *nn, struct supernode_info_new *in
 // The original spec is saved in out_minval_spec, out_maxval_spec; this is so, if it is necessary
 // to tweak a 'fixed' endpoint, it may be restored to its original spec before the range is adjusted again.
 //
-// It is assumed that minval_default <=0, maxval_default >=1/128
+// It is assumed that minval_default <=0
 // But the range need not be 'proper'.
 //
 static int
@@ -1468,11 +1472,8 @@ setup_initial_output_range( struct nn_graph *nn, struct supernode_info_new *info
 	float maxval_default )			// use when specified_maxval = INF
 {
 	// enforce sanity:  min <= 0.0 <= max
-	// and max > min + 1/128
-	//
-	specified_minval = fminf( specified_minval, 0.0f);
-	specified_maxval = fmaxf( fmaxf( specified_maxval, 0.f),
-					 specified_minval + 0x1.0p-7f);
+	if( specified_minval > 0.0f || specified_maxval < 0.0f || specified_minval >= specified_maxval )
+		return errlog(nn, "supernode: invalid input min/max");
 
 	info->out_minval_spec = specified_minval;
 	info->out_maxval_spec = specified_maxval;
@@ -1499,5 +1500,16 @@ setup_initial_output_range( struct nn_graph *nn, struct supernode_info_new *info
 		adjust_minmax_for_zero_with_constraints( &info->out_minval, &info->out_maxval, corr_code);
 	}
     return 0;
+}
+
+// Invalidate the cache where the weights are stored to force scalar code to read correct weights
+static inline void supernode_cleaninv_weights(uint8_t *weights, int size)
+{
+#if defined(V66) && defined(__hexagon__)
+	int i;
+	for (i = 0; i < (size+63); i += 64) {
+		asm volatile ("dccleaninva(%0)" : :"r"(weights+i));
+	}
+#endif
 }
 #endif //SUPERNODE_UTILS_H

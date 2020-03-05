@@ -66,6 +66,7 @@ fullconnlayerbatch_asm:
 #define  bias_adjust   r7       //typically sum of bias and sum of weights
 #define  actns_adjust  r8       //used toadjust the product
 #define  woffset       r26      //the byte offset from weight position
+#define  recip_shift   r6       //shift for accumulator if outputs larger
 
 #define  batch_cnt     r9       //number of batches to go
 #define  ptr_w         r7       //current ptr to weights matrix
@@ -119,6 +120,7 @@ fullconnlayerbatch_asm:
 #define  vpred         v0       //sum of vector predicates for cntrling output
 #define  wsum          v8       //bias values
 #define  recipvec      v9       //255/max quantized value
+#define  vshamt_vec    v14      //splat quantized shift values
 /* ----------------------------------------------------------------------- */
              {   allocframe(#56)                           //reserve stack
                  num_batches = lsr(num_batches, #1)        //itertn 2 batches per rounf
@@ -136,9 +138,13 @@ fullconnlayerbatch_asm:
                  n = add(n, #-1)                           //correct for pipeline
              } {
                  max0 = vmem(ptr_max+#0 )                  //
-		 loop0(.L_matmul32, n)                     //[P, ]]
+                 loop0(.L_matmul32, n)                     //[P, ]]
                  cntrl = #32                               //
                  ptr_x0 = memw(pptr_xi++#1<<2)             //[P,  ] 
+             } {
+                 recip_shift = memw(sp+#20<<2)             //
+             } {
+                 vshamt_vec = vsplat(recip_shift)          // 
              } {
                  ptr_x1 = memw(pptr_xi++#1<<2)             //[P,  ]
                  sel = ##0x01010101                        //
@@ -166,7 +172,6 @@ fullconnlayerbatch_asm:
              } {
                  woffset = memw(sp+#19<<2)                 //
                  max1_min1 = vcombine(max0,min0)           //
-                 //min1 = min0                               //
                  q1 = and(q0, !q1)                         //
                  dcfetch(ptr_x0+#0<<6)                     //[P,  ]
              } {
@@ -250,41 +255,43 @@ fullconnlayerbatch_asm:
                  out_ptr0 = add(out_ptr0, woffset)         //add the output weights offset
                  if(!p1) out_ptr1 = add(out_ptr1, woffset) //add the output weights offset if not NULL
                  p0 = cmp.eq(batch_cnt, #0)                //are all batches computed?
+                 sum00.w = vasl(sum00.w, vshamt_vec.w)
               } {
-                 max0.w = vmax(max0.w, sum00.w)            //[E,  ]update even max
-                 max1.w = vmax(max1.w, sum10.w)            //[E,  ]update odd max
+                 sum10.w = vasl(sum10.w, vshamt_vec.w)
+                 b0.w = vmpye(sum00.w, recipvec.uh)        //[E,  ]quantize
                  align0 = extractu(out_ptr0, #2, #5)       //xx00000
                  if(!p0) ptr_x0 = memw(pptr_xi++#1<<2)     //[P,  ]get next evwen batch 
               } {
-                 min0.w = vmin(min0.w, sum00.w)            //[E,  ]update even min
-                 min1.w = vmin(min1.w, sum10.w)            //[E,  ]update odd min
-                 b0.w = vmpye(sum00.w, recipvec.uh)        //[E,  ]quantize
+                 b0.w+= vmpyo(sum00.w, recipvec.h):RSS     //[E,  ]quantize
                  if(!p0) ptr_x1 = memw(pptr_xi++#1<<2)     //[P,  ]ptr to next patch
               } {
-	         loop0(.L_matmul32, n)                     //[P,  ]next batches
+                 loop0(.L_matmul32, n)                     //[P,  ]next batches
                  dcfetch(ptr_x0+#0<<6)                     //[P,  ]fetch next batch
                  align0 = lsl(#1, align0)                  //convert to power of 2
                  batch_cnt = add(batch_cnt, #-1)           //decrement batch count
               } {
-                 b0.w+= vmpyo(sum00.w, recipvec.h):RSS     //[E,  ]quantize
+                 min0.w = vmin(min0.w, b0.w)               //[E,  ]update even min
+                 b1.w = vmpye(sum10.w, recipvec.uh)        //[E,  ]quantize
                  dcfetch(ptr_x1+#0<<6)                     //[P,  ]1st fetch
                  align1 = extractu(out_ptr1, #2, #5)       //xx00000
               } {
-                 b1.w = vmpye(sum10.w, recipvec.uh)        //[E,  ]quantize
+                 b1.w+= vmpyo(sum10.w, recipvec.h):RSS     //[E,  ]quantize
                  align0 = vsplatb(align0)                  //create table lookup cntrls
                  fetch0 = add(ptr_x0, FETCH_INC)           //initialize fetcvh
                  fetch1 = ptr_x1                           //[P,  ]initialize fetcvh
               } {
+                 min1.w = vmin(min1.w, b1.w)               //[E,  ]update odd min
+                 max0.w = vmax(max0.w, b0.w)               //[E,  ]update even max
                  align1 = lsl(#1, align1)                  //convert to power of 2
-                 b0.h = vpack(b0.w, b0.w):sat             //[E,  ]#>>16
-                 b1.w+= vmpyo(sum10.w, recipvec.h):RSS     //[E,  ]quantize
+                 b0.h = vpack(b0.w, b0.w):sat              //[E,  ]#>>16
               } {
+                 max1.w = vmax(max1.w, b1.w)               //[E,  ]update odd max
                  b0.ub = vpack(b0.h, b0.h):sat             //[E,  ]16 to 8 sat
                  q0 = vand(vpred, align0)                  //access even alignment cntrl
                  align1 = vsplatb(align1)                  //create table lookup cntrls
               } {
                  if(q0) vmem(out_ptr0) = b0                //[E,  ]store and increment next batch
-                 b1.h = vpack(b1.w, b1.w):sat             //[E,  ]pack to hwords
+                 b1.h = vpack(b1.w, b1.w):sat              //[E,  ]pack to hwords
                  if(p1) align1 = #0 //sel                  //dont store
                  if(p1) max1_min1 = vcombine(max0,min0)    //if null ptr filter out max/min
               } {

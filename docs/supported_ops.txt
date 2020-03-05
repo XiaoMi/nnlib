@@ -1,0 +1,148 @@
+/*
+ * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted (subject to the limitations in the
+ * disclaimer below) provided that the following conditions are met:
+ *
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *
+ *    * Redistributions in binary form must reproduce the above
+ *      copyright notice, this list of conditions and the following
+ *      disclaimer in the documentation and/or other materials provided
+ *      with the distribution.
+ *
+ *    * Neither the name of The Linux Foundation nor the names of its
+ *      contributors may be used to endorse or promote products derived
+ *      from this software without specific prior written permission.
+ *
+ * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
+ * GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
+ * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+ * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+ * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ */
+
+
+The following is a list of Hexagon-NN ops that are officially supported.
+Header files that are provided with Hexagon-NN have  many other ops listed, however only ops in this file (supported_ops.txt) are officially supported at this time.   Users should not append any ops other than those listed here.
+
+
+ArgMax_8toInt32
+ArgMin_8
+AutoQuantize
+AxisAlignedBBoxTransform_q8q16
+AxisShuffle_8
+BatchSeqConfig
+BatchToSpaceND_8
+Bbox_Transform_f
+BiasAdd_f
+Box_Decoder_f
+BoxWithNmsLimit_q8q16
+CastFloat32ToInt32
+CastFloat32ToUInt8
+CastInt32ToFloat32
+CastInt32ToUInt8
+CastUInt8ToFloat32
+CastUInt8ToInt32
+Clamp_f
+Convert_int32_f
+DepthToSpace_8
+Dequantize
+Flatten
+Gather_8
+ImageTransform_f
+INPUT
+Max_f
+Maximum_f
+Min_f
+MirrorPad_8
+Moments_8to32
+MultiClassNms_8
+Nop
+OUTPUT
+Proposal_f
+Proposal_q8q16
+Quantize
+QuantizedAdd_8p8to32
+QuantizedAdd_8p8to8
+QuantizedAvgPool_8
+QuantizedBatchNorm_8x8p8to8
+QuantizedBiasAdd_8p8to32
+QuantizedBiasAdd_32p32to32
+QuantizedChannelScale_32xf
+QuantizedChannelShuffle_8
+QuantizedClamp_8
+QuantizedConcat_8
+QuantizedConv2d_8x8to32
+QuantizedCorrelation1d_8x8to8
+QuantizedCrop_8
+QuantizedDepthwiseConv2d_8x8to32
+QuantizedDiv_8
+QuantizedExtractGlimpse_8
+QuantizedInstanceNormBG_8
+QuantizedEqual_8
+QuantizedGreater_8
+QuantizedGreaterEqual_8
+QuantizedGroupedConv2d_8x8p32to8
+QuantizedHeatmapMaxKP_8
+QuantizedLess_8
+QuantizedLessEqual_8
+QuantizedLRN_8
+QuantizedMatMul_8x8to32
+QuantizedMax_8
+QuantizedMaximum_8
+QuantizedMaxPool_8
+QuantizedMean_8
+QuantizedMin_8
+QuantizedMinimum_8
+QuantizedMul_8x8to32
+QuantizeDownAndShrinkRange_32to8
+QuantizedNotEqual_8
+QuantizedPad_8
+QuantizedPad_V2_8
+QuantizedPermute_8
+QuantizedPRelu_8
+QuantizedPRelu_8_V2
+QuantizedRecip_8
+QuantizedRelu_8
+QuantizedReluX_8
+QuantizedReshape
+QuantizedResizeBilinear_8
+QuantizedRoiAlignV2_8
+QuantizedRoiPool_8
+QuantizedSigmoid_8
+QuantizedSlice_8
+QuantizedSoftmax_8
+QuantizedSplit_8
+QuantizedSqrt_8
+QuantizedStridedSlice_8
+QuantizedSub_8p8to8
+QuantizedSub_8p8to32
+QuantizedSum_8to32
+QuantizedTanh_8
+QuantizedTile_8
+QuantizedTransposeConv2d_8x8p32to8
+Relu_f
+ReluX_f
+Requantize_32to8
+ResizeNearestNeighbor_8
+Requantize_8to8
+RgbaToRgb_8
+Select_8
+Softmax_f
+SpaceToBatchND_8
+SpaceToDepth_8
+SsdDetectionOut
+TopK_8
+Transpose_8

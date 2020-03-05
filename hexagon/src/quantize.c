@@ -38,6 +38,8 @@
 #include <nn_graph.h>
 #include <quantize.h>
 #include "hvx_inlines.h"
+
+#define CLOSE_ENUF(X, Y) (fabsf(X - Y) < 6.1035156e-05f)
 //
 // This adjusts a min .. max range
 // (by decreasing min, or increasing max) until
@@ -480,7 +482,7 @@ void nn_requantize_qu8_to_qu8_hvx(uint8_t *outp, uint8_t const* inp, unsigned n,
 
     HVX_Vector const *vinp = (HVX_Vector const*) inp;
 
-    if(fabsf(gain - 1.0f) < 6.1035156e-05f)
+    if(CLOSE_ENUF(gain, 1.0f))
     {
         HVX_Vector vtot_off_i16 = Q6_Vh_vsub_VhVh_sat(vout_off_i16, vin_off_i16);
         HVX_VectorPair vvtot_off_i16 = Q6_W_vcombine_VV(vtot_off_i16, vtot_off_i16);
@@ -531,6 +533,91 @@ void nn_requantize_qu8_to_qu8_hvx(uint8_t *outp, uint8_t const* inp, unsigned n,
             q6op_vstu_variable_ARV(outp, nextra, hvx_requantize_vector_8to8(vinp, gaini, vvin_off_i16, vout_off_i16));
         }
     } //if gain > 1.0f
+}
+
+void nn_requantize_qu8_to_qu8_hvx_d32(uint8_t *outp_b, uint8_t const *inp_b, int h_count, int nd32, int widvecs, int height_stride, int d32_stride, float gain, int32_t in_offset, int32_t out_offset)
+{
+    HVX_Vector vin_off_i16 = q6op_Vh_vsplat_R(saturate_i16(in_offset));
+    HVX_VectorPair vvin_off_i16 = Q6_W_vcombine_VV(vin_off_i16, vin_off_i16);
+    HVX_Vector vout_off_i16 = q6op_Vh_vsplat_R(saturate_i16(out_offset));
+
+    uint8_t const *inp;
+    uint8_t * outp;
+    HVX_Vector const *vinp;
+    HVX_Vector *voutp;
+
+    if(CLOSE_ENUF(gain, 1.0f))
+    {
+        HVX_Vector vtot_off_i16 = Q6_Vh_vsub_VhVh_sat(vout_off_i16, vin_off_i16);
+        HVX_VectorPair vvtot_off_i16 = Q6_W_vcombine_VV(vtot_off_i16, vtot_off_i16);
+
+        for(int h = 0; h < h_count; h++)
+        {
+            inp = inp_b + h * height_stride;
+            outp = outp_b + h * height_stride;
+
+            for(int id32 = 0; id32 < nd32; id32++)
+            {
+                vinp = (HVX_Vector const *)inp;
+                voutp = (HVX_Vector *)outp;
+
+                for(int i = 0; i < widvecs; i++)
+                {
+                    voutp[i] = hvx_requantize_vector_8to8_uniform_gain(vinp+i, vvtot_off_i16);
+                }
+                inp += d32_stride;
+                outp += d32_stride;
+            }
+        }
+    }
+    else if(gain > 1.0f)
+    {
+        float gain_coef = flt_getfrac(gain);
+        int32_t gaini = saturate_i16(roundf_i32(gain_coef * (float)(1u << 15)));
+        int32_t prod_rsh = 15 - flt_getexp(gain);
+
+        for(int h = 0; h < h_count; h++)
+        {
+            inp = inp_b + h * height_stride;
+            outp = outp_b + h * height_stride;
+
+            for(int id32 = 0; id32 < nd32; id32++)
+            {
+                vinp = (HVX_Vector const *)inp;
+                voutp = (HVX_Vector *)outp;
+
+                for(int i = 0; i < widvecs; i++)
+                {
+                    voutp[i] = hvx_requantize_vector_8to8_hi_gain(vinp+i, gaini, prod_rsh, vvin_off_i16, vout_off_i16); 
+                }
+                inp += d32_stride;
+                outp += d32_stride;
+            }
+        }
+    }
+    else
+    {
+        int32_t gaini = saturate_i16(roundf_i32(gain * (float)(1u << 15)));
+
+        for(int h = 0; h < h_count; h++)
+        {
+            inp = inp_b + h * height_stride;
+            outp = outp_b + h * height_stride;
+
+            for(int id32 = 0; id32 < nd32; id32++)
+            {
+                vinp = (HVX_Vector const *)inp;
+                voutp = (HVX_Vector *)outp;
+
+                for(int i = 0; i < widvecs; i++)
+                {
+                    voutp[i] = hvx_requantize_vector_8to8(vinp+i, gaini, vvin_off_i16, vout_off_i16);
+                }
+                inp += d32_stride;
+                outp += d32_stride;
+            }
+        }
+    } // if gain > 1.0f ... 
 }
 
 // handles cases where gain <= 1.0f

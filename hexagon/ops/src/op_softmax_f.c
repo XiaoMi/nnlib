@@ -36,6 +36,7 @@
 #include <nn_graph.h>
 #include <string.h>
 #include <math.h>
+#include <quantize.h>
 
 /*
  * 
@@ -104,24 +105,28 @@ static inline int softmax_execute_uint8(struct nn_node *self, struct nn_graph *n
 	float sum_recip;
 	float *precomputed = self->opaque;
 
-	float scalex = beta * (max-min);
+	float scale = flt_div_255(max-min);
+	float beta_scale = beta*scale;
 	if( tensor_out_prepare_normal_fromshape( out_tensor, &in_tensor->shape, NN_TYPE_FLOAT)!= 0){
 		return errlog(nn,"out too small");
 	}
-
-	if (precomputed[255] == 0.0f || precomputed[256]!= scalex ) {
+	if (precomputed[255] == 0.0f || precomputed[256]!= beta_scale ) {
 		// The precomputed-array needs initialization
-		float scale = scalex/255.0;
 		for (i=0; i<256; i++) {
-			precomputed[i] = expf(scale*((float)(i-255)));
+			precomputed[i] = expf(beta_scale*((float)(i-255)));
 		}
-		precomputed[256] = scalex;
+		precomputed[256] = beta_scale;
 	}
 
+	uint8_t channel_max;
 	for (j = 0; j < batches*height*width; j++) {
 		sum = 0.0f;
+		channel_max = data[0];
+		for (i = 1; i < depth; i++) {
+			channel_max = (data[i] > channel_max)? data[i]:channel_max;
+		}
 		for (i = 0; i < depth; i++) {
-			sum += (out[i] = precomputed[data[i]]);
+			sum += (out[i] = precomputed[data[i] - channel_max + 255]);
 		}
 		sum_recip = 1.0f/sum;
 		for (i = 0; i < depth; i++) {
@@ -165,7 +170,6 @@ int node_free_softmax_uint8(struct nn_node *node, struct nn_graph *nn)
 	if (node->opaque) nn_free(node->opaque);
 	return node_free_common(node, nn);
 }
-
 
 struct nn_node_ops nn_ops_for_Softmax_f = {
 	.execute = softmax_execute,

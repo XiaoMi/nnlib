@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -43,7 +43,6 @@
 #include <stdio.h>
 #include "../interface/hexagon_nn_ops.h"
 typedef int32_t qint32;
-typedef int32_t int32;
 typedef float float32;
 typedef uint8_t quint8;
 #define ALIGNED __attribute__((aligned(128)))

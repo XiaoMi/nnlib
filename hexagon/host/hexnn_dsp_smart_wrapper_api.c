@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -37,6 +37,7 @@
 #include "stdlib.h"
 #include "sys/stat.h"
 #include "fcntl.h"
+#include "stdio.h"
 
 #include "hexnn_dsp_smart_wrapper_api.h"
 
@@ -47,93 +48,65 @@
     if (check_and_open_handle() != 0) {\
         return -1;\
     }
+#define SOC_ID_BUFFER_LENGTH 5
+#define URI_BUFFER_LENGTH 100
 
 static remote_handle64 h = 0x0;
 static int domains = 1;
 
 
-soc_model get_soc_model() {
-    soc_model s_soc_model = UNKNOWN_SOC;
-
+int get_soc_id(int* soc_id) {
     int fd;
     if (!access("/sys/devices/soc0/soc_id", F_OK)) {
         fd = open("/sys/devices/soc0/soc_id", O_RDONLY);
-    } 
+    }
     else {
         fd = open("/sys/devices/system/soc/soc0/id", O_RDONLY);
     }
-
-    if (fd != -1) {
-        char raw_buf[5];
-        int soc_id;
-        read(fd, raw_buf,4);
-        raw_buf[4] = 0;
-        soc_id = atoi(raw_buf);
-        close(fd);
-
-        if (IS_QTI_SOC_SDM855(soc_id))
-            s_soc_model = SD855;
-        else if (IS_QTI_SOC_SDM845(soc_id))
-            s_soc_model = SD845;
-        else if (IS_QTI_SOC_8998(soc_id))
-            s_soc_model = SD835;
-        else if (IS_QTI_SOC_8996(soc_id))
-            s_soc_model = SD820;
-        else if (IS_QTI_SOC_SDM710(soc_id))
-            s_soc_model = SD710;
-        else if (IS_QTI_SOC_SDM670(soc_id))
-            s_soc_model = SD670;
-        else if (IS_QTI_SOC_SDM660(soc_id))
-            s_soc_model = SD660;
-        else if (IS_QTI_SOC_SM6150(soc_id))
-            s_soc_model = SD6150;
-        else if (IS_QTI_SOC_SM7150(soc_id))
-            s_soc_model = SD7150;
-        else if (IS_QTI_SOC_QCS405(soc_id))
-            s_soc_model = QCS405;
-        else if (IS_QTI_SOC_SM6125(soc_id))
-            s_soc_model = SD6125;
-        else if (IS_QTI_SOC_QCS403(soc_id))
-            s_soc_model = QCS403;
-        else
-            s_soc_model = UNKNOWN_SOC;
+    if (fd == -1) {
+        return -1;
     }
-    return s_soc_model;
+
+    char raw_buf[SOC_ID_BUFFER_LENGTH];
+    read(fd, raw_buf, SOC_ID_BUFFER_LENGTH - 1);
+    raw_buf[SOC_ID_BUFFER_LENGTH - 1] = 0;
+    *soc_id = atoi(raw_buf);
+    close(fd);
+
+    return 0;
 }
 
 int get_skel_handle(remote_handle64*  handle) {
-    soc_model model = get_soc_model();
-
-    char* uri = NULL;
-    switch(model) {
-        case SD820:
-            // non-domains case
-            domains = 0;
-            return 0;
-        case SD660:
-            uri = "file:///libhexagon_nn_skel.so?hexagon_nn_domains_skel_handle_invoke&_modver=1.0&_dom=cdsp";
-            break;
-        case SD835:
-            uri = "file:///libhexagon_nn_skel.so?hexagon_nn_domains_skel_handle_invoke&_modver=1.0&_dom=adsp";
-            break;
-        case SD845:
-        case SD670:
-        case SD710:
-        case SD7150:
-            uri = "file:///libhexagon_nn_skel_v65.so?hexagon_nn_domains_skel_handle_invoke&_modver=1.0&_dom=cdsp";
-            break;
-        case SD6150:
-        case SD855:
-        case QCS405:
-        case SD6125:
-        case QCS403:
-            uri = "file:///libhexagon_nn_skel_v66.so?hexagon_nn_domains_skel_handle_invoke&_modver=1.0&_dom=cdsp";
-            break;
-        default:
-            uri = NULL;
+    int soc_id;
+    if (get_soc_id(&soc_id) != 0) {
+        return -1;
     }
 
-    if (uri == NULL){
+    SkelMode mode = UNSPECIFIED_MODE;
+    const char* skel = NULL;
+    const char* dsp_type = NULL;
+    for (int i = 0; socSkelInfo[i].soc_id; i++) {
+        if (socSkelInfo[i].soc_id == soc_id) {
+            mode = socSkelInfo[i].mode;
+            skel = socSkelInfo[i].skel;
+            dsp_type = socSkelInfo[i].dsp_type;
+            break;
+        }
+    }
+
+    if (mode == UNSPECIFIED_MODE) {
+        return -1;
+    }
+    else if (mode == NON_DOMAINS){
+        domains = 0;
+        return 0;
+    }
+
+    char uri[URI_BUFFER_LENGTH];
+    int res = snprintf(uri, URI_BUFFER_LENGTH,
+                       "file:///%s?hexagon_nn_domains_skel_handle_invoke&_modver=1.0&_dom=%s",
+                       skel, dsp_type);
+    if (res < 0 || res >= URI_BUFFER_LENGTH) {
         return -1;
     }
 

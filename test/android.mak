@@ -11,6 +11,7 @@ graph_app_QAICIDLS += interface/hexagon_nn \
 COMPILE_GRAPHINIT := $(GRAPHINIT:.c=)
 
 ifeq ($(GRAPH_WRAPPER), 1)
+    CC_FLAGS += -stdlib=libc+ -isystem $(ANDROID_TOOLS_DIR)/sysroot/usr/include/c++/v1/
     INCDIRS += interface
 endif
 
@@ -39,11 +40,8 @@ endif
 graph_app_C_SRCS += $(TESTDATA:.c=)
 
 ifeq ($(GRAPH_WRAPPER), 1)
-ifeq ($(V_aarch64), 1)
-    graph_app_DLLS += $(ANDROID_GLIBSTDC_DIR)/libs/arm64-v8a/libgnustl_shared
-else
-    graph_app_DLLS += $(ANDROID_GLIBSTDC_DIR)/libs/armeabi-v7a/libgnustl_shared
-endif
+    graph_app_DLLS += $(ANDROID_TOOLS_DIR)/sysroot/usr/lib/aarch64-linux-android/libc++_static.a
+    graph_app_DLLS += $(ANDROID_TOOLS_DIR)/sysroot/usr/lib/aarch64-linux-android/libc++abi.a
 endif
 
 graph_app_LIBS += rpcmem

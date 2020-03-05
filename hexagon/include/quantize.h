@@ -106,18 +106,6 @@ struct hvx_quant_parms
 	float minval, maxval;
 };
 
-struct requant_runstate {
-    uint8_t const *inp;
-    uint8_t *outp;
-    unsigned n_elem;
-    unsigned chunk;
-    volatile unsigned current_pos;
-    float gain;
-    int32_t in_offset;
-    int32_t out_offset;
-    nn_sem_t done_sem;
-};
-
 // saturate_u8
 // this is the same as clip_i32( val, 0, 255) (but there's an opcode for it)
 
@@ -625,6 +613,8 @@ void nn_requantize_i32_to_qu8_hvx( uint8_t *outp, int32_t const * inp, int n, fl
 void nn_requantize_i32_to_qu8( uint8_t *outp, int32_t const * inp, int n, float in_level_size, float out_min, float out_max);
 
 void nn_requantize_qu8_to_qu8_hvx(uint8_t *outp, uint8_t const* inp, unsigned n, float gain, int32_t in_offset, int32_t out_offset);
+
+void nn_requantize_qu8_to_qu8_hvx_d32(uint8_t *outp_b, uint8_t const *inp_b, int h_count, int nd32, int widvecs, int height_stride, int d32_stride, float gain, int32_t in_offset, int32_t out_offset);
 
 //Find min/max of i32 tensor
 void find_min_max_int32( int32_t const *arr, int n, int32_t * minmaxp );

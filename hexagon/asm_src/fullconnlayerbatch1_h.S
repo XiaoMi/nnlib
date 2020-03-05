@@ -66,10 +66,11 @@ fullconnlayerbatch1_asm:
 #define  bias_adjust   r7       //typically sum of bias and sum of weights
 #define  actns_adjust  r8       //used toadjust the product
 #define  woffset       r10      //the byte offset from weight position
+#define  recip_shift   r12      //shift for accumulator if outputs larger
 
 #define  n             r3       //num iterations
 #define  cntrl         r9       //control value for populating vpredicate table
-#define  sel           r11      //choose entry to predicate tab;e
+#define  sel           r11      //choose entry to predicate table
 #define  xsum0         r8       //sum of activations batch 0
 #define  d07654_d03210 r13:12   //actviastion values 
 #define  d07654        r13      //actviastion values 
@@ -99,6 +100,8 @@ fullconnlayerbatch1_asm:
 #define  vpred         v0       //sum of vector predicates for cntrling output
 #define  wsum          v8       //bias values
 #define  recipvec      v9       //255/max quantized value
+#define  vshamt_vec    v14      //splat quantized shift values
+
 /* ----------------------------------------------------------------------- */
              {   allocframe(#56)                           //reserve stack
                  n = lsr(in_depth_pad, #4)                 //
@@ -107,6 +110,7 @@ fullconnlayerbatch1_asm:
                  cntrl = #32                               //
                  n = add(n, #-1)                           //correct for pipeline
              } {
+                 recip_shift = memw(sp+#20<<2)             //
                  sel = ##0x01010101                        //
                  q0 = vsetq(cntrl)                         //
              } {
@@ -125,6 +129,7 @@ fullconnlayerbatch1_asm:
                  q0 = and(q1, !q0)                         //
                  cntrl = #96                               //
              } {
+                 vshamt_vec = vsplat(recip_shift)          // 
                  vpred |= vand(q0, sel)                    //_1__ v(64) & !v(32)
                  sel = add(sel, sel)                       //
                  q0 = vsetq(cntrl)                         //
@@ -185,8 +190,7 @@ fullconnlayerbatch1_asm:
                  weight03.tmp = vmem(ptr_w++#1)            //[1, 6]read weights
                  sum00.uw += vrmpy(weight03.ub, d0fedc.ub) //[1, 6]do dotproduct of acts with matrix
               } {
-                 max0.w = vmax(max0.w, sum00.w)            //[E,  ]update even max
-                 min0.w = vmin(min0.w, sum00.w)            //[E,  ]update even min
+                 sum00.w = vasl(sum00.w, vshamt_vec.w)
                  align0 = extractu(out_ptr0, #2, #5)       //xx00000
               } {
                  b0.w = vmpye(sum00.w, recipvec.uh)        //[E,  ]quantize
@@ -195,10 +199,13 @@ fullconnlayerbatch1_asm:
                  b0.w+= vmpyo(sum00.w, recipvec.h):RSS     //[E,  ]quantize
                  align0 = vsplatb(align0)                  //create table lookup cntrls
               } {
+                 max0.w = vmax(max0.w, b0.w)               //[E,  ]update even max
+                 min0.w = vmin(min0.w, b0.w)               //[E,  ]update even min
                  q0 = vand(vpred, align0)                  //access even alignment cntrl
-                 vmem(ptr_max+#0) = max0                   //[E, 0]32max
               } {
-                 b0.h = vpack(b0.w, b0.w):sat             //[E,  ]#>>16
+                 b0.h = vpack(b0.w, b0.w):sat              //[E,  ]#>>16
+              } {
+                 vmem(ptr_max+#0) = max0                   //[E, 0]32max
               } {
                  vmem(ptr_max+#1) = min0                   //[E, 0]32min
               } {

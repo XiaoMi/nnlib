@@ -1743,17 +1743,336 @@ struct nn_node_ops nn_ops_for_QuantizeINPUT_f_to_8 = {
 #define NUM_THREADS 2
 #endif
 
+struct dequant_info_tensor_shapes{
+    const struct shape *in_ten;
+    const struct shape *out_ten;
+};
+
+struct dequant_info_runstate_shared
+{
+    uint8_t const *inp;
+    float *outp;
+    struct dequant_info_tensor_shapes *shapes;
+    int qzero;
+    float stepsize;
+    struct shape *output_dim_sizes;
+    nn_sem_t *worker_sem;
+};
+
+struct dequant_info_runstate
+{
+    struct dequant_info_runstate_shared *shared;
+    uint32_t start_index;
+    uint32_t stop_index;
+    int thread_id;
+    uint8_t *scratch_buff;
+};
+
+struct output_fill_runstate
+{
+	const struct tensor *in_tensor;
+	struct tensor *out_tensor;
+	struct tensor *out_min_tensor;
+	struct tensor *out_max_tensor;
+	int needs_dequantization;
+	float minval;
+	float maxval;
+	int32_t input_tensor_type;
+	int32_t output_tensor_type;
+};
+
+static inline void translate_index_to_coords(uint32_t index,  struct shape *sizes, struct shape *coords){
+    uint32_t working_index = index;
+    coords->batches = working_index / sizes->batches;
+    working_index = working_index % sizes->batches;
+    coords->height = working_index / sizes->height;
+    working_index = working_index % sizes->height;
+    coords->width = working_index / sizes->width;
+    coords->depth = working_index % sizes->width;
+}
+
+static inline uint32_t coords_to_index(struct shape *coords, const struct shape *shape){
+    return coords->depth + (coords->width*shape->depth) + (coords->height*shape->width*shape->depth) + (coords->batches*shape->height*shape->width*shape->depth);   
+}
+
+static inline void increment_coords(struct shape *coords, const struct shape *shape_limit){
+    if ((++(coords->depth))<shape_limit->depth){
+        return;
+    }
+    coords->depth = 0;
+    if ((++(coords->width))<shape_limit->width){
+        return;
+    }
+    coords->width = 0;
+    if((++(coords->height))<shape_limit->height){
+        return;
+    }
+    coords->height = 0;
+    if((++(coords->batches))<shape_limit->batches){
+        return;
+    }
+}
+
+static inline uint32_t dimensions_changed(struct shape *shape_changes){
+	uint32_t changed_dims = 0;
+    for (int i = 0; i<4;i++){
+        if(shape_changes->dimension[i] > 0){
+            changed_dims++;
+        }
+    }
+    return changed_dims;
+}
+
+static uint32_t get_a_vec(struct nn_graph * nn, struct dequant_info_tensor_shapes *shapes, uint8_t *fake_vec, uint8_t const *inp, struct shape *coords,
+                        uint32_t flat_index){
+    uint32_t source_index = flat_index;
+    for (int i = 0; i < 128; i++){
+        //Since we work in the dest coords all of our indices will be "kept"
+        fake_vec[i] = inp[source_index];
+        //Go to next dest coord
+        increment_coords(coords, shapes->out_ten);
+        //convert back to source index
+        source_index = coords_to_index(coords, shapes->in_ten);    
+    }
+    return source_index;
+}
+
+static void output_with_info_hvx_worker(struct nn_graph *nn, void *run_state_p){
+    //uint8_t *scratch_buff;
+    struct dequant_info_runstate *run_state = (struct dequant_info_runstate *)run_state_p;
+    union {
+        float as_f;
+        uint32_t as_u32;
+    } uu = { run_state->shared->stepsize };
+    struct shape dest_coords;
+    dest_coords.dimension[0] = dest_coords.dimension[1] = dest_coords.dimension[2] = dest_coords.dimension[3] = 0;
+
+    HVX_Vector  *voutp = (HVX_Vector *)&(run_state->shared->outp[run_state->start_index]);
+    // scale is the mantissa of qstep
+    int scale = ( uu.as_u32 &0x7FFFFF) | 0x800000;
+    // base_exp is 8 more than the exponent.
+    int base_exp = ((uu.as_u32 >>23)&0xFF)+8;
+    HVX_Vector dequant_input;
+    //Get enough scratch space for a HVX_Vector
+    
+    HVX_Vector *vscratch = (HVX_Vector *)run_state->scratch_buff;
+    uint32_t dest_index = run_state->start_index;
+    translate_index_to_coords(dest_index, run_state->shared->output_dim_sizes, &dest_coords);
+    uint32_t source_index = coords_to_index(&dest_coords, run_state->shared->shapes->in_ten);
+    uint8_t const *inp = run_state->shared->inp;
+    while(dest_index < run_state->stop_index){
+        source_index = get_a_vec(nn, run_state->shared->shapes, run_state->scratch_buff, inp, &dest_coords, source_index);
+        dequant_input = *vscratch;
+        HVX_Vector_x4 deq = hvx_dequantize_128xb(dequant_input, run_state->shared->qzero, scale, base_exp);
+        voutp[0] = deq.val[0];
+        voutp[1] = deq.val[1];
+        voutp[2] = deq.val[2];
+        voutp[3] = deq.val[3];
+        voutp += 4;
+        dest_index += 128;
+    }
+    nn_sem_post(run_state->shared->worker_sem);
+    
+}
+
+
+static int output_dequantize_execute_with_info(struct nn_graph *nn, struct output_fill_runstate *runstate){
+    // tensor shape information
+    int in_element_size, out_element_size;
+    int in_batches,in_height,in_width,in_depth,in_elements;
+    int out_batches, out_height, out_width, out_depth, out_elements;
+
+    in_batches = runstate->in_tensor->shape.batches;
+    in_height = runstate->in_tensor->shape.height;
+    in_width = runstate->in_tensor->shape.width;
+    in_depth = runstate->in_tensor->shape.depth;
+    in_elements = in_batches*in_height*in_width*in_depth;
+
+    out_batches = runstate->out_tensor->shape.batches;
+    out_height = runstate->out_tensor->shape.height;
+    out_width = runstate->out_tensor->shape.width;
+    out_depth = runstate->out_tensor->shape.depth;
+    out_elements = out_batches*out_height*out_width*out_depth;
+    
+    in_element_size = tensor_type_size(runstate->input_tensor_type);
+    out_element_size = tensor_type_size(runstate->output_tensor_type);
+
+    tensor_out_prepare_normal(runstate->out_tensor,out_batches,out_height,out_width,out_depth,runstate->output_tensor_type);
+
+    
+    float range = fmaxf(1e-18f, runstate->maxval-runstate->minval);
+    float stepsize = flt_div_255(range);
+    int qzero = saturate_u8(roundf_i32(-(runstate->minval)/stepsize));
+    
+    struct shape shape_changes;
+    shape_changes.dimension[0] = in_batches - out_batches;
+    shape_changes.dimension[1] = in_height - out_height;
+    shape_changes.dimension[2] = in_width - out_width;
+    shape_changes.dimension[3] = in_depth - out_depth;
+
+    
+
+    struct shape output_dim_sizes;
+    output_dim_sizes.batches = out_height*out_width*out_depth;
+    output_dim_sizes.height = out_width*out_depth;
+    output_dim_sizes.width = out_depth;
+    output_dim_sizes.depth = 1;
+
+    if(!(runstate->needs_dequantization)){
+    	// input_tensor_type == output_tensor_type
+    	uint32_t copy_block_size, lost_data_size;
+    	uint32_t number_of_dims_changed = dimensions_changed(&shape_changes);
+    	if(number_of_dims_changed == 1){
+	        if(0 == shape_changes.dimension[3]){
+	            //Yay
+	            //Did we lose width?
+	            copy_block_size = in_depth;
+	            lost_data_size = 0;
+	            if(0 == shape_changes.dimension[2]){
+	                copy_block_size = (in_width*copy_block_size);
+	                lost_data_size = 0;
+	                if(0 == shape_changes.dimension[1]){
+	                    copy_block_size = (in_height*copy_block_size);
+	                }
+	                else{
+	                    copy_block_size = (out_height*copy_block_size);
+	                    lost_data_size = (shape_changes.dimension[1] * in_width * in_depth);
+	                }
+	            }
+	            else{
+	                copy_block_size = (out_width*copy_block_size);
+	                lost_data_size = (shape_changes.dimension[2] * in_depth);
+	            }
+	        }
+	        else{
+	            copy_block_size = out_depth;
+	            lost_data_size = shape_changes.dimension[3];
+	        }
+            struct nn_memcpy_manager mcman;
+            nn_mcmanager_init(nn, &mcman );
+            
+            uint32_t copy_start_offset = 0;
+            uint32_t copy_dest_offset = 0;
+            int copies_needed = (out_elements/copy_block_size);
+            for (int i = 0; i < copies_needed; i++){
+                nn_mcmanager_vmemcpy( nn, &mcman, (uint8_t *) runstate->out_tensor->data+copy_dest_offset, (uint8_t *)runstate->in_tensor->data+copy_start_offset, in_element_size*copy_block_size);      
+                copy_start_offset += out_element_size*(copy_block_size+lost_data_size);
+                copy_dest_offset += out_element_size*copy_block_size;
+            }
+            nn_mcmanager_wait( nn, &mcman);
+        }
+        else{
+            uint32_t dest_index = 0;
+            uint32_t bytes_copied = 0;
+            struct shape coords;
+            coords.dimension[0] = coords.dimension[1] = coords.dimension[2] = coords.dimension[3] = 0;
+            
+            translate_index_to_coords(dest_index, &output_dim_sizes, &coords);
+            uint32_t source_index = 0;
+            const uint8_t *input_buffer = (const uint8_t *)runstate->in_tensor->data;
+            uint8_t *output_buffer = (uint8_t *)runstate->out_tensor->data;
+            out_elements *= out_element_size;
+            while(dest_index<out_elements){
+                for(bytes_copied = 0; bytes_copied < out_element_size; bytes_copied++){
+                   output_buffer[dest_index+bytes_copied] = input_buffer[source_index+bytes_copied];
+                }
+                dest_index += out_element_size;
+                //Go to next dest coord
+                increment_coords(&coords, &(runstate->out_tensor->shape));
+                //convert back to source index
+                source_index = coords_to_index(&coords, &(runstate->in_tensor->shape));
+                source_index *= in_element_size;
+            }
+        }
+
+    } 
+    else{
+        //To leverage the HVX dequantization
+        //We can make use of the new data marshalling function
+        //But for the sake of time
+        //The data marshalling assumes that the whole block of data is a multiple of 128
+        //Due to the limit being on the output we will use that as our constraint
+        uint32_t total_hvx_vectors = out_elements /128;
+        if(nn->scratch_size < 128 * NUM_THREADS){
+            if(nn_scratch_grow(nn, 128 * NUM_THREADS)){
+                return errlog(nn, "Could not get 128 bytes for scratch");
+            }
+            nn_scratch_reset(nn);
+        }
+
+        struct dequant_info_tensor_shapes tensor_shapes;
+        tensor_shapes.in_ten = &(runstate->in_tensor->shape);
+        tensor_shapes.out_ten = &(runstate->out_tensor->shape);
+
+        struct dequant_info_runstate_shared shared_runstate;
+        shared_runstate.shapes = &(tensor_shapes);
+        shared_runstate.inp = (const uint8_t *)runstate->in_tensor->data;
+        shared_runstate.outp = (float *)runstate->out_tensor->data;
+        shared_runstate.qzero = qzero;
+        shared_runstate.stepsize = stepsize;
+        shared_runstate.output_dim_sizes = &output_dim_sizes;
+        nn_sem_t nn_worker_sem;
+        nn_sem_init( &nn_worker_sem,0);
+        shared_runstate.worker_sem = &nn_worker_sem;
+
+        struct dequant_info_runstate thread_runstates[NUM_THREADS];
+        for(int i = 0; i < NUM_THREADS; i++){
+            thread_runstates[i].shared = &shared_runstate;
+        }
+
+        uint8_t *scratch_buff = (uint8_t *)nn_scratch_alloc(nn, 128*NUM_THREADS);
+        uint32_t nthreads = (NUM_THREADS < total_hvx_vectors)?NUM_THREADS:total_hvx_vectors;
+        uint32_t hvx_vectors_per_thread = total_hvx_vectors / nthreads;
+        uint32_t left_over_address;
+        for(int i = 0; i < nthreads; i++){
+            thread_runstates[i].start_index = ((128*hvx_vectors_per_thread)*i);
+            thread_runstates[i].stop_index = ((128*hvx_vectors_per_thread)*(i+1));
+            thread_runstates[i].thread_id = i;
+            thread_runstates[i].scratch_buff = &scratch_buff[128*i];
+            nn_os_work_for_vector(nn, output_with_info_hvx_worker, &thread_runstates[i]);
+            left_over_address = thread_runstates[i].stop_index;
+        }
+
+        nn_sem_wait_n_times( &nn_worker_sem, nthreads);
+        uint32_t dest_index = left_over_address;
+
+        struct shape coords;
+        coords.dimension[0] = coords.dimension[1] = coords.dimension[2] = coords.dimension[3] = 0;
+        
+        translate_index_to_coords(dest_index, &output_dim_sizes, &coords);
+        uint32_t source_index = coords_to_index(&coords, tensor_shapes.in_ten);
+
+        uint8_t input_value;
+        int zero_corrected_val;
+        float output_value;
+        while(dest_index<out_elements){
+            input_value = shared_runstate.inp[source_index];
+            zero_corrected_val = (int)input_value - qzero;
+            output_value = ((float)zero_corrected_val*stepsize);
+            shared_runstate.outp[dest_index] = output_value;
+            dest_index++;
+            //Go to next dest coord
+            increment_coords(&coords, tensor_shapes.out_ten);
+            //convert back to source index
+            source_index = coords_to_index(&coords, tensor_shapes.in_ten);
+        }
+    }
+    return 0;
+}
+
 static int output_dequantize_execute_opt(struct nn_node *self, struct nn_graph *nn) {
     if (nn->n_outputs % NUM_METADATA_PER_OUTPUT_TENSOR) {
         return errlog(nn,"oops, output # does not have enough metadata %d",nn->n_outputs);
     }
 
     int num_data_tensors_input = self->n_inputs / NUM_METADATA_PER_QUANTIZED_TENSOR;
+    
     int num_data_tensors_output = nn->n_outputs / NUM_METADATA_PER_OUTPUT_TENSOR;
     if (num_data_tensors_input != num_data_tensors_output) {
         return errlog(nn,"oops, number of network output tensors %d does not equal number of input tensors %d",
             num_data_tensors_output,num_data_tensors_input);
     }
+    
 
     const struct tensor *in_tensor;
     const struct tensor *in_min_tensor;
@@ -1770,7 +2089,8 @@ static int output_dequantize_execute_opt(struct nn_node *self, struct nn_graph *
     int32_t input_tensor_type;
     int32_t output_tensor_type;
     float minval, maxval;
-
+    int buffer_sentinel = 0;
+    int output_with_info_return;
     for(i = 0; i < num_data_tensors_input; i++){
         input_offset = i*NUM_METADATA_PER_QUANTIZED_TENSOR;
         output_offset = i*NUM_METADATA_PER_OUTPUT_TENSOR;
@@ -1778,7 +2098,7 @@ static int output_dequantize_execute_opt(struct nn_node *self, struct nn_graph *
         in_tensor = self->inputs[input_offset + 0];
         in_min_tensor = self->inputs[input_offset + 1];
         in_max_tensor = self->inputs[input_offset + 2];
-
+        
         out_tensor = &nn->outputs[output_offset + 0];
         out_min_tensor = &nn->outputs[output_offset + 1];
         out_max_tensor = &nn->outputs[output_offset + 2];
@@ -1815,9 +2135,8 @@ static int output_dequantize_execute_opt(struct nn_node *self, struct nn_graph *
         }
 
         // set shape and sizes
-        if( tensor_out_prepare_normal(out_tensor,batches,height,width,depth,output_tensor_type) != 0 ){
-            return errlog(nn,"out too small (%p) %d < %d", out_tensor, out_tensor->max_size, elements*out_element_size);
-        }
+        //Move the out min/max setup here since we will assume it was done if we end up fallling back to the 
+        //new output dequantize op
         if( tensor_out_prepare_normal(out_min_tensor,1,1,1,1,NN_TYPE_FLOAT) != 0 ){
             return errlog(nn,"out min too small (%p) %d < %d", out_min_tensor, out_min_tensor->max_size, tensor_type_size(NN_TYPE_FLOAT));
         }
@@ -1844,6 +2163,28 @@ static int output_dequantize_execute_opt(struct nn_node *self, struct nn_graph *
 
         tensor_set_float(out_min_tensor, 0, minval);
         tensor_set_float(out_max_tensor, 0, maxval);
+
+        if (!(out_tensor->max_size >= (elements*out_element_size))){
+        	struct output_fill_runstate output_runstate;
+        	output_runstate.in_tensor = in_tensor;
+        	output_runstate.out_tensor = out_tensor;
+        	output_runstate.out_min_tensor = out_min_tensor;
+        	output_runstate.needs_dequantization = needs_dequantization;
+        	output_runstate.minval = minval;
+        	output_runstate.maxval = maxval;
+        	output_runstate.input_tensor_type = input_tensor_type;
+        	output_runstate.output_tensor_type = output_tensor_type;
+            output_with_info_return = output_dequantize_execute_with_info(nn, &output_runstate);
+            if(!output_with_info_return){
+                return output_with_info_return;
+            }
+            buffer_sentinel = 1;
+
+        }
+        else if( tensor_out_prepare_normal(out_tensor,batches,height,width,depth,output_tensor_type) != 0 ){
+            //For now we put the classic error here -- but this isn't actually the problem
+            return errlog(nn,"out too small (%p) %d < %d", out_tensor, out_tensor->max_size, elements*out_element_size);
+        }
 
 		if (needs_dequantization)
 		{
@@ -1881,11 +2222,16 @@ static int output_dequantize_execute_opt(struct nn_node *self, struct nn_graph *
 			nn_mcmanager_wait( nn, &mcman);
 		}
     }
+    
+    if(buffer_sentinel){
+        return NN_EXECUTE_BUFFER_SIZE_ERROR;
+    }
     return 0;
 }
 
 static int output_dequantize_check(struct nn_node *self, struct nn_graph *nn)
 {
+	
     int i;
     if (self->n_inputs % NUM_METADATA_PER_QUANTIZED_TENSOR) return errlog(nn,"oops, output dequantize does not have enough input metadata (%d)",self->n_inputs);
     logmsg(nn,2,"Checking output node %p",self);
@@ -1893,6 +2239,7 @@ static int output_dequantize_check(struct nn_node *self, struct nn_graph *nn)
         if (self->inputs[i] == NULL) return errlog(nn,"output: NULL input");
     }
     logmsg(nn,2,"output node %p check OK",self);
+    
     return 0;
 }
 

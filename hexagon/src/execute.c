@@ -80,7 +80,7 @@ void execute_check_dst_canaries(struct nn_graph *nn, struct nn_node *node)
 	}
 }
 
-int do_execute(struct nn_graph *nn)
+int do_execute(struct nn_graph *nn, execute_basic_info* exe_info)
 {
 	struct nn_node *node;
 	int err = 0;
@@ -95,7 +95,10 @@ int do_execute(struct nn_graph *nn)
 	struct nn_node *start_node = nn->head;
 	struct nn_node *next_node = NULL;
 	int saved_priority;
-	if (nn_os_update_main_thread_priority(nn, &saved_priority)) return errlog(nn, "priority update failed");
+	if (nn_os_update_main_thread_priority(nn, &saved_priority)) {
+                exe_info->result = NN_EXECUTE_PRIORITY_UPDATE_ERROR;
+                return errlog(nn, "priority update failed");
+        }
 	if (nn->nonconst_head_ptr && *nn->nonconst_head_ptr) start_node = *nn->nonconst_head_ptr;
 	nn_mutex_lock(&graph_mutex);
 	nn_os_hvx_power_on(nn); // THIS MUST BE CALLED WITHIN MUTEX LOCKED SECTION
@@ -103,6 +106,7 @@ int do_execute(struct nn_graph *nn)
 		nn_os_hvx_power_off(nn); // THIS MUST BE CALLED WITHIN MUTEX LOCKED SECTION
 		nn_mutex_unlock(&graph_mutex);
 		if (nn_os_restore_main_thread_priority(nn, saved_priority)) errlog(nn, "priority restore failed");
+                exe_info->result = NN_EXECUTE_VTCM_ACQUIRE_ERROR;
 		return errlog(nn,"vtcm acquire error");
 	}
 	nn_os_vector_workers_acquire(nn);
@@ -126,6 +130,15 @@ int do_execute(struct nn_graph *nn)
 			print_tensor(node->inputs[j],"in");
 		}*/
 		if ((err = node->ops->execute(node,nn)) != 0) {
+                        exe_info->exe_failure_node_id = node->node_id;
+                        exe_info->exe_failure_node_op_type = node->node_type;
+                        if (node->node_type==NN_OPS_MAX) {
+                                exe_info->result = NN_EXECUTE_UDO_ERROR;
+                        } else if (err==NN_EXECUTE_BUFFER_SIZE_ERROR) { 
+                                exe_info->result = err;
+                        } else {
+                                exe_info->result = NN_EXECUTE_ERROR;
+                        }
 			errlog(nn,"execute() failed on node id=%x err=%d",node->node_id,err);
 			goto quit;
 		}
@@ -161,7 +174,8 @@ int do_execute(struct nn_graph *nn)
 		if(next_node == NULL){
 			struct nn_loop_end_action endact = nn_loopstack_post_execute( nn, &nn->loopstack);
 			if( endact.errcode !=0){
-				errlog(nn,"loop update error");
+                                exe_info->result = NN_EXECUTE_LOOP_UPDATE_ERROR;
+				err = errlog(nn,"loop update error");
 				goto quit;
 			}
 			next_node = endact.rerun_node;	// NULL if all done
@@ -169,12 +183,19 @@ int do_execute(struct nn_graph *nn)
 	} // for node list
 	}while( nn_batchseqstate_loop_update( &nn->batchseq )); // batch seq loop
 	} // for ITERS
+        exe_info->result = NN_EXECUTE_SUCCESS;
   quit:
 	nn_os_vector_workers_release(nn);
 	nn_os_vtcm_release(nn);
 	nn_os_hvx_power_off(nn); // THIS MUST BE CALLED WITHIN MUTEX LOCKED SECTION
 	nn_mutex_unlock(&graph_mutex);
-	if (nn_os_restore_main_thread_priority(nn, saved_priority)) errlog(nn, "priority restore failed");
+	if (nn_os_restore_main_thread_priority(nn, saved_priority)) {
+               errlog(nn, "priority restore failed");
+               if (err==0) { 
+                       err = -1;
+                       exe_info->result = NN_EXECUTE_PRIORITY_RESTORE_ERROR;
+               }
+        }
 	return err;
 }
 

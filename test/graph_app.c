@@ -455,8 +455,7 @@ int main(int argc, const char **argv)
 	/* Free memory allocated to labels, if specified */
 	if (options.labels_filename) free_labels();
 	if (!options.benchmark) {
-            double pmuAppReported=appreported;
-            SET_APP_REPORTED_STAT(pmuAppReported);   
+            SET_APP_REPORTED_STAT(appreported);   
             printf("AppReported: %llu\n", appreported);
         }
 	if (options.benchmark) return 0;

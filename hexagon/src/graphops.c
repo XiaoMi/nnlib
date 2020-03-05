@@ -537,6 +537,41 @@ change_output_refs( struct nn_graph * nn,
 	return errs?-1: replace_count;
 }
 
+
+//
+// Change input_refs that match old_input to new_input 
+// in all the nodes in nn graph following the node specified by begin
+// if node begin is NULL, entire graph is searched
+//
+// returns: number of replacements done, >= 0.
+//
+int
+change_single_output_ref(struct nn_graph * nn,
+                        struct nn_node * begin,                 // can specify the 'old_nodeid' node to speed things up; or NULL.
+                        struct input old_input,
+                        struct input new_input)
+{
+        noderefhash_set_t hashmask = noderefhash_mask(old_input.src_id);
+        int replace_count = 0;
+        struct nn_node *np = (begin == NULL)? nn->head: begin;
+        for(; np != NULL ; np = np->next){
+                if( (np->noderefhash & hashmask) != 0){         // may have matching refs in it
+                        int n_in = np->n_inputs;
+                        int any = 0;
+                        for( int  i =0; i < n_in; i++){
+                                if((np->input_refs[i]).src_id == old_input.src_id && (np->input_refs[i]).output_idx == old_input.output_idx){
+                                        np->input_refs[i] = new_input;
+                                        any = 1;
+                                        replace_count++;
+                                }
+                        }
+                        if( any ) node_rehash_inputrefs( np);
+                }
+        }
+        return replace_count;
+}
+
+
 //
 // this is for rewiring the consumers of a 'Split' or 'ChannelShuffle' to point at the
 // Convert_from_d32 nodes which have been attached to its outputs.
@@ -583,6 +618,7 @@ change_multi_output_refs( struct nn_graph * nn,
 	}
 	return errs?-1: replace_count;
 }
+
 
 //
 // this is for rewiring when a single node has been arbitrarily replaced

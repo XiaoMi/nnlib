@@ -1,0 +1,139 @@
+/*
+ * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted (subject to the limitations in the
+ * disclaimer below) provided that the following conditions are met:
+ *
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *
+ *    * Redistributions in binary form must reproduce the above
+ *      copyright notice, this list of conditions and the following
+ *      disclaimer in the documentation and/or other materials provided
+ *      with the distribution.
+ *
+ *    * Neither the name of The Linux Foundation nor the names of its
+ *      contributors may be used to endorse or promote products derived
+ *      from this software without specific prior written permission.
+ *
+ * NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE
+ * GRANTED BY THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT
+ * HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+ * GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+ * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ */
+
+=================================================
+| Dilated Depthwise Convolution with Hexagon NN |
+=================================================
+
+
+Introduction
+============
+This document describes how a Depthwise 2D-Convolution operation with dilation
+can be achieved through the combination of Hexagon NN ops. Currently,
+Hexagon NN supports Depthwise Conv2D through QuantizedDepthwiseConv2d_8x8to32
+and DepthwiseConv2d_f ops. These two ops however do not natively support dilation.
+This document will describe how to use a combination of ops to achieve dilated
+Depthwise Conv2D in Hexagon NN with various performance criteria. The focus will
+solely be on the QuantizedDepthwiseConv2d_8x8to32 op. This document does not talk
+about the bias ops of convolutions.
+
+
+Pre-Requisites
+==============
+The QuantizedDepthwiseConv2d_8x8to32 op has an optimized and an un-optimized
+implementation in Hexagon NN. In order to take advantage of the optimized
+implementation, there are certain restrictions on the input parameters of
+the op. The following table describes the restrictions on the parameters
+for the optimized op.
+
+|-------------------------------|
+| Parameter     | Restriction   |
+|---------------+---------------|
+| Kernel Height |     >=2       |
+| Kernel Width  |    3,5,7      |
+| Stride Width  |     1,2       |
+|-------------------------------|
+
+When evaluating the solutions for dilated Depthwise Conv2D below, the
+restrictions presented in this section should always be considered.
+
+The pattern of Hexagon NN ops for a regular Depthwise Conv2D without
+dilation but with biases is shown below in Pattern 1. This pattern
+uses 32-bit biases specifically, which leads to slightly better accuracy.
+
+Pattern 1:
+    QuantizedDepthwiseConv2d_8x8to32 -> ChannelScale32xf(optional) -> 
+    QuantizedBiasAdd_32p32to32 -> Requantize_32to8 (or QuantizeDownAndShrinkRange_32to8).
+
+The ChannelScale32xf op is optional but is recommended because it will re-scale
+the channels which will lead to better performance. After the bias add, either
+the Requantize_32to8 should be used if the min/max values are specified, else
+the QuantizeDownAndShrinkRange_32to8 will quantize to the output range.
+
+
+Dilation with Stride=1
+======================
+In the case of dilated Depthwise Conv2d with stride height and width equal to 1,
+the equivalent can be achieved in Hexagon NN with the ops shown in Pattern 2.
+
+Pattern 2:
+	SpaceToBatchND_8 -> (Pattern 1) -> BatchToSpaceND_8
+
+The blocksizeH and blocksizeW parameters for the SpaceToBatchND_8 and 
+BatchToSpaceND_8 ops should be set to the dilation height and width respectively.
+The padding and crop parameters should be set so that the input dimension is a
+multiple of the dilation. For example:
+    dilationHeightRemainder = (inputHeight % dilationHeight);
+    paddingHeight = dilationRemainder > 0 ? dilationHeight - dilationHeightRemainder : 0;
+The same holds true for the paddingWidth. 
+
+No change to the convolution weights is required with this solution.
+
+
+Dilation with Stride>1
+======================
+For dilation with a stride greater than 1, the solution is to dilate the
+weights manually before adding them as a constant op with the regular
+QuantizedDepthwiseConv2d_8x8to32 op. It can be shown as the following
+pattern:
+
+Pattern 3:
+    (Dilated Weights) -> (Pattern 1)
+
+The following code snippet shows an example of dilation of weights with rank
+of 3:
+
+    // Calculate dims of dilated weights
+    uint32_t dilatedWeightsHeight = dilationHeight * (weightsHeight - 1) + 1;
+    uint32_t dilatedWeightsWidth = dilationWidth * (weightsWidth - 1) + 1;
+
+    /* Allocate weightsDialated with dilatedWeightsHeight,
+       dilatedWeightsWidth, weightsDepth and initialize to 
+       quantized zero */
+
+    // Populate weightsDialated from weights
+    for (size_t i = 0; i < weightsWidth; i++) {
+        for (size_t j = 0; j < weightsHeight; j++) {
+            size_t srcOffset = j * weightsWidth * weightsDepth +
+                               i * weightsDepth;
+
+            size_t dstOffset = j * dilationHeight * dilatedWeightsWidth * weightsDepth +
+                               i * dilationWidth *  weightsDepth;
+
+            for (size_t k = 0; k < weightsDepth; k++) {
+                weightsDialated[dstOffset + k] = weights[srcOffset + k];
+            }
+        }
+    }

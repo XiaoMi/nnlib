@@ -80,6 +80,7 @@ struct initinfo {
 	int32_t priority;
 };
 
+
 int hexagon_nn_get_dsp_offset(uint32_t *libhexagon_addr, uint32_t *fastrpc_shell_addr);
 int hexagon_nn_version(int *ver);
 int hexagon_nn_last_execution_cycles(nn_id_t id, unsigned int *cycles_lo, unsigned int *cycles_hi);
@@ -92,6 +93,7 @@ int hexagon_nn_getlog(nn_id_t id, unsigned char *buf, uint32_t length);
 int hexagon_nn_set_debug_level(nn_id_t id, int level);
 int print_node_perf(nn_id_t id);
 int hexagon_nn_get_power(int type);
+int hexagon_nn_udo_register_lib(const char* so_path_name, hexagon_nn_udo_err* err);
 
 struct almost_a_tensor ;
 
@@ -110,6 +112,28 @@ int hexagon_nn_graph_config(
 	);
 
 
+/* MUST MATCH hexagon_nn_execute_info.h !! */
+typedef struct {
+        uint32_t exe_failure_node_id;
+        op_type exe_failure_node_op_type;
+} hexagon_nn_execute_error_complete_info;
+
+typedef hexagon_nn_execute_error_complete_info hexagon_nn_execute_buffer_size_error_complete_info;
+
+typedef struct {
+        uint32_t exe_failure_node_id;
+        hexagon_nn_execute_udo_err_type exe_failure_udo_err_type;
+        int32_t exe_failure_snpe_udo_err_code;   // only applies if error type is UDO_EXE_OP_EXECUTE_FAILED
+} hexagon_nn_execute_udo_error_complete_info;
+
+typedef struct {
+        union {
+                hexagon_nn_execute_error_complete_info exe_err_info;
+                hexagon_nn_execute_buffer_size_error_complete_info buffer_size_err_info;
+                hexagon_nn_execute_udo_error_complete_info udo_err_info;
+        };
+} hexagon_nn_execute_complete_info;
+
 /* MUST MATCH IDL !! */
 typedef struct {
         hexagon_nn_execute_result result;
@@ -117,6 +141,7 @@ typedef struct {
         int extraInfoLen;
         int extraInfoValidLen; //like data_valid_len in tensordef
 } hexagon_nn_execute_info;
+
 
 /* 
  * Definition / I/O for a Tensor
@@ -128,9 +153,9 @@ typedef struct {
 	unsigned int height;
 	unsigned int width;
 	unsigned int depth;
-	unsigned char *data;
-	int dataLen;		/* For input and output */
-	unsigned int data_valid_len; /* for output only */
+	unsigned char *data; /* Address of data allocation */
+	int dataLen;		/* For input and output. Size of allocation */
+	unsigned int data_valid_len; /* For input and output. Actual amount of data */
 	unsigned int unused;
 } hexagon_nn_tensordef;
 
@@ -158,6 +183,19 @@ int hexagon_nn_append_node(
 	uint32_t num_inputs, 
 	const struct output *outputs,
 	uint32_t num_outputs);
+
+int hexagon_nn_append_udo_node(
+        nn_id_t id,
+        uint32_t node_id,
+        const char* package_name,
+        char* op_type,
+        char* flattened_static_params,
+        uint32_t flattened_static_params_size,
+        const struct input *inputs,
+        uint32_t num_inputs,
+        const struct output *outputs,
+        uint32_t num_outputs,
+        hexagon_nn_udo_err* err);
 
 int hexagon_nn_append_const_node(
 	nn_id_t id,
@@ -212,6 +250,8 @@ int hexagon_nn_execute_with_info(nn_id_t id,
 	uint32_t n_tensors_out, 
 	hexagon_nn_execute_info *execute_info);
 int hexagon_nn_teardown(nn_id_t id);
+int hexagon_nn_free_udo_individual_lib (const char* package_name, hexagon_nn_udo_err* err);
+int hexagon_nn_free_udo_libs (hexagon_nn_udo_err* err);
 int hexagon_nn_reset_perfinfo(nn_id_t id, uint32_t event);
 int hexagon_nn_get_perfinfo(nn_id_t id, 
 	struct perfinfo *info_out, 

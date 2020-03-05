@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -390,9 +390,9 @@ static int dwise_supernode_recalculate_strategy(struct nn_node *self, struct nn_
 	int32_t stride_height = stride_tensor->shape.height;
 
 	/* Find output size, amount of padding required in each direction by the padding type, filter size, and stride */
-	int32_t required_w_before, required_h_before, required_h_after;
+	int32_t required_w_before, required_w_after, required_h_before, required_h_after;
 
-	int32_t out_width = nn_pad_compute_outsize_and_padbefore(in_width,filt_width,stride_width,self->padding, &required_w_before);
+   int32_t out_width = nn_pad_compute_outsize_and_pad(in_width,filt_width,stride_width,self->padding, &required_w_before, &required_w_after);
 	int32_t out_height = nn_pad_compute_outsize_and_pad(in_height,filt_height,stride_height,self->padding, &required_h_before, &required_h_after );
 
 	int32_t in_depth_total = in_depth + in_depth_before_pad + in_depth_after_pad;
@@ -549,7 +549,7 @@ static int dwise_supernode_recalculate_strategy(struct nn_node *self, struct nn_
 	info->in_height = in_height + required_h_before + required_h_after;
 	info->weights_base = info->weights;
 	info->in_next_batch = input_batch_size;
-  for (ob = 0; ob < outer_batches; ob++) {
+   for (ob = 0; ob < outer_batches; ob++) {
 	//info->input_base = in + (in_top_pad - required_h_before)*info->in_next_row;
 	//info->input_base = tensor_location_bhw_d32(in_tensor,b, -required_h_before,-in_left_pad);
 	work.weights = info->weights;
@@ -572,16 +572,42 @@ static int dwise_supernode_recalculate_strategy(struct nn_node *self, struct nn_
 	startwork.info = info;
 	startwork.self = self;
 
-	startwork.zap_left = tensor_location_bhw_d32(in_tensor,0,-required_h_before,-in_left_pad);
-	startwork.zap_right = startwork.zap_left + (in_left_pad + in_width)*32;
+	// get the origin of the tensor, including w padding but not h padding; this
+	// is used to find the 'zap' start addresses.
+	uint8_t *in_base0 =  tensor_location_bhw_d32(in_tensor,0,0,-in_left_pad);
+
+	int extra_bottom_row = 0;
+	// we need an extra bottom row if in_right_pad > required_w_before
+	// (but sometimes we don't, if h_stride > 1 and the last input row is not
+	// actually needed).
+	if (required_w_after > in_right_pad){
+		extra_bottom_row = 1;
+		if( stride_height > 1 && required_h_after == 0){
+			// number of input rows needed to generate output (including padding)
+			int h_needed = filt_height + (out_height-1)*stride_height;
+			if( h_needed < required_h_before + in_height ){
+				// we have at least one superfluous bottom row, so don't need
+				// to artificially add padding.
+				extra_bottom_row = 0;
+			}
+		}
+	}
+	if (required_h_after + extra_bottom_row > in_bottom_pad || required_h_before > in_top_pad ) {
+		return errlog(nn,"inadequate top/bottom padding");
+	}
+
+	// left & right do not include top/bottom padding
+	startwork.zap_left = in_base0;
+	startwork.zap_right = in_base0 + (in_left_pad + in_width)*32;
 	startwork.zap_left_size = in_left_pad;
 	startwork.zap_right_size = in_right_pad;
-	startwork.zap_top = tensor_location_bhw_d32(in_tensor,0,-required_h_before,-in_left_pad);
+
+ 	startwork.zap_top = in_base0 - info->in_next_row * required_h_before;
 	startwork.zap_top_size = info->in_next_row * required_h_before;
-	startwork.zap_bot = tensor_location_bhw_d32(in_tensor,0,in_height,-in_left_pad); 
-	startwork.zap_bot_size = info->in_next_row * (required_h_after+1); //add extra row along bottom for corner case
+	startwork.zap_bot = in_base0 + info->in_next_row * in_height;
+	startwork.zap_bot_size = info->in_next_row * (required_h_after+extra_bottom_row); //add extra row along bottom for corner case
 	startwork.zap_rl_depths = in_depth_total / 32;
-	startwork.zap_height = required_h_before+in_height+required_h_after;
+	startwork.zap_height = in_height;
 	startwork.zap_value = info->in_offset;
 
 	logmsg(nn,1,"dwise supernode zapping pad");
@@ -807,6 +833,7 @@ static int dwise_supernode_check(struct nn_node *self, struct nn_graph *nn)
                                                 filt,filt_height,filt_width,
                                                 filt_depth,filt_depth_roundup,
                                                 depth_multiplier,filt_offset);
+	supernode_cleaninv_weights(info->weights,weights_size);
 	info->weights_offset = filt_offset;
 	// NOTE: currently (3/7/19) dwise_convert_weights_to_signed does nothing and returns 1.0
 
@@ -845,9 +872,12 @@ static int dwise_supernode_dtor(struct nn_node *self, struct nn_graph *nn)
 	struct supernode_info_new *info = self->opaque;
 	if (info) {
 		supernode_reset_work_items(self,nn,info);
-		nn_free(info->gemsumb);
-		nn_free(info->biasbuf);
-		nn_free(info->weights);
+		if (info->k_factor_recip != NULL) nn_free(info->k_factor_recip);
+		if (info->k_factor != NULL) nn_free(info->k_factor);
+		if (info->recip != NULL) nn_free(info->recip);
+		if (info->gemsumb != NULL) nn_free(info->gemsumb);
+		if (info->biasbuf != NULL) nn_free(info->biasbuf);
+		if (info->weights != NULL) nn_free(info->weights);
 		nn_free(info);
 	}
 	self->opaque = NULL;

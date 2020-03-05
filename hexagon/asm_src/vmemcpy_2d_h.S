@@ -75,13 +75,15 @@
 // make 4 calls, each of which copies every 4th row.
 //
 
-#ifndef __HVXDBL__
+#if !( defined(__HVXDBL__) || __HVX_LENGTH__ == 128)
+#warning Probably you don't really want HVX64
 #define VECN 64
 #define VECLOGN 6
 #else
 #define VECN 128
 #define VECLOGN 7
 #endif
+
 // r0 ->  wid
 // r1 -> ht
 // r2 -> dstp

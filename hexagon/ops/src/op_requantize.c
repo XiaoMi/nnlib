@@ -53,6 +53,34 @@
 
 #define VELEM(elem_size)  (sizeof(HVX_Vector) / elem_size)
 
+struct requant_runstate
+{
+    uint8_t const *inp;
+    uint8_t *outp;
+    unsigned n_elem;
+    unsigned chunk;
+    volatile unsigned current_pos;
+    float gain;
+    int32_t in_offset;
+    int32_t out_offset;
+    nn_sem_t done_sem;
+};
+
+struct requant_d32_runstate
+{
+    struct shape opshape;
+    struct tensor_addressing tin;
+    struct tensor_addressing tout;
+    int32_t d32_iters;
+    int32_t h_per_slice;
+    int32_t slice_per_batch;
+    int32_t work_units;
+    volatile int next_work;
+    float gain;
+    int32_t in_offset;
+    int32_t out_offset;
+    nn_sem_t done_sem;
+};
 
 // find the min/max of all values in arr[0..n]
 // Result is at minmaxp (which must be vector-aligned and have room for 32*i32:
@@ -246,6 +274,59 @@ static void requantize_hvx_work_func(struct nn_graph *nn, void *rstpv)
     nn_sem_post(&rstp->done_sem);
 }
 
+static void requantize_d32_hvx_work_func(struct nn_graph *nn, void *rstpv)
+{
+    struct requant_d32_runstate *rstp = (struct requant_d32_runstate *)rstpv;
+    int work_unit_index = __sync_fetch_and_add(&rstp->next_work, 1);
+
+    uint8_t const *inp0 = rstp->tin.data;
+    uint8_t *outp0 = rstp->tout.data;
+    int32_t in_offset = rstp->in_offset;
+    int32_t out_offset = rstp->out_offset;
+    float gain = rstp->gain;
+    int slice_per_batch = rstp->slice_per_batch;
+    int h_per_slice = rstp->h_per_slice;
+    int nd32 = rstp->tin.nd32;
+    int widvecs = rstp->d32_iters;
+    int batches = rstp->opshape.batches;
+    int height = rstp->opshape.height;
+
+    uint32_t d32_stride = rstp->tin.d32_stride;
+    uint32_t batch_stride = rstp->tin.batch_stride;
+    uint32_t height_stride = rstp->tin.height_stride;
+
+    int b = 0;
+    int batch_workindex = 0;
+    int work_units = rstp->work_units;
+
+    //work unit loop
+    while(work_unit_index < work_units)
+    {
+        while((work_unit_index - batch_workindex) >= slice_per_batch)
+        {
+            b++;
+            if(b >= batches){
+                goto done;
+            }
+            batch_workindex += slice_per_batch;
+        }
+
+        int h_base = (work_unit_index - batch_workindex) * h_per_slice;
+        int h_count = min_i32(height - h_base, h_per_slice);
+        int base_offset = b * batch_stride + h_base * height_stride;
+        uint8_t const *inp_b = inp0 + base_offset;
+        uint8_t *outp_b = outp0 + base_offset;
+
+        l2fetch(inp_b, d32_stride, 128 * widvecs, h_count * nd32);
+        nn_requantize_qu8_to_qu8_hvx_d32(outp_b, inp_b, h_count, nd32, widvecs, height_stride, d32_stride, gain, in_offset, out_offset);
+
+        work_unit_index = __sync_fetch_and_add(&rstp->next_work, 1);
+    }
+
+done:
+    nn_sem_post(&rstp->done_sem);
+}
+
 static int do_requantize_8to8_execute(struct nn_node *self, struct nn_graph *nn)
 {
     const struct tensor *in_tensor = self->inputs[0];
@@ -312,7 +393,122 @@ static int do_requantize_8to8_execute(struct nn_node *self, struct nn_graph *nn)
 
     nn_sem_wait_n_times(&rstate.done_sem, n_threads);
 
-   // nn_requantize_qu8_to_qu8_hvx(out_data, in_data, n_elements, gain, in_offset, out_offset);
+    return 0;
+}
+
+static int do_requantize_8to8_execute_d32(struct nn_node *self, struct nn_graph *nn)
+{
+    const struct tensor *in_tensor = self->inputs[0];
+    const struct tensor *in_min_tensor = self->inputs[1];
+    const struct tensor *in_max_tensor = self->inputs[2];
+    const struct tensor *out_min_tensor = self->inputs[3];
+    const struct tensor *out_max_tensor = self->inputs[4];
+    struct tensor *out_tensor = self->outputs[0];
+    struct tensor *new_out_min_tensor = self->outputs[1];
+    struct tensor *new_out_max_tensor = self->outputs[2];
+
+    if(tensor_out_prepare_d32_sameas(out_tensor, in_tensor) != 0)
+    {
+        return errlog(nn, "out too small!");
+    }
+
+    float in_min = tensor_get_float(in_min_tensor, 0);
+    float in_max = tensor_get_float(in_max_tensor, 0);
+    float out_min = tensor_get_float(out_min_tensor, 0);
+    float out_max = tensor_get_float(out_max_tensor, 0);
+    float stepsize, recip_stepsize;
+
+    float old_out_min = out_min, old_out_max = out_max;
+    quantize_adjust_range(&out_min, &out_max, &stepsize, &recip_stepsize, out_min, out_max);
+    if(old_out_min != out_min || old_out_max != out_max)
+    {
+        return errlog(nn, "Requant_8to8: Supplied output range (%f, %f) does not yield an integer zero-point. Try using (%f, %f)!", old_out_min, old_out_max, out_min, out_max);
+    }
+    tensor_set_single_float(new_out_min_tensor, out_min);
+    tensor_set_single_float(new_out_max_tensor, out_max);
+
+    const float in_range = in_max - in_min;
+    const float out_range = out_max - out_min;
+    const float gain = in_range / out_range;
+    const uint8_t in_offset = saturate_u8(roundf_i32(-255 * in_min / in_range));
+    const uint8_t out_offset = saturate_u8(roundf_i32(-255 * out_min / out_range));
+
+    if(flt_getexp(gain) > 15) {
+        return errlog(nn, "Requantize_8to8: Out range too small compared to in range!");
+    }
+
+    //Requantize d32 execute
+    int b = in_tensor->shape.batches;
+    int h = in_tensor->shape.height;
+    int w = in_tensor->shape.width;
+    //int d = in_tensor->shape.depth;
+
+    //int h_pad_before = in_tensor->format.height_pad[0];
+    //int h_pad_after = in_tensor->format.height_pad[1];
+    int w_pad_before = in_tensor->format.width_pad[0];
+    int w_pad_after = in_tensor->format.width_pad[1];
+
+    //int h_total = h_pad_before + h + h_pad_after;
+    int w_total = w_pad_before + w + w_pad_after;
+
+    struct tensor_addressing tin = tensor_addressing_d32(in_tensor);
+    struct tensor_addressing tout = tensor_addressing_d32(out_tensor);
+    int wskip = w_pad_before & ~3;
+    int data_offset = 32 * (w_pad_before - wskip);
+    // we want the pointers to the start of the width padding (which may have been reduced),
+    // so pointers will be aligned.
+    tin.data -= data_offset;
+    tout.data -= data_offset;
+
+    struct requant_d32_runstate rstate = {
+        .opshape = in_tensor->shape,
+        .tin = tin,
+        .tout = tout,
+        .d32_iters = (w_total - wskip) / 4u,
+        .next_work = 0,
+        .in_offset = in_offset,
+        .out_offset = out_offset,
+        .gain = gain
+    };
+
+    nn_sem_init(&rstate.done_sem, 0);
+
+    unsigned row_work = rstate.d32_iters * tin.nd32;
+    int h_chunk = (row_work >= 1024) ? 1 : (1024 >> floor_log2(row_work));
+    if(h_chunk >= h)
+    {
+        if(b == 1)
+        {
+            h_chunk = (h + 1) >> 1;
+        }
+        else
+        {
+            h_chunk = h;
+        }
+    }
+
+    unsigned slice_per_batch = 1;
+    if(h > h_chunk)
+    {
+        slice_per_batch = (h + h_chunk - 1) / (unsigned)h_chunk;
+
+        if(slice_per_batch < 8)
+        {
+            h_chunk = (h + slice_per_batch - 1) / slice_per_batch;
+        }
+    }
+
+    rstate.h_per_slice = h_chunk;
+    rstate.slice_per_batch = slice_per_batch;
+    rstate.work_units = b * slice_per_batch;
+
+    int n_threads = min_i32(rstate.work_units, NUM_THREADS);
+    for(int i = 0; i < n_threads; i++)
+    {
+        nn_os_work_for_vector(nn, requantize_d32_hvx_work_func, &rstate);
+    }
+
+    nn_sem_wait_n_times(&rstate.done_sem, n_threads);
 
     return 0;
 }
@@ -633,6 +829,11 @@ static int requantize_8to8_execute(struct nn_node *self, struct nn_graph *nn)
     return launcher(self, nn, do_requantize_8to8_execute);
 }
 
+static int requantize_8to8_execute_d32(struct nn_node *self, struct nn_graph *nn)
+{
+    return launcher(self, nn, do_requantize_8to8_execute_d32);
+}
+
 static int requantrange_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	return launcher(self,nn,do_requantrange_execute);
@@ -812,6 +1013,15 @@ struct nn_node_ops nn_ops_for_Requantize_8to8 = {
     .n_outputs = NN_IOCOUNT(3)
 };
 
+struct nn_node_ops nn_ops_for_Requantize_8to8_d32 = {
+    .execute = requantize_8to8_execute_d32,
+    .check = NULL,
+    .ctor = node_alloc_common,
+    .dtor = node_free_common,
+    .flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
+    .n_inputs = NN_IOCOUNT(5),
+    .n_outputs = NN_IOCOUNT(3)
+};
 // Requantize_32to16:
 // convert 32-bit quantized to 16-bit quantized, relying on
 // supplied range (inputs 3 & 4) to determine range.

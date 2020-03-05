@@ -112,6 +112,7 @@ static int input_execute(struct nn_node *self, struct nn_graph *nn)
 		&& (self->n_outputs == 1)
 		&& nn->batchseq.graph_batches == 0
 		&& ((((size_t)(nn->inputs[0].data)) & 127) == 0)
+		&& (0 != nn->inputs[0].data_size) //data_size == 0 can obviously cause problems with the page check below
 		&& !page_cross_check( (uint8_t const*)nn->inputs[0].data+nn->inputs[0].data_size,
 				256, 0x1000)
 	  )) {

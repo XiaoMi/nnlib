@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -53,6 +53,7 @@
 #include "nn_prepare.h"
 #include "expand_nodes.h"
 #include "nn_gentranspose.h"
+#include "udo_impl_dsp_hexnn_internal_v2.h"
 
 // int hexagon_nn_prepare(nn_id id);
 
@@ -1151,8 +1152,9 @@ maybe_morph_supernode_to_superfc( struct nn_graph *nn,
 	if( new_outputs[0].max_sizes[1] != 1 || new_outputs[1].max_sizes[2] != 1)
 		return 0;
 	// find the filter weights
-	struct nn_node const *wts = find_node_must_be_Const_from_ref( nn, &new_inputs[1]);
-	if( wts == NULL) return errlog(nn,"weights input must be const");
+	struct nn_node *wts;
+	if((wts = find_node_must_be_Const_from_ref( nn, &new_inputs[1])) == NULL)
+		return errlog(nn,"weights input must be const");
 	struct tensor const *wts_tensor = wts->outputs[0];
 	int filt_h = wts_tensor->shape.filt_height;
 	int filt_w = wts_tensor->shape.filt_width;
@@ -1169,6 +1171,7 @@ maybe_morph_supernode_to_superfc( struct nn_graph *nn,
 	if( source_odef->max_sizes[1] != filt_h  || source_odef->max_sizes[2] != filt_w ){
 		return 0;			// input shape doesn't match filter.
 	}
+
 	logmsg(nn,4,"About to morph node 0x%x to SuperFC [%d x %d]", (unsigned)node_id, filt_h, filt_w );
 
 	// that is a good candidate! after here we do it or fail.
@@ -1203,8 +1206,8 @@ static int try_create_transpose_conv_nodes(struct nn_graph *nn, struct nn_node *
 {
 	struct nn_node *transpose_conv_node = *transpose_conv_node_p;
 	int ntyp = transpose_conv_node->node_type;
-	if (ntyp == OP_QuantizedTransposeConv2d_8x8p32to8 || ntyp == OP_QuantizedTransposeConv2d_16x16p32to16)
-		expand_transpose_conv_nodes(nn, transpose_conv_node_p);
+	if (ntyp == OP_QuantizedTransposeConv2d_8x8p32to8 || ntyp == OP_QuantizedTransposeConv2d_8x8p8to8 || ntyp == OP_QuantizedTransposeConv2d_16x16p32to16)
+		return expand_transpose_conv_nodes(nn, transpose_conv_node_p);
 	return 0;
 }
 
@@ -1548,6 +1551,51 @@ static int check_dims_equal(struct output const *outA, struct output const *outB
 	return 0;
 }
 
+static int check_dims_equal_or_broadcastable(struct output const *outA, struct output const *outB)
+{
+	uint8_t broadcastingB = 0;
+	uint8_t first_mismatch = 1;
+	for (int i = 0; i < 4; i++){
+		uint32_t szA = outA->max_sizes[i];
+		uint32_t szB = outB->max_sizes[i];
+		if (szA != szB){
+			//Sizes don't match -- potientially ok if we can broadcast
+			if (!(1 == szA || 1 == szB)){
+				//Can't broadcast return -1
+				return -1;
+			}
+			//Still might be able to broadcast
+			//Is this the first mismatch we have found?
+			if (first_mismatch){
+				//If yes then set which tensor will be broadcast
+				if(1 == szB){
+					broadcastingB = 1;
+				}
+				//Default is to broadcast A so we can continue on
+				first_mismatch = 0;
+			}
+			//If this wasn't the fist mismatch then we need to check which tensor
+			//We are broadcasting
+			else if ((1 != szB && broadcastingB) || (1 != szA && !(broadcastingB))){
+				//We can't broadcast both tensors so we return -1
+				return -1;
+			}
+		}
+	}
+	return 0;
+}
+
+static int  __attribute__((unused)) is_tensor_scalar(struct output const *out_tensor)
+{
+	for (int i = 0; i < 4; i++){
+		uint32_t sz = out_tensor->max_sizes[i];
+		if (1 != sz){
+			return -1;
+		}
+	}
+	return 0;	
+}
+
 static int check_spaceop_ok_for_d32(struct nn_graph * nn, struct nn_node * srcnode );
 static int check_batchop_ok_for_d32(struct nn_graph * nn, struct nn_node * srcnode );
 static int get_blocksize_values( struct nn_graph *nn, struct input inref,  int * blocksize_h, int * blocksize_w);
@@ -1606,7 +1654,8 @@ static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode
 
 	 case OP_DepthwiseSupernode_8x8p8to8:   return OP_DepthwiseSupernode_8x8p8to8_d32;
 	 case OP_DepthwiseSupernode_8x8p32to8:  return OP_DepthwiseSupernode_8x8p32to8_d32;
-
+	 
+	 case OP_DepthwiseSupernode_16x16p32to16:   return OP_DepthwiseSupernode_16x16p32to16_d32 | D32REPL_16;
 
 	 case OP_QuantizedBatchNorm_8x8p8to8:	return OP_QuantizedBatchNorm_8x8p8to8_d32;
 	 case OP_QuantizedBatchNorm_8x8p32to8:	return OP_QuantizedBatchNorm_8x8p32to8_d32;
@@ -1657,7 +1706,6 @@ static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode
 
 
 	 case OP_QuantizedAdd_8p8to8:
-	 case OP_QuantizedMul_8x8to8:
 	  {
 		struct nn_node *src0;
 		struct nn_node *src1;
@@ -1689,12 +1737,7 @@ static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode
 			return -1;
 		}
 
-		switch (try_op) {
-			case OP_QuantizedAdd_8p8to8: return D32REPL_TWOIN | OP_QuantizedAdd_8p8to8_d32;
-			case OP_QuantizedSub_8p8to8: return D32REPL_TWOIN | OP_QuantizedSub_8p8to8_d32;
-			case OP_QuantizedMul_8x8to8: return D32REPL_TWOIN | OP_QuantizedMul_8x8to8_d32;
-			default: return -1;
-		}
+		return D32REPL_TWOIN | ((try_op==OP_QuantizedAdd_8p8to8)? OP_QuantizedAdd_8p8to8_d32: OP_QuantizedSub_8p8to8_d32);
 	  }
 	 case OP_QuantizedPad_8:		// this can be converted if it does not do depth padding.
 	 case OP_QuantizedPad_u16:
@@ -1743,6 +1786,15 @@ static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode
 		}
 		return OP_MirrorPad_8_d32;
 	 }
+     case OP_Requantize_8to8:
+     {
+         struct nn_node *src = find_node(nn, srcnode->input_refs[0].src_id);
+         if(src == NULL)
+             return errlog(nn, "Can't find src node of Requant_8to8 op");
+         if(src->node_type != OP_Convert_from_d32)
+            return -1; //Only use d32 version if input is d32
+         return OP_Requantize_8to8_d32;
+     }
       //only for testing instance norm hvx for now
 	 case OP_QuantizedInstanceNorm_8:       return OP_QuantizedInstanceNorm_8_d32;
 	 case OP_QuantizedInstanceNormBG_8:     return OP_QuantizedInstanceNormBG_8_d32;
@@ -1849,6 +1901,27 @@ static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode
                 if(3 == in_axis)    return OP_ArgMin_8_d32;
             }
             break;
+	  }
+	  case OP_QuantizedMul_8x8to8:
+	  {
+	  	//From op_mul_d32 we have the following requirements
+	  	//Dimensions must match; except it's ok to disagree on batches or height, as long as B input has size 1
+	  	//Get the input nodes first
+	  	struct nn_node *src0;
+		struct nn_node *src1;
+		if ((src0 = find_node(nn,srcnode->input_refs[0].src_id)) == NULL) return errlog(nn,"src0 not found");
+		if ((src1 = find_node(nn,srcnode->input_refs[1].src_id)) == NULL) return errlog(nn,"src1 not found");
+		int src0_idx = srcnode->input_refs[0].output_idx;
+		int src1_idx = srcnode->input_refs[1].output_idx;
+		//Check if we have valid inputs
+		//Valid inputs either have all matching dimensions
+		//Or can be broadcast
+		if ( check_dims_equal_or_broadcastable(&src0->output_defs[src0_idx],&src1->output_defs[src1_idx]) != 0 ){
+			return -1;
+		}
+		//Valid inputs so we can go ahead and replace with d32 version
+	  	return D32REPL_TWOIN | OP_QuantizedMul_8x8to8_d32;
+
 	  }
 	/////////////////// 16-bit arith ops //////////////////////
 	 case OP_QuantizedAdd_u16:
@@ -3105,6 +3178,12 @@ static int try_fold_scalar_mpy(struct nn_graph *nn, struct nn_node **requant_nod
 
 	scaleval = read_float_from_qu8(mul_const_val->outputs[0], mul_const_min->outputs[0], mul_const_max->outputs[0]);
 
+	// TODO: Handle negative scalars properly
+	if(scaleval < 0.f){
+		logmsg(nn,4,"fold scalar mpy not supported for negative scalars");
+		return 0;
+	}
+
 	logmsg(nn,2,"candidate mpy %x by scalar %f",mul_node->node_id,scaleval);
 	if ((supernode = find_node(nn,mul_node->input_refs[0].src_id)) == NULL) return 0;
 	//
@@ -3413,6 +3492,44 @@ static int do_remove_unnecessary_dequant_quants(struct nn_graph *nn, struct nn_n
 static int remove_unnecessary_dequant_quants(struct nn_graph *nn)
 {
 	return graph_iterator(nn,do_remove_unnecessary_dequant_quants);
+}
+
+/*
+ * Find Requantize_32to8 with Const min/max --> Requantize_8to8 with Const Min/Max that are the same values,
+ * then remove Requantize_8to8
+ */
+
+static int do_remove_unnecessary_requants(struct nn_graph *nn, struct nn_node **nodeptr)
+{
+	struct nn_node *requantize_8to8_node = *nodeptr;
+	struct nn_node *requantize_32to8_node;
+	float requantize_32to8_min_val;
+	float requantize_32to8_max_val;
+	float requantize_8to8_min_val;
+	float requantize_8to8_max_val;
+	uint32_t src_id;
+	if (requantize_8to8_node->node_type != OP_Requantize_8to8) return 0;
+	logmsg(nn,4,"Found requantize_8to8 ID %x",requantize_8to8_node->node_id);
+	src_id = requantize_8to8_node->input_refs[0].src_id;
+	if ((requantize_32to8_node=find_node(nn,src_id)) == NULL) return errlog(nn,"src %d not found",src_id);
+	if (requantize_32to8_node->node_type != OP_Requantize_32to8) return 0;
+	if (try_get_const_float_val(nn,requantize_32to8_node->input_refs[3].src_id,&requantize_32to8_min_val) != 0) return 0;
+	if (try_get_const_float_val(nn,requantize_32to8_node->input_refs[4].src_id,&requantize_32to8_max_val) != 0) return 0;
+	if (try_get_const_float_val(nn,requantize_8to8_node->input_refs[3].src_id,&requantize_8to8_min_val) != 0) return 0;
+	if (try_get_const_float_val(nn,requantize_8to8_node->input_refs[4].src_id,&requantize_8to8_max_val) != 0) return 0;
+	logmsg(nn,4,"requantize_32to8_min=%f requantize_32to8_max=%f requantize_8to8_min=%f requantize_8to8_max=%f",
+		requantize_32to8_min_val,requantize_32to8_max_val,requantize_8to8_min_val,requantize_8to8_max_val);
+	if (requantize_32to8_min_val != requantize_8to8_min_val) return 0;
+	if (requantize_32to8_max_val != requantize_8to8_max_val) return 0;
+	logmsg(nn,4,"changing %d refs to %d...",requantize_8to8_node->node_id,requantize_32to8_node->node_id);
+
+	change_output_refs( nn, requantize_8to8_node, requantize_8to8_node->node_id, requantize_32to8_node->node_id, 0x321);
+	return 0;
+}
+
+static int remove_unnecessary_requants(struct nn_graph *nn)
+{
+	return graph_iterator(nn,do_remove_unnecessary_requants);
 }
 
 
@@ -3975,6 +4092,22 @@ static int do_convert_insane_dwise_to_Mul(struct nn_graph *nn, struct nn_node **
 		node->output_defs)) == NULL) return errlog(nn,"ctor fail");
 	if (replace_nodes(nn,nodeptr,newnode,node) != 0) return errlog(nn,"replace_nodes");
 	logmsg(nn,2,"1x1 Depthwise Conv converted to Mul");
+
+	// swap batch and depth shapes of filter to correct
+	// shape for OP_QuantizedMul_8x8to32 op.
+	uint32_t filter_nid = newnode->input_refs[1].src_id;
+	struct nn_node* filter_node = find_node_must_be_Const(nn, filter_nid);
+	if (!filter_node)
+		return errlog(nn, "Unable to transpose filter.");
+
+	uint32_t filter_depth = filter_node->outputs[0]->shape.filt_depth;
+	filter_node->outputs[0]->shape.filt_depth = filter_node->outputs[0]->shape.filt_batches;
+	filter_node->outputs[0]->shape.filt_batches = filter_depth;
+
+	uint32_t max_filter_depth = filter_node->output_defs[0].max_sizes[2];
+	filter_node->output_defs[0].max_sizes[2] = filter_node->output_defs[0].max_sizes[3];
+	filter_node->output_defs[0].max_sizes[3] = max_filter_depth;
+
 	return 0;
 }
 
@@ -4606,6 +4739,99 @@ static int print_const_nodes(struct nn_graph *nn)
 }
 
 
+static int do_udo_add_depth32_converts (struct nn_graph *nn, struct nn_node **nodeptr) {
+        struct nn_node *node = *nodeptr;
+        uint32_t flags = node->ops->flags;
+        if (node->node_type == NN_OPS_MAX && (flags & NN_NODE_FLAG_D32_INPUT || flags & NN_NODE_FLAG_D32_OUTPUT)) {    // d32 udo node
+                if ((node->udo_info).udo_added_d32_converts == 0) {     // no d32 converts added yet 
+                        struct nn_node ** insert_conv_to_ptr = nodeptr;
+                        struct nn_node ** insert_conv_from_ptr = &(node->next);
+                        struct nn_node *conv_to_node, *conv_from_node;
+                        SnpeUdo_HexNNTensorLayout_t *in_layouts, *out_layouts;
+                        SnpeUdo_QuantizationType_t *in_q_types, *out_q_types;
+                        uint32_t num_in, num_out, hexnn_in_idx = 0, hexnn_out_idx = 0;
+                        num_in = (node->udo_info).udo_num_input_tensors;
+                        num_out = (node->udo_info).udo_num_output_tensors;
+                        in_layouts = (SnpeUdo_HexNNTensorLayout_t*)((node->udo_info).udo_input_layouts);
+                        out_layouts = (SnpeUdo_HexNNTensorLayout_t*)((node->udo_info).udo_output_layouts);
+                        in_q_types = (SnpeUdo_QuantizationType_t*)(node->udo_info).udo_input_q_types;
+                        out_q_types = (SnpeUdo_QuantizationType_t*)(node->udo_info).udo_output_q_types;
+                        int n_hexnn_tenosrs_per_udo_tensor_tf = 3;
+                        int n_hexnn_tenosr_per_udo_tensor_nonquant = 1;
+                        int res;
+                        if (check_udo_library_existence((node->udo_info).udo_lib_id) != 0) {
+                                return errlog(nn, "udo node id=0x%x adding d32 converts failed, udo library has not been registered", node->node_id);
+                        }
+                        if (flags & NN_NODE_FLAG_D32_INPUT && in_layouts) {   // needs convert-to's
+                                for (int i=0;i<num_in;i++) {
+                                         if (in_layouts[i] == SNPE_UDO_DSP_TENSOR_LAYOUT_D32) {
+                                                conv_to_node = NULL;
+                                                if ((res=need_convert_to_d32(nn, node, (node->input_refs)[hexnn_in_idx], &((node->input_refs)[hexnn_in_idx]), &conv_to_node))!=0) {
+                                                        return errlog(nn,"udo node id=0x%x adding d32 converts failed. convert to d32 cannot be generated", node->node_id);
+                                                }
+                                                if (conv_to_node) {
+                                                        insert_nodes(nn, insert_conv_to_ptr, conv_to_node);
+                                                        insert_conv_to_ptr = &(conv_to_node->next);
+                                                }
+                                         }
+                                         if (in_q_types[i] == SNPE_UDO_QUANTIZATION_NONE) {
+                                                hexnn_in_idx += n_hexnn_tenosr_per_udo_tensor_nonquant;
+                                         } else if (in_q_types[i] == SNPE_UDO_QUANTIZATION_TF) {
+                                                hexnn_in_idx += n_hexnn_tenosrs_per_udo_tensor_tf;
+                                         } else {
+                                                return errlog(nn,"udo node id=0x%x adding d32 converts failed. udo has invalid input quantization types", node->node_id);
+                                         }
+                                }
+                        }
+                        if (flags & NN_NODE_FLAG_D32_OUTPUT && out_layouts) {   // needs convert-from's
+                                for (int i=0;i<num_out;i++) {
+                                         if (out_layouts[i] == SNPE_UDO_DSP_TENSOR_LAYOUT_D32) {
+                                                conv_from_node = NULL;
+                                                if ((conv_from_node = create_convert_from_d32(nn, node->node_id, hexnn_out_idx, &(((node->outputs)[hexnn_out_idx])->shape), ((node->output_defs)[hexnn_out_idx]).elementsize)) == NULL) {
+                                                        return errlog(nn,"udo node id=0x%x adding d32 converts failed. convert from d32 node failed to be generated", node->node_id);
+                                                }
+                                                struct input replaced_input_ref = {node->node_id, hexnn_out_idx};
+                                                struct input replacing_with_input_ref = {conv_from_node->node_id, 0};
+                                                change_single_output_ref(nn, node, replaced_input_ref, replacing_with_input_ref);
+                                                insert_nodes(nn, insert_conv_from_ptr, conv_from_node);
+                                                insert_conv_from_ptr = &(conv_from_node->next);
+                                         }
+                                         if (out_q_types[i] == SNPE_UDO_QUANTIZATION_NONE) {
+                                                hexnn_out_idx += n_hexnn_tenosr_per_udo_tensor_nonquant;
+                                         } else if (out_q_types[i] == SNPE_UDO_QUANTIZATION_TF) {
+                                                hexnn_out_idx += n_hexnn_tenosrs_per_udo_tensor_tf;
+                                         } else {
+                                                return errlog(nn,"udo node id=0x%x adding d32 converts failed. udo has invalid output quantization types", node->node_id);
+                                         }
+                                }
+                        }
+                        node_rehash_inputrefs(node);
+                        (node->udo_info).udo_added_d32_converts = 1;     // d32 converts added
+                }
+        }
+        return 0;
+}
+
+static int udo_add_depth32_converts(struct nn_graph *nn) {
+        if (nn->num_udos > 0) {
+                struct udo_node* cur_udo_node = nn->udo_list_start;
+                uint32_t flags, any_d32 = 0;
+                while (cur_udo_node) {
+                        flags = cur_udo_node->node->ops->flags;
+                        if (flags & NN_NODE_FLAG_D32_INPUT || flags & NN_NODE_FLAG_D32_OUTPUT) {
+                                if ((cur_udo_node->node->udo_info).udo_added_d32_converts == 0) {
+                                        any_d32 = 1;
+                                        break;
+                                }
+                        }
+                        cur_udo_node = cur_udo_node->next;
+                }
+                if (any_d32) {
+                        return graph_iterator(nn, do_udo_add_depth32_converts);
+                }
+        }
+        return 0;
+}
 
 
 //#define CHECK_PERFORMANCE_PREPARE 1
@@ -4633,6 +4859,9 @@ static int optimize(struct nn_graph *nn)
 
 
 	init_hashtable(nn);
+	CHECK(GRAPHCHECK_HASH)
+
+	if ((err = udo_add_depth32_converts(nn)) != 0)  return err;       // add d32 converters for udo nodes
 	CHECK(GRAPHCHECK_HASH)
 
 	if( (nn->op_class_set & NN_NODE_FLAG_CLS_REQUANTRANGE)!=0){		// any RequantizationRange_32?
@@ -4666,6 +4895,7 @@ static int optimize(struct nn_graph *nn)
 	if ((err = make_optimize_axisshuffle(nn)) != 0) return err;
 
 	if ((err = remove_unnecessary_dequant_quants(nn)) != 0) return err;
+	if ((err = remove_unnecessary_requants(nn)) != 0) return err;
 	PREPARE_TIME()
 	if( (nn->op_class_set & NN_NODE_FLAG_CLS_CHANSHUFFLE)!= 0){			// any QuantizedChannelShuffle_8 ?
 		if ((err = combine_chanshuffle(nn)) != 0) return err;
@@ -4709,7 +4939,6 @@ static int optimize(struct nn_graph *nn)
 	if ((err = gather_const_nodes(nn)) != 0) return err;
 	PREPARE_TIME();
 	if ((err = print_const_nodes(nn)) != 0) return err;
-
 	CHECK(GRAPHCHECK_DEADNODES|GRAPHCHECK_HASH|GRAPHCHECK_NONCONST)
 
 #ifdef CHECK_PERFORMANCE_PREPARE
@@ -4734,6 +4963,201 @@ static int note_predecessors(struct nn_graph *nn)
 	return graph_iterator(nn,note_a_predecessor);
 }
 
+static int udo_create_operations (struct nn_graph *nn) 
+{
+        if (nn->num_udos>0) {
+                struct udo_node* cur_udo_node = nn->udo_list_start;
+                struct nn_node *node, *in_ref_node;
+                SnpeUdo_Operation_t udo_operation;
+                struct input in_ref;
+                struct tensor* in_ref_out_tensor;
+                SnpeUdo_TensorParam_t *snpe_udo_inputs, *snpe_udo_outputs;
+                SnpeUdo_TFQuantize_t default_q = {0, 0};
+                SnpeUdo_QuantizationType_t* q_types;
+                int create_op_failure = 0;
+                int hexnn_in_tensor_ind, hexnn_out_tensor_ind;
+                int n_hexnn_tenosrs_per_udo_tensor_tf = 3;
+                int n_hexnn_tenosr_per_udo_tensor_nonquant = 1;
+                while (cur_udo_node) {
+                        node = cur_udo_node->node;
+                        udo_operation = NULL;
+                        hexnn_in_tensor_ind = 0;
+                        if((node->udo_info).udo_num_input_tensors == 0) {
+                                snpe_udo_inputs = NULL;
+                        } else {
+                                snpe_udo_inputs = nn_malloc(((node->udo_info).udo_num_input_tensors)*sizeof(SnpeUdo_TensorParam_t));
+                                if (snpe_udo_inputs == NULL) {
+                                        errlog(nn,"udo node id=0x%x create operation failed. memeory allocation failed for input tensors", node->node_id);
+                                        create_op_failure = 1;
+                                        break;
+                                }
+                                if (check_udo_library_existence((node->udo_info).udo_lib_id) != 0) {
+                                        nn_free(snpe_udo_inputs);
+                                        errlog(nn, "udo node id=0x%x create operation failed. udo library has not been registered", node->node_id);
+                                        create_op_failure = 1;
+                                        break;
+                                }
+                                q_types = (SnpeUdo_QuantizationType_t*)((node->udo_info).udo_input_q_types);
+                                for (int i=0; i<(node->udo_info).udo_num_input_tensors; i++) {
+                                        snpe_udo_inputs[i].layout = SNPE_UDO_LAYOUT_NHWC;
+                                        snpe_udo_inputs[i].tensorRank = 4;
+                                        (snpe_udo_inputs[i].quantizeParams).TFParams = default_q;
+                                        in_ref = (node->input_refs)[hexnn_in_tensor_ind];
+                                        in_ref_node = nn->head;
+                                        while(in_ref_node) {
+                                                if(in_ref_node->node_id == in_ref.src_id) {
+                                                        break;
+                                                }
+                                                in_ref_node = in_ref_node->next; 
+                                        }
+                                        in_ref_out_tensor  = in_ref_node->outputs[in_ref.output_idx];
+                                        snpe_udo_inputs[i].currDimensions = &((in_ref_out_tensor->shape).dimension[0]);  // passing pointers to udo library, not safe
+                                        snpe_udo_inputs[i].maxDimensions = (in_ref_node->output_defs[in_ref.output_idx]).max_sizes;
+                                        snpe_udo_inputs[i].tensorData = in_ref_out_tensor->data;
+                                        uint32_t ele_size = (in_ref_node->output_defs[in_ref.output_idx]).elementsize;
+                                        // assumes input data type always fixed point.
+                                        SnpeUdo_DataType_t in_data_type = SNPE_UDO_DATATYPE_FIXED_8;
+                                        switch(ele_size) {
+                                                case 1: in_data_type = SNPE_UDO_DATATYPE_FIXED_8; break;
+                                                case 2: in_data_type = SNPE_UDO_DATATYPE_FIXED_16; break;
+                                                case 4: in_data_type = SNPE_UDO_DATATYPE_FIXED_32; break;
+                                        }
+                                        snpe_udo_inputs[i].dataType = in_data_type;
+                                        if (q_types[i] == SNPE_UDO_QUANTIZATION_NONE) {
+                                                (snpe_udo_inputs[i].quantizeParams).quantizeType = SNPE_UDO_QUANTIZATION_NONE;
+                                                 hexnn_in_tensor_ind += n_hexnn_tenosr_per_udo_tensor_nonquant;
+                                        } else if (q_types[i] == SNPE_UDO_QUANTIZATION_TF) {
+                                                (snpe_udo_inputs[i].quantizeParams).quantizeType = SNPE_UDO_QUANTIZATION_TF;
+                                                 hexnn_in_tensor_ind += n_hexnn_tenosrs_per_udo_tensor_tf;
+                                        } else {
+                                                nn_free(snpe_udo_inputs);
+                                                errlog(nn,"udo node id=0x%x create operation failed. udo has invalid input quantization types", node->node_id);
+                                                create_op_failure = 1;
+                                                break;
+                                        }
+                                }
+                                if (create_op_failure == 1)  break;
+                        }
+                        (node->udo_info).udo_input_tensors = snpe_udo_inputs;
+
+                        hexnn_out_tensor_ind = 0;
+                        if((node->udo_info).udo_num_output_tensors == 0) {
+                                snpe_udo_outputs = NULL;
+                        } else {
+                                snpe_udo_outputs = nn_malloc(((node->udo_info).udo_num_output_tensors)*sizeof(SnpeUdo_TensorParam_t));
+                                if (snpe_udo_outputs == NULL) {   
+                                        errlog(nn,"udo node id=0x%x create operation failed. memeory allocation failed for output tensors", node->node_id);
+                                        create_op_failure = 1;
+                                        break;
+                                }
+                                if (check_udo_library_existence((node->udo_info).udo_lib_id) != 0) {
+                                        nn_free(snpe_udo_outputs);
+                                        errlog(nn, "udo node id=0x%x create operation failed. udo library has not been registered", node->node_id);
+                                        create_op_failure = 1;
+                                        break;
+                                }
+                                q_types = (SnpeUdo_QuantizationType_t*)((node->udo_info).udo_output_q_types);
+                                for (int i=0; i<(node->udo_info).udo_num_output_tensors; i++) {
+                                        snpe_udo_outputs[i].layout = SNPE_UDO_LAYOUT_NHWC;
+                                        (snpe_udo_outputs[i].quantizeParams).TFParams = default_q;
+                                        snpe_udo_outputs[i].tensorRank = 4;
+                                        snpe_udo_outputs[i].dataType = SNPE_UDO_DATATYPE_FIXED_8;  // default for out tensors, real type is updated before execute
+                                        snpe_udo_outputs[i].currDimensions = &((((node->outputs)[hexnn_out_tensor_ind])->shape).dimension[0]);  // passing pointers to udo library, not safe
+                                        snpe_udo_outputs[i].maxDimensions = ((node->output_defs)[hexnn_out_tensor_ind]).max_sizes;
+                                        snpe_udo_outputs[i].tensorData = ((node->outputs)[hexnn_out_tensor_ind])->data;
+
+                                        if (q_types[i] == SNPE_UDO_QUANTIZATION_NONE) {
+                                                (snpe_udo_outputs[i].quantizeParams).quantizeType = SNPE_UDO_QUANTIZATION_NONE;
+                                                 hexnn_out_tensor_ind += n_hexnn_tenosr_per_udo_tensor_nonquant;
+                                        } else if (q_types[i] == SNPE_UDO_QUANTIZATION_TF) {
+                                                (snpe_udo_outputs[i].quantizeParams).quantizeType = SNPE_UDO_QUANTIZATION_TF;
+                                                 hexnn_out_tensor_ind += n_hexnn_tenosrs_per_udo_tensor_tf;
+                                        } else {
+                                                nn_free(snpe_udo_outputs);
+                                                errlog(nn,"udo node id=0x%x create operation failed. udo has invalid output quantization types", node->node_id);
+                                                create_op_failure = 1;
+                                                break;
+                                        }
+                                }
+                                if (create_op_failure == 1)  break;
+                        }
+                        (node->udo_info).udo_output_tensors = snpe_udo_outputs;
+
+                        if (check_udo_library_existence((node->udo_info).udo_lib_id) != 0) {
+                                errlog(nn, "udo node id=0x%x create operation failed. udo library has not been registered", node->node_id);
+                                create_op_failure = 1;
+                                break;
+                        }
+                        if ((*(SnpeUdo_CreateOperationFunction_t)((node->udo_info).udo_create_operation)) ((node->udo_info).udo_op_factory, (node->udo_info).udo_op_infra, (node->udo_info).udo_num_input_tensors, snpe_udo_inputs, (node->udo_info).udo_num_output_tensors, snpe_udo_outputs, &udo_operation) != SNPE_UDO_NO_ERROR || udo_operation == NULL) {
+                                errlog(nn, "udo node id=0x%x create operation failed. udo create operation function failed", node->node_id);
+                                create_op_failure = 1;
+                                break;
+                        }
+                        snpe_udo_inputs = NULL;
+                        snpe_udo_outputs = NULL;
+                        (node->udo_info).udo_operation = udo_operation;
+                        cur_udo_node = cur_udo_node->next;
+                }
+
+                cur_udo_node = nn->udo_list_start;
+                while (create_op_failure == 0 && cur_udo_node) {
+                        node = cur_udo_node->node;
+                        if (check_udo_library_existence((node->udo_info).udo_lib_id) != 0) {
+                                errlog(nn, "udo node id=0x%x create operation failed. udo library has not been registered", node->node_id);
+                                create_op_failure = 1;
+                                break;
+                        }
+                        q_types = (SnpeUdo_QuantizationType_t*)((node->udo_info).udo_input_q_types);
+                        for (int i=0; i<(node->udo_info).udo_num_input_tensors; i++) {
+                                if (q_types[i] != SNPE_UDO_QUANTIZATION_NONE && q_types[i] != SNPE_UDO_QUANTIZATION_TF) {
+                                                errlog(nn,"udo node id=0x%x create operation failed. udo has invalid input quantization types", node->node_id);
+                                                create_op_failure = 1;
+                                                break;
+                                }
+                        }
+                        if (create_op_failure == 1)  break;
+                        q_types = (SnpeUdo_QuantizationType_t*)((node->udo_info).udo_output_q_types);
+                        for (int i=0; i<(node->udo_info).udo_num_output_tensors; i++) { 
+                                if (q_types[i] != SNPE_UDO_QUANTIZATION_NONE && q_types[i] != SNPE_UDO_QUANTIZATION_TF) {
+                                                errlog(nn,"udo node id=0x%x create operation failed. udo has invalid output quantization types", node->node_id);
+                                                create_op_failure = 1;
+                                                break;
+                                }
+                        }
+                        if (create_op_failure == 1)  break;
+                        cur_udo_node = cur_udo_node->next;
+                }
+
+                if (create_op_failure == 1) {
+                        errlog(nn, "prepare: udo node id=0x%x create operation failed", node->node_id);
+                        // call udo release (operation) on all udo nodes if operation is not NULL
+                        cur_udo_node = nn->udo_list_start;
+                        while(cur_udo_node) {
+                                node = cur_udo_node->node;
+                                if ((node->udo_info).udo_input_tensors)  nn_free((node->udo_info).udo_input_tensors);
+                                if ((node->udo_info).udo_output_tensors)  nn_free((node->udo_info).udo_output_tensors);
+                                (node->udo_info).udo_input_tensors = NULL;
+                                (node->udo_info).udo_num_input_tensors = 0;
+                                (node->udo_info).udo_output_tensors = NULL;
+                                (node->udo_info).udo_num_output_tensors = 0;
+                                if((node->udo_info).udo_operation) {
+                                        if (check_udo_library_existence((node->udo_info).udo_lib_id) == 0) {
+                                                if((*(SnpeUdo_ReleaseOpFunction_t)((node->udo_info).udo_release_op))((node->udo_info).udo_operation) != SNPE_UDO_NO_ERROR) {
+                                                        errlog(nn, "prepare: udo node id=0x%x operation failed to be released", node->node_id);
+                                                        // operation still exists in udo lib, but not associates with the nodes
+                                                }
+                                        }
+                                        (node->udo_info).udo_operation = NULL;
+                                }
+                                cur_udo_node = cur_udo_node->next;
+                        }
+                        return -1;
+                }
+        }
+        return 0;
+}
+
+
 static int do_prepare_inner(struct nn_graph *nn)
 {
 	int err;
@@ -4757,6 +5181,7 @@ static int do_prepare_inner(struct nn_graph *nn)
 	if ((err = allocate_graph_storage(nn)) != 0) return err;
 	if ((err = run_op_check(nn)) != 0) return err;
 	if ((err = note_predecessors(nn)) != 0) return err;
+        if ((err = udo_create_operations(nn)) != 0) return err;
 	nn_os_hvx_power_off(nn); // MUST BE BEFORE THE UNLOCK MUTEX
 	nn_mutex_unlock(&graph_mutex);
 	nn->state = NN_GRAPH_PREPARED;
@@ -4768,48 +5193,12 @@ static int do_prepare_inner(struct nn_graph *nn)
 	if (nn->enable_graph_print) {
 		print_graph_to_file(nn);
 	}
-
 	return 0;
 }
 
-void check_processor_version(struct nn_graph *nn) {
-	// Check the DSP processor version against what we compiled for.
-	// See also:   (/prj/dsp/qdsp6/arch/hexagon_sdk_34/Hexagon_SDK/3.4.0/libs/common/qurt/computev65/include/qurt/qurt_event.h )
-	// qurt_sysenv_procname.asid
-	// qurt_sysenv_procname.name
-	// qurt_sysenv_get_hw_timer()
-	// qurt_sysenv_get_process_name()
-	//
-#ifdef USE_OS_QURT
-	qurt_arch_version_t av;
-	qurt_sysenv_get_arch_version(&av);
-	//   v66 (8150) e.g. 0x00018466
-	//      (talos) e.g. 0x00004066
-	logmsg(nn,1,"Arch_Version: %08x", av.arch_version);
-	int shortver = av.arch_version & 0xff;
-#ifdef HEXAGON_V68
-	int expver = 0x68;
-#else
-#ifdef HEXAGON_V66
-	int expver = 0x66;
-#else
-#ifdef HEXAGON_V65
-	int expver = 0x65;
-#else
-	int expver = 0x60;
-#endif // HEXAGON_V65
-#endif // HEXAGON_V66
-#endif // HEXAGON_V68
-	if (shortver != expver) {
-		errlog(nn,"WARN: ARCH-MISMATCH (compiled for v%x != actual v%x)", expver, shortver);
-	}
-#endif // USE_QURT_OS
-}
 
 int do_prepare(struct nn_graph *nn)
 {
-	check_processor_version(nn);
-
 	struct nn_prepare_state prepstate;
 	memset( &prepstate, 0, sizeof(prepstate));
 	nn->pstate = &prepstate;

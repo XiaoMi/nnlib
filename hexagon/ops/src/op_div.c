@@ -36,6 +36,7 @@
 #include <nn_graph.h>
 #include <string.h>
 #include "hvx_inlines.h"
+#include "quantize.h"
 
 #if defined(__hexagon__)
 #include "hexagon_types.h"
@@ -50,6 +51,13 @@
 struct mapdata {
     const uint8_t *in_data;
     uint8_t *map_data;
+    uint8_t *out_data;
+    nn_sem_t donesem;
+    int num_elements;
+};
+
+struct flipdata {
+    const uint8_t *in_data;
     uint8_t *out_data;
     nn_sem_t donesem;
     int num_elements;
@@ -92,87 +100,119 @@ static void map_values(struct nn_graph *nn, void *vtd)
     nn_sem_post(&td->donesem);
 }
 
+static void flip_values(struct nn_graph *nn, void *vtd)
+{
+    struct flipdata *td = vtd;
+    uint8_t* in_data = (uint8_t*) td->in_data;
+    uint8_t* out_data = td->out_data;
+    
+    HVX_Vector max_value = Q6_V_vsplat_R(0xFFFFFFFF);
+
+    const int num_loops = 1 + ((td->num_elements - 1) / 128); //ceiling
+
+    for (int i=0; i<num_loops; i++) {
+        HVX_Vector vin = *(HVX_Vector *) in_data;
+        HVX_Vector *vout = (HVX_Vector *) out_data;
+        
+        *vout = Q6_Vub_vsub_VubVub_sat(max_value, vin);
+
+        in_data += 128;
+        out_data += 128;
+    }
+
+    nn_sem_post(&td->donesem);
+}
+
 static int div_depthwise_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	const struct tensor *a_tensor = self->inputs[0];
-	const struct tensor *b_tensor = self->inputs[1];	
-	const struct tensor *a_min_tensor = self->inputs[2];
-	const struct tensor *a_max_tensor = self->inputs[3];
-	const struct tensor *b_min_tensor = self->inputs[4];
-	const struct tensor *b_max_tensor = self->inputs[5];
-	struct tensor *out_tensor = self->outputs[0];
-	struct tensor *out_min_tensor = self->outputs[1];
-	struct tensor *out_max_tensor = self->outputs[2];
-	uint8_t *a_data = a_tensor->data;
-	uint8_t *b_data = b_tensor->data;
-	float a_min_float = tensor_get_float(a_min_tensor,0);
-	float a_max_float = tensor_get_float(a_max_tensor,0);
-	float a_step = (a_max_float - a_min_float) / 255.f;
-	float b_min_float = tensor_get_float(b_min_tensor,0);
-	float b_max_float = tensor_get_float(b_max_tensor,0);
-	float b_step = (b_max_float - b_min_float) / 255.f;
-	uint8_t *out_data = out_tensor->data;
-	float *out_min = out_min_tensor->data;
-	float *out_max = out_max_tensor->data;
+    logmsg(nn,2,"div depthwise execute. self=%p ",self);
+    const struct tensor *a_tensor = self->inputs[0];
+    const struct tensor *b_tensor = self->inputs[1];
+    const struct tensor *a_min_tensor = self->inputs[2];
+    const struct tensor *a_max_tensor = self->inputs[3];
+    const struct tensor *b_min_tensor = self->inputs[4];
+    const struct tensor *b_max_tensor = self->inputs[5];
+    struct tensor *out_tensor = self->outputs[0];
+    struct tensor *out_min_tensor = self->outputs[1];
+    struct tensor *out_max_tensor = self->outputs[2];
+    uint8_t *a_data = a_tensor->data;
+    uint8_t *b_data = b_tensor->data;
+    float a_min_float = tensor_get_float(a_min_tensor,0);
+    float a_max_float = tensor_get_float(a_max_tensor,0);
+    float a_step = (a_max_float - a_min_float) / 255.f;
+    float b_min_float = tensor_get_float(b_min_tensor,0);
+    float b_max_float = tensor_get_float(b_max_tensor,0);
+    float b_step = (b_max_float - b_min_float) / 255.f;
+    uint8_t *out_data = out_tensor->data;
+    float *out_min = out_min_tensor->data;
+    float *out_max = out_max_tensor->data;
 
-	int elements = a_tensor->shape.batches * a_tensor->shape.height * a_tensor->shape.width * a_tensor->shape.depth;
-	int depth = b_tensor->shape.depth;
+    int elements = a_tensor->shape.batches * a_tensor->shape.height * a_tensor->shape.width * a_tensor->shape.depth;
+    int depth = b_tensor->shape.depth;
 
-	if(self->n_inputs > 6){
-		*out_min = tensor_get_float(self->inputs[6],0);
-		*out_max = tensor_get_float(self->inputs[7],0);
-	}
-	else{
-		*out_min = 2147483648.0f;
-		*out_max = -2147483648.0f;
+    if(self->n_inputs > 6){
+        *out_min = tensor_get_float(self->inputs[6],0);
+        *out_max = tensor_get_float(self->inputs[7],0);
+    }
+    else{
+        *out_min = 2147483648.0f;
+        *out_max = -2147483648.0f;
 
-		for(int d = 0; d < depth; d++){
-			float denominator = b_min_float + ((float)b_data[d]) * b_step;
+        for(int d = 0; d < depth; d++){
+            float denominator = b_min_float + ((float)b_data[d]) * b_step;
+            if (denominator > 0){
+                if(a_max_float/denominator > *out_max) *out_max = a_max_float/denominator;
+                if(a_min_float/denominator < *out_min) *out_min = a_min_float/denominator;
+            }
+            else if(denominator == 0.f){
+                return errlog(nn,"division by zero");
+            }
+            else{
+                if(a_min_float/denominator > *out_max) *out_max = a_min_float/denominator;
+                if(a_max_float/denominator < *out_min) *out_min = a_max_float/denominator;
+            }
+        }
+        if (*out_min == -0.f ){*out_min = 0;}
+        if (*out_max == -0.f ){*out_max = 0;}
+        if(*out_min < 0 && *out_max < 0) *out_max = 0;
+        if(*out_min > 0 && *out_max > 0) *out_min = 0;
+    }
+    logmsg(nn,2,"div out min/max=%f, %f ",*out_min, *out_max);
 
-			if(a_max_float/denominator > *out_max) *out_max = a_max_float/denominator;
-			if(a_min_float/denominator < *out_min) *out_min = a_min_float/denominator;
-		}
-		
-		if(*out_min < 0 && *out_max < 0) *out_max = 0;
-		if(*out_min > 0 && *out_max > 0) *out_min = 0;
-	}
-	
+    tensor_out_prepare_normal(out_min_tensor, 1, 1, 1, 1, NN_TYPE_FLOAT);
+    tensor_out_prepare_normal(out_max_tensor, 1, 1, 1, 1, NN_TYPE_FLOAT);
+    tensor_out_prepare_normal(out_tensor, a_tensor->shape.batches, a_tensor->shape.height, a_tensor->shape.width, a_tensor->shape.depth, NN_TYPE_QUINT8);
 
-	tensor_out_prepare_normal(out_min_tensor, 1, 1, 1, 1, NN_TYPE_FLOAT);
-	tensor_out_prepare_normal(out_max_tensor, 1, 1, 1, 1, NN_TYPE_FLOAT);
-	tensor_out_prepare_normal(out_tensor, a_tensor->shape.batches, a_tensor->shape.height, a_tensor->shape.width, a_tensor->shape.depth, NN_TYPE_QUINT8);
+    // For each depth:
+    //   1. Calculate a map from the depths' true range to quantized output
+    //   2. Go through the values at that depth and map them to the output
+    uint8_t map[256];
+    for(int d = 0; d < depth; d++){
+        float denominator = b_min_float + ((float)b_data[d]) * b_step;
+        if(denominator == 0.f) return errlog(nn,"division by zero");
 
-	float out_step = (*out_max - *out_min) / 255.f;
-	
-	// For each depth:
-	//   1. Calculate a map from the depths' true range to quantized output
-	//   2. Go through the values at that depth and map them to the output
-	uint8_t map[256];
-	for(int d = 0; d < depth; d++){
-		float denominator = b_min_float + ((float)b_data[d]) * b_step;
+        // Calculate map
+        for(int i = 0; i <= 255 ; i++){
+            float numerator = a_min_float + ((float)i) * a_step;
+            float quotient = numerator / denominator;
+            map[i] = quantize_uint8(quotient, *out_min, *out_max);
+        }
 
-		if(denominator == 0.f) return errlog(nn,"division by zero");
+        // Map the input to the output
+        for(int i = d; i < elements; i+=depth){
+            out_data[i] = map[a_data[i]];
+        }
+    }
 
-		// Calculate map
-		for(int i = 0; i <= 255 ; i++){
-			float numerator = a_min_float + ((float)i) * a_step;
-			float quotient = numerator / denominator;
-			map[i] = round((quotient - *out_min) / out_step);
-		}
-
-		// Map the input to the output
-		for(int i = d; i < elements; i+=depth){
-			out_data[i] = map[a_data[i]];
-		}
-	}
-
-	return 0;
+    return 0;
 }
 
 static int div_scalar_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"div execute. self=%p ",self);
 
+	const struct tensor *input_tensor = self->inputs[0];
+	uint8_t *input_data = input_tensor->data;
 	float in_min = tensor_get_float(self->inputs[2],0);
 	float in_max = tensor_get_float(self->inputs[3],0);
 	
@@ -184,6 +224,10 @@ static int div_scalar_execute(struct nn_node *self, struct nn_graph *nn)
 	float b_step = (b_max - b_min) / 255.f;
 
 	float scalar = b_min + ((float)b_data[0]) * b_step;
+	if(scalar == 0.f) return errlog(nn,"division by zero");
+	
+	struct tensor *out_tensor = self->outputs[0];
+	uint8_t *out_data = out_tensor->data;
 	
 	struct tensor *out_min_tensor = self->outputs[1];
 	struct tensor *out_max_tensor = self->outputs[2];
@@ -194,109 +238,136 @@ static int div_scalar_execute(struct nn_node *self, struct nn_graph *nn)
 	tensor_out_prepare_normal(out_min_tensor, 1, 1, 1, 1, NN_TYPE_FLOAT);
 	tensor_out_prepare_normal(out_max_tensor, 1, 1, 1, 1, NN_TYPE_FLOAT);
 
-	out_min[0] = in_min / scalar;
-	out_max[0] = in_max / scalar;
+	// if the quotient is positive then we simply divide the min and max
+	// and copy the data as-is
+	// otherwise, we divide the min and max, swap them and then flip
+	// the data around 128 so that x becomes 255-x
+	if(scalar > 0.f){
+		out_min[0] = in_min / scalar;
+		out_max[0] = in_max / scalar;
 
-	tensor_copy(self->outputs[0],self->inputs[0]);
+		tensor_copy(self->outputs[0],self->inputs[0]);
+	}
+	else{
+		tensor_out_prepare_normal(out_tensor, input_tensor->shape.batches, input_tensor->shape.height, input_tensor->shape.width, input_tensor->shape.depth, NN_TYPE_QUINT8);
+		
+		out_min[0] = in_max / scalar;
+		out_max[0] = in_min / scalar;
+
+		int elements = input_tensor->shape.batches * input_tensor->shape.height * input_tensor->shape.width * input_tensor->shape.depth;
+		int elements_128aligned = elements / 128;
+		elements_128aligned *= 128;
+
+		struct flipdata td = {
+				.in_data = input_data,
+				.out_data = out_data,
+				.num_elements = elements_128aligned
+		};
+		nn_sem_init(&td.donesem,0);
+		nn_os_work_for_vector(nn,flip_values,&td);
+		nn_sem_wait(&td.donesem);
+
+		for(int i = elements_128aligned; i < elements; i++) out_data[i] = 255 - input_data[i];
+	}
 
 	return 0;
 }
 
 static int div_scalar_static_minmax_execute(struct nn_node *self, struct nn_graph *nn)
 {
-	logmsg(nn,2,"div execute. self=%p ",self);
+    logmsg(nn,2,"div execute. self=%p ",self);
 
-	const struct tensor *input_tensor = self->inputs[0];
-	const struct tensor *b_tensor = self->inputs[1];
+    const struct tensor *input_tensor = self->inputs[0];
+    const struct tensor *b_tensor = self->inputs[1];
 
-	struct tensor *out_tensor = self->outputs[0];
-	struct tensor *out_min_tensor = self->outputs[1];
-	struct tensor *out_max_tensor = self->outputs[2];
+    struct tensor *out_tensor = self->outputs[0];
+    struct tensor *out_min_tensor = self->outputs[1];
+    struct tensor *out_max_tensor = self->outputs[2];
 
-	uint8_t *input_data = input_tensor->data;
-	float in_min = tensor_get_float(self->inputs[2],0);
-	float in_max = tensor_get_float(self->inputs[3],0);
-	float in_step = (in_max - in_min) / 255.f;
-	
-	uint8_t *b_data = b_tensor->data;
-	float b_min = tensor_get_float(self->inputs[4],0);
-	float b_max = tensor_get_float(self->inputs[5],0);
-	float b_step = (b_max - b_min) / 255.f;
-	
-	float static_min = tensor_get_float(self->inputs[6],0);
-	float static_max = tensor_get_float(self->inputs[7],0);
-	float static_step = (static_max - static_min) / 255.f;
+    uint8_t *input_data = input_tensor->data;
+    float in_min = tensor_get_float(self->inputs[2],0);
+    float in_max = tensor_get_float(self->inputs[3],0);
+    float in_step = (in_max - in_min) / 255.f;
 
-	uint8_t *out_data = out_tensor->data;
-	float *out_min = out_min_tensor->data;
-	float *out_max = out_max_tensor->data;
+    uint8_t *b_data = b_tensor->data;
+    float b_min = tensor_get_float(self->inputs[4],0);
+    float b_max = tensor_get_float(self->inputs[5],0);
+    float b_step = (b_max - b_min) / 255.f;
 
-	float scalar = b_min + ((float)b_data[0]) * b_step;
+    float static_min = tensor_get_float(self->inputs[6],0);
+    float static_max = tensor_get_float(self->inputs[7],0);
 
-	tensor_out_prepare_normal(out_tensor, input_tensor->shape.batches, input_tensor->shape.height, input_tensor->shape.width, input_tensor->shape.depth, NN_TYPE_QUINT8);
-	tensor_out_prepare_normal(out_min_tensor, 1, 1, 1, 1, NN_TYPE_FLOAT);
-	tensor_out_prepare_normal(out_max_tensor, 1, 1, 1, 1, NN_TYPE_FLOAT);
+    uint8_t *out_data = out_tensor->data;
+    float *out_min = out_min_tensor->data;
+    float *out_max = out_max_tensor->data;
 
-	out_min[0] = static_min;
-	out_max[0] = static_max;
-	
-	unsigned char div_lookup[256] __attribute__ ((aligned(128)));
-	
-	for(int i = 0; i < 256; i++){
-		float float_value = (in_min + ((float)i) * in_step) / scalar;
-		div_lookup[i] = (float_value - static_min)/static_step;
-	}
-	
-	int elements = input_tensor->shape.batches * input_tensor->shape.height * input_tensor->shape.width * input_tensor->shape.depth;
-	int elements_128aligned = elements / 128;
-	elements_128aligned *= 128;
-	
-	struct mapdata td = {
-			.in_data = input_data,
-			.map_data = div_lookup,
-			.out_data = out_data,
-			.num_elements = elements_128aligned
-	};
-	nn_sem_init(&td.donesem,0);
-	nn_os_work_for_vector(nn,map_values,&td);
-	nn_sem_wait(&td.donesem);
+    float scalar = b_min + ((float)b_data[0]) * b_step;
+    if(scalar == 0.f) return errlog(nn,"division by zero");
 
-	for(int i = elements_128aligned; i < elements; i++) out_data[i] = div_lookup[input_data[i]];
+    tensor_out_prepare_normal(out_tensor, input_tensor->shape.batches, input_tensor->shape.height, input_tensor->shape.width, input_tensor->shape.depth, NN_TYPE_QUINT8);
+    tensor_out_prepare_normal(out_min_tensor, 1, 1, 1, 1, NN_TYPE_FLOAT);
+    tensor_out_prepare_normal(out_max_tensor, 1, 1, 1, 1, NN_TYPE_FLOAT);
 
-	return 0;
+    out_min[0] = static_min;
+    out_max[0] = static_max;
+
+    unsigned char div_lookup[256] __attribute__ ((aligned(128)));
+
+    for(int i = 0; i < 256; i++){
+        float float_value = (in_min + ((float)i) * in_step) / scalar;
+        div_lookup[i] = quantize_uint8(float_value, static_min, static_max);
+    }
+
+    int elements = input_tensor->shape.batches * input_tensor->shape.height * input_tensor->shape.width * input_tensor->shape.depth;
+    int elements_128aligned = elements / 128;
+    elements_128aligned *= 128;
+
+    struct mapdata td = {
+            .in_data = input_data,
+            .map_data = div_lookup,
+            .out_data = out_data,
+            .num_elements = elements_128aligned
+    };
+    nn_sem_init(&td.donesem,0);
+    nn_os_work_for_vector(nn,map_values,&td);
+    nn_sem_wait(&td.donesem);
+
+    for(int i = elements_128aligned; i < elements; i++) out_data[i] = div_lookup[input_data[i]];
+
+    return 0;
 }
 
 static int div_execute(struct nn_node *self, struct nn_graph *nn){
 
-	if(self->inputs[1]->shape.depth == 1){
-		if(self->n_inputs == 6){
-			return div_scalar_execute(self, nn);
-		} else {
-			return div_scalar_static_minmax_execute(self, nn);
-		}
-	} else {
-		return div_depthwise_execute(self, nn);
-	}
+    if(self->inputs[1]->shape.depth == 1){
+        if(self->n_inputs == 6){
+            return div_scalar_execute(self, nn);
+        } else {
+            return div_scalar_static_minmax_execute(self, nn);
+        }
+    } else {
+        return div_depthwise_execute(self, nn);
+    }
 }
 
 static int div_check(struct nn_node *self, struct nn_graph *nn){
-	if(self->n_inputs != 6 && self->n_inputs != 8)
-		return errlog(nn,"must have 6 or 8 inputs");
-	if(self->inputs[1]->shape.batches != 1 
-		|| self->inputs[1]->shape.height != 1 
-		|| self->inputs[1]->shape.width != 1){
-		return errlog(nn,"op only supported for scalar and 1d tensors");
-	}
-	logmsg(nn,2,"div node %p check OK",self);
-	return 0;
+    if(self->n_inputs != 6 && self->n_inputs != 8)
+        return errlog(nn,"must have 6 or 8 inputs");
+    if(self->inputs[1]->shape.batches != 1
+       || self->inputs[1]->shape.height != 1
+       || self->inputs[1]->shape.width != 1){
+        return errlog(nn,"op only supported for scalar and 1d tensors");
+    }
+    logmsg(nn,2,"div node %p check OK",self);
+    return 0;
 }
 
 struct nn_node_ops nn_ops_for_QuantizedDiv_8 = {
-	.execute = div_execute,
-	.check = div_check,
-	.ctor = node_alloc_common,
-	.dtor = node_free_common,
-	.n_inputs = NN_IOCOUNT_RANGE(6,8),
-	.n_outputs = NN_IOCOUNT(3),
+        .execute = div_execute,
+        .check = div_check,
+        .ctor = node_alloc_common,
+        .dtor = node_free_common,
+        .n_inputs = NN_IOCOUNT_RANGE(6,8),
+        .n_outputs = NN_IOCOUNT(3),
 };
 

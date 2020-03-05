@@ -332,6 +332,21 @@ change_output_refs( struct nn_graph * nn,
 		uint32_t new_nodeid,
 		uint64_t pattern );
 
+
+//
+// Change input_refs that match old_input to new_input 
+// in all the nodes in nn graph following the node specified by begin
+// if node begin is NULL, entire graph is searched
+//
+// returns: number of replacements done, >= 0.
+//
+int
+change_single_output_ref(struct nn_graph * nn,
+                        struct nn_node * begin,                 // can specify the 'old_nodeid' node to speed things up; or NULL.
+                        struct input old_input,
+                        struct input new_input);
+
+
 //
 // this is for rewiring the consumers of a 'Split' or 'ChannelShuffle' to point at the
 // Convert_from_d32 nodes which have been attached to its outputs.

@@ -49,6 +49,13 @@ long graph_config(
 
 long get_dsp_offset(rout unsigned long libhexagon_addr, rout unsigned long fastrpc_shell_addr);
 
+long udo_register_lib(in string so_path_name, rout hexagon_nn_udo_err err);
+
+long free_udo_individual_lib(in string package_name, rout hexagon_nn_udo_err err);
+
+long free_udo_libs(rout hexagon_nn_udo_err err);
+
+
 /* Initialize a new graph, returns a new nn_id or -1 on error */
 long init(rout hexagon_nn_nn_id g);
 
@@ -69,6 +76,19 @@ long append_node(
 	in hexagon_nn_padding_type padding,
 	in sequence<hexagon_nn_input> inputs,
 	in sequence<hexagon_nn_output> outputs);
+
+
+/* Append a udo node to the graph.  Nodes are executed in the appended order. */
+long append_udo_node(
+        in hexagon_nn_nn_id id,
+        in unsigned long node_id,
+        in string package_name,
+        in string op_type,
+        in sequence<char> flattened_static_params,
+        in sequence<hexagon_nn_input> inputs,
+        in sequence<hexagon_nn_output> outputs,
+        rout hexagon_nn_udo_err err);
+
 
 /*
  * Append a const node into the graph.  The data is copied locally during this

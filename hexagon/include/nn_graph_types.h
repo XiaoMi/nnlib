@@ -130,15 +130,96 @@ struct uint_option_t {
 enum {
         NN_EXECUTE_SUCCESS         = 0,
         NN_EXECUTE_ERROR,
-        NN_EXECUTE_BUFFER_SIZE_ERROR
+        NN_EXECUTE_BUFFER_SIZE_ERROR,
+        NN_EXECUTE_UDO_ERROR,
+        NN_EXECUTE_GRAPH_NOT_FOUND,
+        NN_EXECUTE_GRAPH_NOT_PREPARED,
+        NN_EXECUTE_INPUTS_MEM_ALLOC_ERROR,
+        NN_EXECUTE_OUTPUTS_MEM_ALLOC_ERROR,
+        NN_EXECUTE_PRIORITY_UPDATE_ERROR,
+        NN_EXECUTE_PRIORITY_RESTORE_ERROR,
+        NN_EXECUTE_VTCM_ACQUIRE_ERROR,
+        NN_EXECUTE_LOOP_UPDATE_ERROR
 };
 
+enum {
+        UDO_EXE_LIB_NOT_REGISTERED_INTERNAL                   = -100,
+        UDO_EXE_INVALID_INPUTS_OUTPUTS_QUANTIZATION_TYPE_INTERNAL
+};
+
+enum {
+        UDO_EXE_OP_EXECUTE_FAILED                   = 0,
+        UDO_EXE_LIB_NOT_REGISTERED,
+        UDO_EXE_INVALID_INPUTS_OUTPUTS_QUANTIZATION_TYPE
+};
+
+typedef struct {
+        int32_t result;
+        uint32_t exe_failure_node_id;
+        uint32_t exe_failure_node_op_type;
+} execute_basic_info;
+
+
+enum {
+        UDO_SUCCESS                             = 0,
+        UDO_GRAPH_ID_NOT_FOUND,
+        UDO_GRAPH_NOT_UNDER_CONSTRUCTION,
+        UDO_NODE_ALLOCATION_FAILURE,
+        UDO_MEMORY_ALLOCATION_FAILURE,
+        UDO_INVALID_INPUTS_OUTPUTS_NUMBER,
+        UDO_INVALID_INPUTS_OUTPUTS_ELEMENT_SIZE,
+        UDO_LIB_FAILED_TO_OPEN,
+        UDO_LIB_FAILED_TO_LOAD_GET_IMP_INFO,
+        UDO_LIB_FAILED_TO_LOAD_CREATE_OP_FACTORY,
+        UDO_LIB_FAILED_TO_LOAD_CREATE_OP,
+        UDO_LIB_FAILED_TO_LOAD_EXECUTE_OP,
+        UDO_LIB_FAILED_TO_LOAD_RELEASE_OP,
+        UDO_LIB_FAILED_TO_LOAD_RELEASE_OP_FACTORY,
+        UDO_LIB_FAILED_TO_LOAD_TERMINATE_LIBRARY,
+        UDO_LIB_FAILED_TO_LOAD_GET_VERSION,
+        UDO_LIB_FAILED_TO_LOAD_QUERY_OP,
+        UDO_HEXNN_FAILED_TO_INITIALIZE_INFRASTRUCTURE,
+        UDO_LIB_FAILED_TO_INITIALIZE,
+        UDO_LIB_FAILED_TO_RETURN_INFO,
+        UDO_LIB_WRONG_CORE_TYPE,
+        UDO_LIB_FAILED_TO_QUERY_VERSION,
+        UDO_LIB_VERSION_MISMATCH,
+        UDO_LIB_ALREADY_REGISTERED,
+        UDO_LIB_NOT_REGISTERED,
+        UDO_LIB_NOT_REGISTERED_WITH_THIS_OP,
+        UDO_LIB_FAILED_TO_QUERY_OP,
+        UDO_LIB_UNSUPPORTED_QUANTIZATION_TYPE,
+        UDO_FAILED_TO_CREATE_OP_FACTORY,
+        UDO_INVALID_NODE_ID,
+        UDO_LIB_FAILED_TO_TERMINATE
+};
 
 #define MAX_STRING_L 256
 struct string_option_t {
 	uint32_t option_id;
 	char string_data[MAX_STRING_L];
 };
+
+struct udo_node_info {
+        uint32_t udo_lib_id;                // unique id to identify udo lib
+        void* udo_op_factory;               // udo op factory pointer
+        void* udo_operation;                // udo operation pointer
+        void* udo_create_operation;         // udo create operation function pointer
+        void* udo_exe;                      // udo execute function pointer
+        void* udo_release_op;               // udo release function pointer
+        void* udo_release_op_factory;       // udo release function pointer
+        void* udo_op_infra;                 // udo per op infrastructure
+        void* udo_input_tensors;            // udo input tensors
+        void* udo_input_q_types;            // udo input quantization types
+        void* udo_input_layouts;            // udo input layouts, plain or d32
+        uint32_t udo_num_input_tensors;     // udo input tensors number
+        void* udo_output_tensors;           // udo output tensors
+        void* udo_output_q_types;           // udo output quantization types
+        void* udo_output_layouts;           // udo output layouts, plain or d32
+        uint32_t udo_num_output_tensors;    // udo output tensors number
+        uint32_t udo_added_d32_converts;    // indicator of whether d32 converts have been added, 0 = not added, 1 = added
+};
+
 
 static inline int tensor_type_size(unsigned int type) {
 	switch (type) {
@@ -1084,6 +1165,7 @@ void nn_report_node_outputs( struct nn_graph * nn, int level, struct nn_node con
 //
 void hvx_argmin_or_max_in_rows( uint8_t const * data, int rows, int cols, int row_stride, int32_t * outp, int find_argmax );
 void hvx_argmin_or_max_in_cols( uint8_t const * data, int rows, int cols, int row_stride, int32_t * outp, int find_argmax );
+void hvx_argmin_or_max_d_8_d32_mt( struct tensor const * data_tensor, int32_t * outp, int find_argmax, int threads_num, int thread_id);
 void hvx_argmin_or_max_d_8_d32( struct tensor const * data_tensor, int32_t * outp, int find_argmax );
 void hvx_argmin_or_max_whb_8_d32( struct tensor const * data_tensor, int32_t * outp, int32_t  axis, int find_argmax);
 

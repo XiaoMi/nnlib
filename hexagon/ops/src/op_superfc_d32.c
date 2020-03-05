@@ -160,6 +160,7 @@ struct superfc_info {
 	int32_t max_valid_val;	// maximum value that results in a value not above max_out
 	int32_t min_valid_val;	// minimum value that results in a value not below min_out
 	float prod_level_size;	// in_level_size * filt_level_size
+        float output_level_size; // output level size
         uint8_t * out_temp_buf; // temporary output buffer aligned
 	/* Information for GEMSUMA / integral calculations */
 	uint8_t *need_initialize_suma;
@@ -463,7 +464,7 @@ static void superfc_execute_hvx_matmul(struct nn_graph *nn, void * vinfo)
         int32_t num_batches = stop_batch - start_batch;
         
 	int32_t recip_val = info->recip_val;
-	//int32_t recip_shamt = info->recip_shamt;
+	int32_t recip_shamt = info->recip_shamt;
 	int32_t weight_chunks = work->weight_chunks;
 	int32_t weight_batch_size = info->weight_batch_size;
 	int32_t out_depth_pad = info->out_depth_pad;
@@ -503,7 +504,7 @@ static void superfc_execute_hvx_matmul(struct nn_graph *nn, void * vinfo)
 			weights,
 			biasbuf,
 			in_depth,
-			0,
+			recip_shamt,
 			recip_val,
 			minmax.words,
 			stop_batch - start_batch ,
@@ -615,7 +616,8 @@ static void superfc_execute_hvx_matmul(struct nn_graph *nn, void * vinfo)
                                   recip_val, //reciprocal of max for quantization
                                   biasbuf + 32*w,
                                   work_suma_buf,
-                                  32*w
+                                  32*w,
+                                  recip_shamt
              );
              if(odd_batch) fullconnlayerbatch1_asm(
                                   work_ptr_in_batches[even_batches],
@@ -627,10 +629,10 @@ static void superfc_execute_hvx_matmul(struct nn_graph *nn, void * vinfo)
                                   recip_val, //reciprocal of max for quantization
                                   biasbuf + 32*w,
                                   work_suma_buf+even_batches,
-                                  32*w
+                                  32*w,
+                                  recip_shamt
              );
         } // end for weights
-
         //only if the output is not multiple of 32: copy from temp to output
         uint8_t *outp2 = work->output;
         if( outp2 != work->output_t)
@@ -760,21 +762,26 @@ static inline void superfc_weights(
         return superfc_add_l2fetch(self,nn,info,weights,weight_chunk_size/32,weight_chunks*32);
 }
 
-
-// Find y, the smallest power of 2 such that abs(y) >= abs(x)
-// (and y having the same sign as x).
-// x should be !=0 and not denormal.
 //
-static inline float to_next_power_of_two( float x)
+// This is like to_next_power_of_two(x), but it finds the first power of 2^(1/4) which
+// is > x, and then returns the one after that. So y/x > 1.189 but <= 1.414
+// The binary mantissa will always be one of four specific values.
+//     1.0000 1.1892 1.4142 1.6718
+//
+static inline float
+__attribute__((unused))
+round_up_quarter_octave( float x)
 {
-	// round the 32-bit code up to the next value in which the mantissa is all zero.
-	union {
-		float f;
-		uint32_t u32;
-	} uu = { x };
-	uint32_t m_mask = (1<<23)-1;
-	uu.u32 =  ( uu.u32 + m_mask ) & ~m_mask;
-	return uu.f;
+	float xk = x * 1.18920708f;
+	float mant = fabsf( flt_getfrac( xk) );		 // 0.5 .. 0.999999
+	// slice against  r/2, r^2/2, r^3/2  and round up to the one at the end of the interval.
+	if( mant >= 0.7071067691f){		/* r^2/2 */
+		mant = (mant >= 0.8408964276f) ? 1.0f: 0.8408964276f;		// r^3/2,  r^4/2, r^3/2
+	}else{
+		mant = (mant >= 0.594603539f) ? 0.7071067691f: 0.594603539f;			// r/2, r^2/2, r/2
+	}
+	float res = flt_ldexp( mant, flt_getexp(xk));
+	return copysignf( res, x);
 }
 
 int superfc_execute_workitem_check_for_retry(struct workitem *work, struct nn_node *node, struct nn_graph *nn)
@@ -784,21 +791,21 @@ int superfc_execute_workitem_check_for_retry(struct workitem *work, struct nn_no
 	float extreme_out;
 	int recalc = 0;
 	if (info->minval_precalculated && info->maxval_precalculated) return 0;
-	if (unlikely(!info->maxval_precalculated && (info->maxval > info->max_valid_val))) {
+	if (unlikely(!info->maxval_precalculated && (info->maxval > 255))) {
 		/* Mark as needing retry and set new max value */
 		info->needs_retry = 1;
-		extreme_out = info->maxval * info->prod_level_size + info->out_minval;
-		newval = to_next_power_of_two( fmaxf(extreme_out, 0x1.0p-4f));
+		extreme_out = info->output_level_size*(info->maxval + 0.5f)+ info->out_minval;
+		newval = round_up_quarter_octave( fmaxf(extreme_out, 0x1.0p-4f));
 		logmsg(nn,1,"max too small, recalculating %d > %d / %f > %f... picking %f",
 			info->maxval,info->max_valid_val,extreme_out,info->out_maxval,newval);
 		info->out_maxval = newval;
 		recalc = 1;
 	}
-	if (unlikely(!info->minval_precalculated && (info->minval < info->min_valid_val))) {
+	if (unlikely(!info->minval_precalculated && (info->minval < 0))) {
 		/* Mark as needing retry and set new min value */
 		info->needs_retry = 1;
-		extreme_out = info->minval * info->prod_level_size + info->out_minval;
-		newval = to_next_power_of_two( fminf(extreme_out, -0x1.0p-8f));
+		extreme_out = info->output_level_size*(info->minval - 0.5f)+ info->out_minval;
+		newval = round_up_quarter_octave( fminf(extreme_out, -0x1.0p-8f));
 		logmsg(nn,1,"min too large, recalculating %d < %d / %f < %f... picking %f",
 			info->minval,info->min_valid_val,extreme_out,info->out_minval,newval);
 		info->out_minval = newval;
@@ -976,6 +983,8 @@ void superfc_rearrange_and_sum_for_d32(
  *   find some combination of slices of weights and slices of activations that fits nicely.
  */
 
+
+//Fill in scaling info for superfc. TODO: Add per channel scaling support
 static int fill_info_minmax_basics(
 	struct nn_graph *nn,
 	struct nn_node *self,
@@ -984,10 +993,6 @@ static int fill_info_minmax_basics(
 	/* Pull out the inputs we need */
 	const struct tensor *min_in_tensor = self->inputs[2];
 	const struct tensor *max_in_tensor = self->inputs[3];
-	//const struct tensor *min_filt_tensor = self->inputs[4];
-	//const struct tensor *max_filt_tensor = self->inputs[5];
-	//const struct tensor *bias_min_tensor = self->inputs[6];
-	//const struct tensor *bias_max_tensor = self->inputs[7];
 
 	/* Get min/max values for input, weights, and bias data */
 	float in_min_float = tensor_get_float(min_in_tensor,0);
@@ -997,52 +1002,45 @@ static int fill_info_minmax_basics(
     if( in_min_float > 0.0f || in_max_float < 0.0f || in_min_float >= in_max_float )
         return errlog(nn, "SuperFC: invalid input min/max");
 
-    //float filt_min_float = tensor_get_float(min_filt_tensor,0);
-	//float filt_max_float = fmaxf(tensor_get_float(max_filt_tensor,0),filt_min_float+0.00001f);
-	//float bias_min_float = tensor_get_float(bias_min_tensor,0);
-	//float bias_max_float = tensor_get_float(bias_max_tensor,0);
-
 	/* find zero offset,level for each input */
 	float in_level_size;
 	int32_t input_offset = get_qu8_level_size_zero(in_min_float,in_max_float, &in_level_size);
 
-		// filter level (already compensated for any scaling done)
+	/* filter level (already compensated for any scaling done) */
 	float filt_level_size = info->weights_level_size;
-
-	//float bias_level_size = (bias_max_float - bias_min_float) / 255;
 
 	/* The product level size is the product of the input and filter level size */
 	float prod_level_size = in_level_size * filt_level_size;
 
-	/* Calculate conversion ratio from bias to product space */
-	//float bias_to_prod_ratio = (bias_level_size / prod_level_size);
-	/* What is the value of the output minimum in the product space? */
-	/* We need to add it to the products to move the smallest valid value to zero */
-	//float min_out_prod_offset = -info->out_minval / prod_level_size;
+	/* final scaling is to multiply by prod_level_size / output_level_size */
+	float output_level_size;
+    get_qu8_level_size_zero(info->out_minval,info->out_maxval, &output_level_size);
+    info->output_level_size = output_level_size;
 
-	uint64_t maxsum = fast_roundf((info->out_maxval-info->out_minval) / prod_level_size);
-	uint32_t recip_shamt = 0;
-	uint64_t recip_val_64 = 0x7F80000000ULL/maxsum;  //255 << 31
+    float final_scaling = prod_level_size / output_level_size;
+    int recip_shamt = (final_scaling <= 1.0f)? 0: flt_getexp(final_scaling);
 
-	maxsum += 1;
-
+	// find final_scaling with 31-recip_shamt frac bits now.
+	// Will be <= 0x7FFFFF80, except in border case where final_scaling = 1.0
+	//This rounding will be lossless unless final_scaling < (1/128).
+	unsigned recip_val = roundf_u32( flt_ldexp( final_scaling, (31-recip_shamt)));
+	float final_scaling_inv = output_level_size/(prod_level_size);
+        recip_val = (recip_val < 0x7fffffffu)? recip_val :0x7FFFFFFFu;
 	info->prod_level_size = prod_level_size;
-	// range of min/max which will scale without clipping (TODO: these should be padded out a bit
-	// to include range of values which will round without clipping).
-	info->min_valid_val = 0;
-	info->max_valid_val = (info->out_maxval - info->out_minval) / prod_level_size;
+
+    // find range of pre-scaled values which don't constitute overflow; allows for rounding to 0
+    // or to 255.
+	info->min_valid_val = -0.49f*final_scaling_inv;
+	info->max_valid_val = 255.49f*final_scaling_inv;
 
 	info->in_max_float = in_max_float;
 	info->in_min_float = in_min_float;
 
 	info->in_offset = input_offset;
 
-	while (recip_val_64 >= 0x80000000ULL) {
-		recip_shamt++;
-		recip_val_64 = 0x7F80000000ULL / (maxsum << recip_shamt);
-	}
-	info->recip_val = recip_val_64;
+	info->recip_val = recip_val;
 	info->recip_shamt = recip_shamt;
+
 	return 0;
 }
 
@@ -1364,9 +1362,9 @@ int superfc_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 	/* l2fetch first weight chunk */
 	    logmsg(nn,1,"adding l2fetch: %p %d %d",info->weights,weight_batch_size,inner_weight_chunks);
 	    int start_weights = ow * inner_weight_chunks;
-        work.start_chunk = start_weights;
-        int actual_odepth = min_i32( out_depth- start_weights*32,  32*inner_weight_chunks) ;
-        work.actual_odepth = actual_odepth;
+            work.start_chunk = start_weights;
+            int actual_odepth = min_i32( out_depth- start_weights*32,  32*inner_weight_chunks) ;
+            work.actual_odepth = actual_odepth;
 	    int needs_next_outer_weights = (ow != (outer_weight_chunks-1));
 
 	    int now_chunks = (actual_odepth+31)/32u;
@@ -1546,9 +1544,8 @@ static int superfc_execute_hvx(struct nn_node *self, struct nn_graph *nn)
 		} else {
 			logmsg(nn,0,"Extreme recursion detected, problem finding min/max?");
 		}
-	}else if( nodeinfo->recip_shamt > 0 ){
-		logmsg(nn,0,"final scaling is out-of-range");
 	}
+
 	nodeinfo->recursion_depth = 0;
 	tensor_set_float(out_min,0,nodeinfo->out_minval);
 	tensor_set_float(out_max,0,nodeinfo->out_maxval);
